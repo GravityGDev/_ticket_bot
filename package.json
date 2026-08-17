@@ -1,0 +1,19 @@
+{
+  "name": "render-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord bot starter built with Node.js and discord.js for Render",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/deploy-commands.js && node src/index.js",
+    "bot": "node src/index.js",
+    "deploy-commands": "node src/deploy-commands.js"
+  },
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^16.4.7"
+  }
+}

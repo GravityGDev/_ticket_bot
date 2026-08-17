@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: discord-ticket-bot
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeployTrigger: commit
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: CLIENT_ID
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: TICKET_CATEGORY_ID
+        value: "1212792701423198229"
