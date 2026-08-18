@@ -2,16 +2,79 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelSelectMenuBuilder,
   ChannelType,
   EmbedBuilder,
   MessageFlags,
+  ModalBuilder,
   PermissionFlagsBits,
+  RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 
-const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || '1212792701423198229';
 const TICKET_NAME_PREFIX = 'ticket-';
 const ROLE_PAGE_SIZE = 25;
+const CONFIG_CHANNEL_NAME = 'ticket-bot-config';
+const CONFIG_PREFIX = 'ticket-config:v1';
+
+const TICKET_TYPES = {
+  bug_report: {
+    label: 'Bug report',
+    slug: 'bug-report',
+    emoji: '🐛',
+    requiresInGameId: false,
+  },
+  cheating_report: {
+    label: 'Cheating report',
+    slug: 'cheating-report',
+    emoji: '🚨',
+    requiresInGameId: false,
+  },
+  booster_claim: {
+    label: 'Booster claim',
+    slug: 'booster-claim',
+    emoji: '💎',
+    requiresInGameId: true,
+  },
+  youtuber_submission: {
+    label: 'Youtuber submission',
+    slug: 'youtuber-submission',
+    emoji: '▶️',
+    requiresInGameId: true,
+  },
+  clan_refund: {
+    label: 'Clan skin/badge refund',
+    slug: 'clan-refund',
+    emoji: '🎨',
+    requiresInGameId: true,
+  },
+  account_issues: {
+    label: 'Account issues',
+    slug: 'account-issues',
+    emoji: '👤',
+    requiresInGameId: true,
+  },
+  payment_issues: {
+    label: 'Payment Issues',
+    slug: 'payment-issues',
+    emoji: '💳',
+    requiresInGameId: true,
+  },
+};
+
+const YOUTUBE_RANGES = {
+  '50_100': { label: '50-100', min: 50, max: 100 },
+  '100_150': { label: '100-150', min: 100, max: 150 },
+  '150_200': { label: '150-200', min: 150, max: 200 },
+  '200_250': { label: '200-250', min: 200, max: 250 },
+  '250_300': { label: '250-300', min: 250, max: 300 },
+  '300_350': { label: '300-350', min: 300, max: 350 },
+  '350_400': { label: '350-400', min: 350, max: 400 },
+  '450_500': { label: '450-500', min: 450, max: 500 },
+  '500_plus': { label: '500+', min: 500, max: Number.POSITIVE_INFINITY },
+};
 
 // Prevent two button presses at the same moment from receiving the same ticket number.
 const ticketCreationQueues = new Map();
@@ -42,7 +105,7 @@ function buildPanelMessage() {
     .setColor(0x5865f2)
     .setTitle('Support Tickets')
     .setDescription(
-      'Need help? Press **Create Ticket** below and I will create a private support channel for you.',
+      'Need help? Press **Create Ticket** below, choose what you need help with, and I will create a private support channel for you.',
     )
     .setFooter({ text: 'Support Ticket System' });
 
@@ -57,31 +120,496 @@ function buildPanelMessage() {
   return { embeds: [embed], components: [row] };
 }
 
-function buildTicketWelcome(ticketNumber, creator) {
+function buildTicketTypeMenu() {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('ticket_create_type')
+    .setPlaceholder('What do you need help with?')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(
+      Object.entries(TICKET_TYPES).map(([value, type]) => ({
+        label: type.label,
+        value,
+        emoji: type.emoji,
+      })),
+    );
+
+  return {
+    content: '**Create a ticket**\nSelect the type of ticket you want to open.',
+    components: [new ActionRowBuilder().addComponents(menu)],
+    flags: MessageFlags.Ephemeral,
+  };
+}
+
+function buildYouTubeSubscriberMenu(creatorId) {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`ticket_youtube_range:${creatorId}`)
+    .setPlaceholder('How many subscribers do you have?')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(
+      Object.entries(YOUTUBE_RANGES).map(([value, range]) => ({
+        label: range.label,
+        value,
+      })),
+    );
+
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+function getTypeInstructions(typeKey) {
+  switch (typeKey) {
+    case 'bug_report':
+      return [
+        '**Please describe the bug in as much detail as possible.**',
+        'Include what you were doing, what you expected to happen, what actually happened, and your device/platform if relevant.',
+        '**Please attach proof** such as screenshots or a video whenever possible.',
+      ].join('\n');
+    case 'cheating_report':
+      return [
+        '**Please provide details about the cheating report.**',
+        'Include the player username/ID, what you saw, when it happened, and the server/mode if known.',
+        '**Proof is required where possible** — attach screenshots or video evidence.',
+      ].join('\n');
+    case 'booster_claim':
+      return [
+        '**Booster claim**',
+        'Before you can type in this ticket, press **Submit In-game ID** below and enter your in-game user ID.',
+        'Once submitted, staff can continue with your booster claim.',
+      ].join('\n');
+    case 'youtuber_submission':
+      return [
+        '**YouTuber submission**',
+        '1. Submit your **in-game user ID** using the button below.',
+        '2. Select your subscriber range from the menu below.',
+        '3. A form will open asking for your YouTube channel link.',
+        'You cannot type in this ticket until the required submission steps are complete.',
+      ].join('\n');
+    case 'clan_refund':
+      return [
+        '**Clan skin/badge refund**',
+        'First submit your **in-game user ID** below.',
+        'After that, send screenshots showing the clan skins or badges you want refunded and say which items you are requesting a refund for.',
+      ].join('\n');
+    case 'account_issues':
+      return [
+        '**Account issue**',
+        'First submit your **in-game user ID** below.',
+        'Once unlocked, explain exactly what is wrong with your account and include screenshots if they help.',
+      ].join('\n');
+    case 'payment_issues':
+      return [
+        '**Payment issue**',
+        'First submit your **in-game user ID** below.',
+        'Once unlocked, explain the payment problem and provide any relevant receipt/order reference or screenshots.',
+        '**Do not post full card numbers, passwords, or other sensitive payment details.**',
+      ].join('\n');
+    default:
+      return 'Support will be with you shortly.';
+  }
+}
+
+function buildTicketWelcome(ticketNumber, creator, typeKey) {
+  const type = TICKET_TYPES[typeKey] || { label: 'Support', emoji: '🎫' };
   const embed = new EmbedBuilder()
     .setColor(0x00d166)
-    .setDescription(
-      'Support will be with you shortly.\nTo close this ticket use the 🔒 **Close** button below.',
-    )
+    .setTitle(`${type.emoji || '🎫'} ${type.label}`)
+    .setDescription(`${getTypeInstructions(typeKey)}\n\nTo close this ticket use the 🔒 **Close** button below.`)
     .setFooter({
       text: `Ticket #${ticketNumber} • Created by ${creator.username}`,
       iconURL: creator.displayAvatarURL(),
     });
 
+  const components = [getTicketButtons()];
+
+  if (TICKET_TYPES[typeKey]?.requiresInGameId) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`ticket_ingame_id:${creator.id}`)
+          .setLabel('Submit In-game ID')
+          .setEmoji('🆔')
+          .setStyle(ButtonStyle.Primary),
+      ),
+    );
+  }
+
+  if (typeKey === 'youtuber_submission') {
+    components.push(buildYouTubeSubscriberMenu(creator.id));
+  }
+
   return {
     content: `<@${creator.id}> Welcome`,
     embeds: [embed],
-    components: [getTicketButtons()],
+    components,
     allowedMentions: { users: [creator.id] },
   };
 }
 
-function makeTicketTopic(ticketNumber, creatorId, claimedById = null) {
+function encodeConfig(categoryId, roleIds) {
+  return `${CONFIG_PREFIX}|category=${categoryId}|roles=${roleIds.join(',')}`;
+}
+
+function parseConfigTopic(topic) {
+  if (!topic || !topic.startsWith(CONFIG_PREFIX)) return null;
+
+  const categoryMatch = topic.match(/(?:^|\|)category=(\d+)/);
+  const rolesMatch = topic.match(/(?:^|\|)roles=([\d,]*)/);
+
+  if (!categoryMatch) return null;
+
+  const roleIds = rolesMatch && rolesMatch[1]
+    ? rolesMatch[1].split(',').filter(Boolean)
+    : [];
+
+  return {
+    categoryId: categoryMatch[1],
+    roleIds: [...new Set(roleIds)],
+  };
+}
+
+async function getGuildConfig(guild) {
+  if (!guild) return null;
+
+  await guild.channels.fetch().catch(() => null);
+
+  const configChannel = guild.channels.cache.find(
+    (channel) =>
+      channel.type === ChannelType.GuildText &&
+      typeof channel.topic === 'string' &&
+      channel.topic.startsWith(CONFIG_PREFIX),
+  );
+
+  if (!configChannel) return null;
+
+  const config = parseConfigTopic(configChannel.topic);
+  if (!config) return null;
+
+  const category = await guild.channels.fetch(config.categoryId).catch(() => null);
+  if (!category || category.type !== ChannelType.GuildCategory) return null;
+
+  return {
+    ...config,
+    configChannelId: configChannel.id,
+  };
+}
+
+function hasSetupPermission(member) {
+  return Boolean(
+    member?.permissions.has(PermissionFlagsBits.Administrator) ||
+      member?.permissions.has(PermissionFlagsBits.ManageChannels),
+  );
+}
+
+function canActorGiveRole(guild, actor, role) {
+  if (!actor?.permissions.has(PermissionFlagsBits.ManageRoles)) return false;
+  if (guild.ownerId === actor.id) return true;
+  return actor.roles.highest.comparePositionTo(role) > 0;
+}
+
+function canBotGiveRole(botMember, role) {
+  if (!botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) return false;
+  return botMember.roles.highest.comparePositionTo(role) > 0;
+}
+
+async function saveGuildConfig(guild, category, roleIds, actor) {
+  const botMember = guild.members.me || (await guild.members.fetchMe());
+  const topic = encodeConfig(category.id, roleIds);
+
+  let configChannel = guild.channels.cache.find(
+    (channel) =>
+      channel.type === ChannelType.GuildText &&
+      typeof channel.topic === 'string' &&
+      channel.topic.startsWith(CONFIG_PREFIX),
+  );
+
+  const configPermissions = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionFlagsBits.ViewChannel],
+    },
+    {
+      id: botMember.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.ManageChannels,
+      ],
+    },
+  ];
+
+  if (!configChannel) {
+    configChannel = await guild.channels.create({
+      name: CONFIG_CHANNEL_NAME,
+      type: ChannelType.GuildText,
+      parent: category.id,
+      topic,
+      permissionOverwrites: configPermissions,
+      reason: `Ticket system configured by ${actor.user.tag}`,
+    });
+  } else {
+    if (configChannel.parentId !== category.id) {
+      await configChannel.setParent(category.id, {
+        lockPermissions: false,
+        reason: `Ticket category changed by ${actor.user.tag}`,
+      });
+    }
+
+    await configChannel.permissionOverwrites.set(
+      configPermissions,
+      `Ticket config permissions updated by ${actor.user.tag}`,
+    );
+    await configChannel.setTopic(topic, `Ticket system configured by ${actor.user.tag}`);
+  }
+
+  return configChannel;
+}
+
+function buildCategorySetupMessage(panelChannelId) {
+  const menu = new ChannelSelectMenuBuilder()
+    .setCustomId(`ticket_setup_category:${panelChannelId}`)
+    .setPlaceholder('Select the ticket category')
+    .setChannelTypes(ChannelType.GuildCategory)
+    .setMinValues(1)
+    .setMaxValues(1);
+
+  return {
+    content:
+      '**Ticket setup — Step 1 of 2**\nSelect the category where new ticket channels should be created.',
+    components: [new ActionRowBuilder().addComponents(menu)],
+    flags: MessageFlags.Ephemeral,
+  };
+}
+
+function buildRoleSetupMessage(categoryId, panelChannelId) {
+  const menu = new RoleSelectMenuBuilder()
+    .setCustomId(`ticket_setup_roles:${categoryId}:${panelChannelId}`)
+    .setPlaceholder('Select the roles staff may give in tickets')
+    .setMinValues(1)
+    .setMaxValues(25);
+
+  return {
+    content:
+      '**Ticket setup — Step 2 of 2**\nSelect every role that should be available from the **Role** button inside tickets. You can select multiple roles.',
+    components: [new ActionRowBuilder().addComponents(menu)],
+  };
+}
+
+async function sendPanelAsNewMessage(channel) {
+  if (!channel?.isTextBased() || typeof channel.send !== 'function') {
+    throw new Error('Panel target is not a sendable text channel.');
+  }
+
+  return channel.send(buildPanelMessage());
+}
+
+async function sendTicketPanelCommand(interaction, forceSetup = false) {
+  const guild = interaction.guild;
+  const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+
+  if (!hasSetupPermission(member)) {
+    await interaction.reply({
+      content: 'You need **Manage Channels** to use this command.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const config = forceSetup ? null : await getGuildConfig(guild);
+
+  if (!config) {
+    await interaction.reply(buildCategorySetupMessage(interaction.channelId));
+    return;
+  }
+
+  try {
+    await sendPanelAsNewMessage(interaction.channel);
+    await interaction.reply({
+      content: `✅ Ticket panel sent as a new message in <#${interaction.channelId}>.`,
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    console.error('[TICKET PANEL SEND ERROR]', error);
+    await interaction.reply({
+      content: 'I could not send the ticket panel in this channel. Check my **Send Messages** and **Embed Links** permissions.',
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}
+
+async function handleSetupCategory(interaction) {
+  const [, panelChannelId] = interaction.customId.split(':');
+  const guild = interaction.guild;
+  const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+
+  if (!hasSetupPermission(member)) {
+    await interaction.reply({
+      content: 'You need **Manage Channels** to configure tickets.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!member.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    await interaction.reply({
+      content: 'You also need **Manage Roles** to choose which roles can be given from tickets.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const categoryId = interaction.values[0];
+  const category = await guild.channels.fetch(categoryId).catch(() => null);
+
+  if (!category || category.type !== ChannelType.GuildCategory) {
+    await interaction.update({
+      content: 'That category no longer exists. Run `/ticket-panel` again.',
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.update(buildRoleSetupMessage(categoryId, panelChannelId));
+}
+
+async function handleSetupRoles(interaction) {
+  const [, categoryId, panelChannelId] = interaction.customId.split(':');
+  const guild = interaction.guild;
+  const actor = await guild.members.fetch(interaction.user.id).catch(() => null);
+
+  if (!hasSetupPermission(actor) || !actor.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    await interaction.reply({
+      content: 'You need **Manage Channels** and **Manage Roles** to finish ticket setup.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const category = await guild.channels.fetch(categoryId).catch(() => null);
+  if (!category || category.type !== ChannelType.GuildCategory) {
+    await interaction.update({
+      content: 'The selected category no longer exists. Run `/ticket-panel` again.',
+      components: [],
+    });
+    return;
+  }
+
+  const botMember = guild.members.me || (await guild.members.fetchMe());
+
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
+    await interaction.update({
+      content: 'I need **Manage Channels** before I can save the ticket setup.',
+      components: [],
+    });
+    return;
+  }
+
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    await interaction.update({
+      content: 'I need **Manage Roles** before roles can be assigned from tickets.',
+      components: [],
+    });
+    return;
+  }
+
+  const selectedRoleIds = [...new Set(interaction.values)];
+  const validRoleIds = [];
+  const ignoredRoleNames = [];
+
+  for (const roleId of selectedRoleIds) {
+    const role = guild.roles.cache.get(roleId) || (await guild.roles.fetch(roleId).catch(() => null));
+
+    const valid =
+      role &&
+      role.id !== guild.roles.everyone.id &&
+      !role.managed &&
+      canActorGiveRole(guild, actor, role) &&
+      canBotGiveRole(botMember, role);
+
+    if (valid) validRoleIds.push(role.id);
+    else if (role) ignoredRoleNames.push(role.name);
+  }
+
+  if (!validRoleIds.length) {
+    await interaction.update({
+      content:
+        'None of those roles can be assigned by both you and the bot. Make sure the bot role is above the roles you want to give, then run `/ticket-panel` again.',
+      components: [],
+    });
+    return;
+  }
+
+  try {
+    await saveGuildConfig(guild, category, validRoleIds, actor);
+  } catch (error) {
+    console.error('[TICKET CONFIG SAVE ERROR]', error);
+    await interaction.update({
+      content: 'I could not save the ticket configuration. Check my **Manage Channels** permission.',
+      components: [],
+    });
+    return;
+  }
+
+  const panelChannel = await guild.channels.fetch(panelChannelId).catch(() => null);
+  if (!panelChannel?.isTextBased() || typeof panelChannel.send !== 'function') {
+    await interaction.update({
+      content: '✅ Setup saved, but the channel where `/ticket-panel` was used is no longer available.',
+      components: [],
+    });
+    return;
+  }
+
+  try {
+    await sendPanelAsNewMessage(panelChannel);
+  } catch (error) {
+    console.error('[TICKET PANEL SEND ERROR]', error);
+    await interaction.update({
+      content:
+        '✅ Setup saved, but I could not send the panel. Check my **Send Messages** and **Embed Links** permissions in the panel channel.',
+      components: [],
+    });
+    return;
+  }
+
+  const roleMentions = validRoleIds.map((id) => `<@&${id}>`).join(', ');
+  const ignoredText = ignoredRoleNames.length
+    ? `\nIgnored roles I cannot assign: ${ignoredRoleNames.map((name) => `**${name}**`).join(', ')}`
+    : '';
+
+  await interaction.update({
+    content:
+      `✅ **Ticket setup complete.**\n` +
+      `Ticket category: <#${category.id}>\n` +
+      `Allowed ticket roles: ${roleMentions}\n` +
+      `The ticket panel was sent as a new message in <#${panelChannel.id}>.${ignoredText}`,
+    components: [],
+    allowedMentions: { parse: [] },
+  });
+}
+
+function initialSubmissionState(typeKey) {
+  return {
+    inGameIdStatus: TICKET_TYPES[typeKey]?.requiresInGameId ? 'pending' : 'na',
+    youtubeStatus: typeKey === 'youtuber_submission' ? 'pending' : 'na',
+  };
+}
+
+function makeTicketTopic(ticketNumber, typeKey, creatorId, claimedById = null, state = null) {
+  const submission = state || initialSubmissionState(typeKey);
   const claimText = claimedById
     ? `Ticket claimed by <@${claimedById}>`
     : 'Unclaimed';
 
-  return `Ticket #${ticketNumber} | Created by <@${creatorId}> | ${claimText}`;
+  return [
+    `Ticket #${ticketNumber}`,
+    `Type=${typeKey}`,
+    `Created by <@${creatorId}>`,
+    `IG=${submission.inGameIdStatus}`,
+    `YT=${submission.youtubeStatus}`,
+    claimText,
+  ].join(' | ');
 }
 
 function getTicketData(channel) {
@@ -90,16 +618,40 @@ function getTicketData(channel) {
 
   const topic = channel.topic || '';
   const numberMatch = topic.match(/Ticket #(\d+)/i);
+  const typeMatch = topic.match(/(?:^|\|)\s*Type=([a-z_]+)/i);
   const creatorMatch = topic.match(/Created by <@!?(\d+)>/i);
+  const igMatch = topic.match(/(?:^|\|)\s*IG=(pending|done|na)/i);
+  const ytMatch = topic.match(/(?:^|\|)\s*YT=(pending|done|na)/i);
   const claimedMatch = topic.match(/Ticket claimed by <@!?(\d+)>/i);
 
   if (!creatorMatch) return null;
 
+  const typeKey = typeMatch?.[1] || 'bug_report';
+  const fallbackState = initialSubmissionState(typeKey);
+
   return {
     number: numberMatch ? Number(numberMatch[1]) : null,
+    typeKey,
     creatorId: creatorMatch[1],
+    inGameIdStatus: igMatch?.[1]?.toLowerCase() || fallbackState.inGameIdStatus,
+    youtubeStatus: ytMatch?.[1]?.toLowerCase() || fallbackState.youtubeStatus,
     claimedById: claimedMatch ? claimedMatch[1] : null,
   };
+}
+
+async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket data updated') {
+  const next = { ...data, ...patch };
+  await channel.setTopic(
+    makeTicketTopic(
+      next.number,
+      next.typeKey,
+      next.creatorId,
+      next.claimedById,
+      next,
+    ),
+    reason,
+  );
+  return next;
 }
 
 async function runTicketCreationQueued(guildId, task) {
@@ -123,37 +675,36 @@ async function runTicketCreationQueued(guildId, task) {
   }
 }
 
-function getNextTicketNumber(guild) {
-  let highest = runtimeHighestTicketNumber.get(guild.id) || 0;
+function getNextTicketNumber(guild, categoryId) {
+  const key = `${guild.id}:${categoryId}`;
+  let highest = runtimeHighestTicketNumber.get(key) || 0;
 
   for (const channel of guild.channels.cache.values()) {
-    if (channel.parentId !== TICKET_CATEGORY_ID) continue;
+    if (channel.parentId !== categoryId) continue;
 
-    const match = channel.name.match(/^ticket-(\d+)$/i);
+    const match = channel.name.match(/^ticket-(\d+)(?:_|$)/i);
     if (!match) continue;
 
     highest = Math.max(highest, Number(match[1]));
   }
 
   const next = highest + 1;
-  runtimeHighestTicketNumber.set(guild.id, next);
+  runtimeHighestTicketNumber.set(key, next);
   return next;
 }
 
 function mergeOverwrite(map, id, type, allowBits = 0n, denyBits = 0n) {
   const existing = map.get(id) || { id, type, allow: 0n, deny: 0n };
 
-  // A permission cannot be both explicitly allowed and denied in one overwrite.
   existing.allow = (existing.allow | allowBits) & ~denyBits;
   existing.deny = (existing.deny | denyBits) & ~allowBits;
 
   map.set(id, existing);
 }
 
-function buildTicketPermissionOverwrites(guild, category, creatorId, botId) {
+function buildTicketPermissionOverwrites(guild, category, creatorId, botId, creatorCanSend) {
   const overwriteMap = new Map();
 
-  // Preserve whatever support-role permissions are already configured on the category.
   for (const overwrite of category.permissionOverwrites.cache.values()) {
     overwriteMap.set(overwrite.id, {
       id: overwrite.id,
@@ -171,22 +722,27 @@ function buildTicketPermissionOverwrites(guild, category, creatorId, botId) {
     PermissionFlagsBits.ViewChannel,
   );
 
-  const ticketMemberPermissions =
+  const baseTicketMemberPermissions =
     PermissionFlagsBits.ViewChannel |
-    PermissionFlagsBits.SendMessages |
     PermissionFlagsBits.ReadMessageHistory |
     PermissionFlagsBits.AttachFiles |
     PermissionFlagsBits.EmbedLinks;
 
-  mergeOverwrite(overwriteMap, creatorId, 1, ticketMemberPermissions, 0n);
+  const creatorAllow = creatorCanSend
+    ? baseTicketMemberPermissions | PermissionFlagsBits.SendMessages
+    : baseTicketMemberPermissions;
+  const creatorDeny = creatorCanSend ? 0n : PermissionFlagsBits.SendMessages;
+
+  mergeOverwrite(overwriteMap, creatorId, 1, creatorAllow, creatorDeny);
 
   const botPermissions =
-    ticketMemberPermissions |
+    baseTicketMemberPermissions |
+    PermissionFlagsBits.SendMessages |
     PermissionFlagsBits.ManageChannels |
     PermissionFlagsBits.ManageMessages;
   mergeOverwrite(overwriteMap, botId, 1, botPermissions, 0n);
 
-  // Staff with either permission need to be able to see the buttons they are allowed to use.
+  const staffPermissions = baseTicketMemberPermissions | PermissionFlagsBits.SendMessages;
   for (const role of guild.roles.cache.values()) {
     if (role.id === guild.roles.everyone.id) continue;
     if (
@@ -197,71 +753,118 @@ function buildTicketPermissionOverwrites(guild, category, creatorId, botId) {
       continue;
     }
 
-    mergeOverwrite(overwriteMap, role.id, 0, ticketMemberPermissions, 0n);
+    mergeOverwrite(overwriteMap, role.id, 0, staffPermissions, 0n);
   }
 
   return [...overwriteMap.values()];
 }
 
-async function createTicket(interaction) {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+function shouldCreatorBeUnlocked(data) {
+  if (!TICKET_TYPES[data.typeKey]?.requiresInGameId) return true;
+  if (data.inGameIdStatus !== 'done') return false;
+  if (data.typeKey === 'youtuber_submission' && data.youtubeStatus !== 'done') return false;
+  return true;
+}
+
+async function setCreatorTyping(channel, creatorId, enabled, reason) {
+  await channel.permissionOverwrites.edit(
+    creatorId,
+    {
+      ViewChannel: true,
+      ReadMessageHistory: true,
+      AttachFiles: true,
+      EmbedLinks: true,
+      SendMessages: enabled,
+    },
+    reason,
+  );
+}
+
+async function createTicket(interaction, typeKey) {
+  if (!TICKET_TYPES[typeKey]) {
+    await interaction.reply({
+      content: 'That ticket type is no longer available. Please try again.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
 
   const guild = interaction.guild;
   if (!guild) {
-    await interaction.editReply('Tickets can only be created inside a server.');
+    await interaction.editReply({ content: 'Tickets can only be created inside a server.', components: [] });
+    return;
+  }
+
+  const config = await getGuildConfig(guild);
+  if (!config) {
+    await interaction.editReply({
+      content: 'The ticket system has not been configured yet. A staff member needs to run `/ticket-panel` first.',
+      components: [],
+    });
     return;
   }
 
   await runTicketCreationQueued(guild.id, async () => {
-    const category = await guild.channels.fetch(TICKET_CATEGORY_ID).catch(() => null);
+    const category = await guild.channels.fetch(config.categoryId).catch(() => null);
 
     if (!category || category.type !== ChannelType.GuildCategory) {
-      await interaction.editReply(
-        `I could not find the ticket category \`${TICKET_CATEGORY_ID}\`.`,
-      );
+      await interaction.editReply({
+        content: 'The configured ticket category no longer exists. Staff need to run `/ticket-panel reconfigure:true`.',
+        components: [],
+      });
       return;
     }
 
     const botMember = guild.members.me || (await guild.members.fetchMe());
     if (!botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
-      await interaction.editReply('I need the **Manage Channels** permission to create tickets.');
+      await interaction.editReply({
+        content: 'I need the **Manage Channels** permission to create tickets.',
+        components: [],
+      });
       return;
     }
 
-    const ticketNumber = getNextTicketNumber(guild);
+    const ticketNumber = getNextTicketNumber(guild, category.id);
+    const state = initialSubmissionState(typeKey);
+    const creatorCanSend = shouldCreatorBeUnlocked({ typeKey, ...state });
     const permissionOverwrites = buildTicketPermissionOverwrites(
       guild,
       category,
       interaction.user.id,
       botMember.id,
+      creatorCanSend,
     );
 
     let channel;
     try {
       channel = await guild.channels.create({
-        name: `${TICKET_NAME_PREFIX}${ticketNumber}`,
+        name: `${TICKET_NAME_PREFIX}${ticketNumber}_${TICKET_TYPES[typeKey].slug}`,
         type: ChannelType.GuildText,
         parent: category.id,
-        topic: makeTicketTopic(ticketNumber, interaction.user.id),
+        topic: makeTicketTopic(ticketNumber, typeKey, interaction.user.id, null, state),
         permissionOverwrites,
-        reason: `Ticket #${ticketNumber} created by ${interaction.user.tag}`,
+        reason: `Ticket #${ticketNumber} (${TICKET_TYPES[typeKey].label}) created by ${interaction.user.tag}`,
       });
     } catch (error) {
       console.error('[TICKET CREATE ERROR]', error);
-      await interaction.editReply(
-        'I could not create your ticket. Check my channel and permission settings.',
-      );
+      await interaction.editReply({
+        content: 'I could not create your ticket. Check my channel and permission settings.',
+        components: [],
+      });
       return;
     }
 
     try {
-      await channel.send(buildTicketWelcome(ticketNumber, interaction.user));
+      await channel.send(buildTicketWelcome(ticketNumber, interaction.user, typeKey));
     } catch (error) {
       console.error('[TICKET WELCOME ERROR]', error);
     }
 
     await interaction.editReply({
-      content: `✅ Your ticket has been created: <#${channel.id}>`,
+      content: `✅ Your **${TICKET_TYPES[typeKey].label}** ticket has been created: <#${channel.id}>`,
+      components: [],
       allowedMentions: { parse: [] },
     });
   });
@@ -333,11 +936,11 @@ async function claimTicket(interaction) {
     return;
   }
 
-  const ticketNumber = data.number ?? Number(interaction.channel.name.replace(TICKET_NAME_PREFIX, ''));
-
   try {
-    await interaction.channel.setTopic(
-      makeTicketTopic(ticketNumber, data.creatorId, interaction.user.id),
+    await updateTicketTopic(
+      interaction.channel,
+      data,
+      { claimedById: interaction.user.id },
       `Ticket claimed by ${interaction.user.tag}`,
     );
   } catch (error) {
@@ -355,6 +958,435 @@ async function claimTicket(interaction) {
   });
 }
 
+function sanitizeCodeBlock(value) {
+  return String(value).replace(/```/g, '``\u200b`').trim();
+}
+
+async function sendAndPinInGameId(channel, creatorId, inGameId) {
+  const message = await channel.send({
+    content: `**In-game User ID — <@${creatorId}>**\n\`\`\`\n${sanitizeCodeBlock(inGameId)}\n\`\`\``,
+    allowedMentions: { parse: [] },
+  });
+
+  await message.pin('In-game user ID submitted for ticket').catch((error) => {
+    console.error('[TICKET PIN ID ERROR]', error);
+  });
+
+  return message;
+}
+
+async function openInGameIdModal(interaction) {
+  const [, creatorId] = interaction.customId.split(':');
+  const data = getTicketData(interaction.channel);
+
+  if (!data || data.creatorId !== creatorId || interaction.user.id !== creatorId) {
+    await interaction.reply({
+      content: 'Only the user who created this ticket can submit the in-game ID.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!TICKET_TYPES[data.typeKey]?.requiresInGameId) {
+    await interaction.reply({
+      content: 'This ticket does not require an in-game ID.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.inGameIdStatus === 'done') {
+    await interaction.reply({
+      content: 'Your in-game ID has already been submitted.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_ingame_id_modal:${creatorId}`)
+    .setTitle('Submit In-game ID');
+
+  const input = new TextInputBuilder()
+    .setCustomId('ingame_id')
+    .setLabel('In-game user ID')
+    .setPlaceholder('Enter your in-game user ID')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(1)
+    .setMaxLength(100);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  await interaction.showModal(modal);
+}
+
+async function handleInGameIdModal(interaction) {
+  const [, creatorId] = interaction.customId.split(':');
+  const data = getTicketData(interaction.channel);
+
+  if (!data || data.creatorId !== creatorId || interaction.user.id !== creatorId) {
+    await interaction.reply({
+      content: 'This form is no longer valid for this ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.inGameIdStatus === 'done') {
+    await interaction.reply({
+      content: 'Your in-game ID has already been submitted.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const inGameId = interaction.fields.getTextInputValue('ingame_id').trim();
+  if (!inGameId) {
+    await interaction.reply({
+      content: 'Please enter a valid in-game user ID.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  try {
+    await sendAndPinInGameId(interaction.channel, creatorId, inGameId);
+    const nextData = await updateTicketTopic(
+      interaction.channel,
+      data,
+      { inGameIdStatus: 'done' },
+      `In-game ID submitted by ${interaction.user.tag}`,
+    );
+
+    if (shouldCreatorBeUnlocked(nextData)) {
+      await setCreatorTyping(
+        interaction.channel,
+        creatorId,
+        true,
+        `Ticket requirements completed by ${interaction.user.tag}`,
+      );
+      await interaction.channel.send({
+        content: `<@${creatorId}> ✅ Your required details are submitted. You can now type in this ticket.`,
+        allowedMentions: { users: [creatorId] },
+      });
+    } else if (data.typeKey === 'youtuber_submission') {
+      await interaction.channel.send({
+        content: `<@${creatorId}> ✅ In-game ID received. Now choose your subscriber range and submit your YouTube channel link.`,
+        allowedMentions: { users: [creatorId] },
+      });
+    }
+
+    await interaction.editReply('✅ Your in-game ID has been submitted and pinned for staff.');
+  } catch (error) {
+    console.error('[TICKET IN-GAME ID ERROR]', error);
+    await interaction.editReply('I could not save your in-game ID. Please try again or wait for staff.');
+  }
+}
+
+async function openYouTubeLinkModal(interaction) {
+  const [, creatorId] = interaction.customId.split(':');
+  const rangeKey = interaction.values[0];
+  const data = getTicketData(interaction.channel);
+
+  if (!data || data.typeKey !== 'youtuber_submission' || data.creatorId !== creatorId) {
+    await interaction.reply({
+      content: 'This YouTube menu is no longer valid for this ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.user.id !== creatorId) {
+    await interaction.reply({
+      content: 'Only the user who created this ticket can submit the YouTube channel.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.youtubeStatus === 'done') {
+    await interaction.reply({
+      content: 'Your YouTube submission has already been sent.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (!YOUTUBE_RANGES[rangeKey]) {
+    await interaction.reply({
+      content: 'That subscriber range is no longer valid. Please try again.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_youtube_link:${creatorId}:${rangeKey}`)
+    .setTitle('YouTube Channel Submission');
+
+  const linkInput = new TextInputBuilder()
+    .setCustomId('youtube_link')
+    .setLabel('YouTube channel link')
+    .setPlaceholder('https://youtube.com/@yourchannel')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(5)
+    .setMaxLength(300);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(linkInput));
+  await interaction.showModal(modal);
+}
+
+function parseYouTubeIdentifier(rawInput) {
+  const input = String(rawInput).trim();
+
+  if (/^UC[\w-]{20,}$/i.test(input)) {
+    return { kind: 'id', value: input };
+  }
+
+  if (/^@[\w.-]+$/i.test(input)) {
+    return { kind: 'handle', value: input };
+  }
+
+  let url;
+  try {
+    url = new URL(input.startsWith('http') ? input : `https://${input}`);
+  } catch {
+    return null;
+  }
+
+  const host = url.hostname.replace(/^www\./, '').toLowerCase();
+  if (!['youtube.com', 'm.youtube.com'].includes(host)) return null;
+
+  const parts = url.pathname.split('/').filter(Boolean);
+  if (!parts.length) return null;
+
+  if (parts[0] === 'channel' && parts[1]) return { kind: 'id', value: parts[1] };
+  if (parts[0].startsWith('@')) return { kind: 'handle', value: parts[0] };
+  if (parts[0] === 'user' && parts[1]) return { kind: 'username', value: parts[1] };
+  if (parts[0] === 'c' && parts[1]) return { kind: 'search', value: parts[1] };
+
+  return null;
+}
+
+async function youtubeApiGet(path, params, apiKey) {
+  const url = new URL(`https://www.googleapis.com/youtube/v3/${path}`);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+  }
+  url.searchParams.set('key', apiKey);
+
+  const response = await fetch(url);
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message = body?.error?.message || `YouTube API returned HTTP ${response.status}`;
+    throw new Error(message);
+  }
+
+  return body;
+}
+
+async function fetchYouTubeChannelById(channelId, apiKey) {
+  const body = await youtubeApiGet(
+    'channels',
+    { part: 'snippet,statistics', id: channelId, maxResults: 1 },
+    apiKey,
+  );
+  return body.items?.[0] || null;
+}
+
+async function resolveYouTubeChannel(rawInput, apiKey) {
+  if (!apiKey) return { status: 'no_api_key' };
+
+  const identifier = parseYouTubeIdentifier(rawInput);
+  if (!identifier) return { status: 'invalid_link' };
+
+  let item = null;
+
+  if (identifier.kind === 'id') {
+    item = await fetchYouTubeChannelById(identifier.value, apiKey);
+  } else if (identifier.kind === 'handle' || identifier.kind === 'username') {
+    const filterName = identifier.kind === 'handle' ? 'forHandle' : 'forUsername';
+    const body = await youtubeApiGet(
+      'channels',
+      { part: 'snippet,statistics', [filterName]: identifier.value, maxResults: 1 },
+      apiKey,
+    );
+    item = body.items?.[0] || null;
+  } else if (identifier.kind === 'search') {
+    const search = await youtubeApiGet(
+      'search',
+      { part: 'snippet', type: 'channel', maxResults: 5, q: identifier.value },
+      apiKey,
+    );
+    const channelId = search.items?.[0]?.snippet?.channelId;
+    if (channelId) item = await fetchYouTubeChannelById(channelId, apiKey);
+  }
+
+  if (!item) return { status: 'not_found' };
+
+  return {
+    status: 'found',
+    id: item.id,
+    title: item.snippet?.title || 'Unknown channel',
+    customUrl: item.snippet?.customUrl || null,
+    thumbnail: item.snippet?.thumbnails?.default?.url || null,
+    hiddenSubscriberCount: Boolean(item.statistics?.hiddenSubscriberCount),
+    subscriberCount: item.statistics?.subscriberCount !== undefined
+      ? Number(item.statistics.subscriberCount)
+      : null,
+  };
+}
+
+function rangeMatches(rangeKey, subscriberCount) {
+  const range = YOUTUBE_RANGES[rangeKey];
+  if (!range || !Number.isFinite(subscriberCount)) return null;
+  return subscriberCount >= range.min && subscriberCount <= range.max;
+}
+
+function buildYouTubeResultEmbed(result, rangeKey, submittedLink) {
+  const selectedRange = YOUTUBE_RANGES[rangeKey]?.label || 'Unknown';
+
+  if (result.status !== 'found') {
+    const reasons = {
+      no_api_key: 'Automatic YouTube checking is not configured, so staff need to verify this submission manually.',
+      invalid_link: 'The submitted link could not be recognised as a YouTube channel link.',
+      not_found: 'The bot could not find the submitted YouTube channel.',
+      error: 'The YouTube lookup failed, so staff need to verify this submission manually.',
+    };
+
+    return new EmbedBuilder()
+      .setColor(0xfee75c)
+      .setTitle('▶️ YouTube Submission')
+      .addFields(
+        { name: 'Submitted link', value: submittedLink.slice(0, 1024) },
+        { name: 'Selected subscribers', value: selectedRange, inline: true },
+        { name: 'Status', value: '⚠️ Awaiting staff verification', inline: true },
+        { name: 'Result', value: reasons[result.status] || reasons.error },
+      );
+  }
+
+  const subscribers = result.hiddenSubscriberCount
+    ? 'Hidden'
+    : Number.isFinite(result.subscriberCount)
+      ? result.subscriberCount.toLocaleString('en-GB')
+      : 'Unavailable';
+  const matches = result.hiddenSubscriberCount ? null : rangeMatches(rangeKey, result.subscriberCount);
+  const rangeStatus = matches === null
+    ? 'Unable to compare'
+    : matches
+      ? '✅ Matches selected range'
+      : '⚠️ Does not match selected range';
+
+  const embed = new EmbedBuilder()
+    .setColor(0xff0000)
+    .setTitle('▶️ YouTube Submission Check')
+    .addFields(
+      { name: 'Channel', value: `[${result.title}](https://www.youtube.com/channel/${result.id})` },
+      { name: 'Subscribers', value: subscribers, inline: true },
+      { name: 'Selected range', value: selectedRange, inline: true },
+      { name: 'Range check', value: rangeStatus },
+      {
+        name: 'Ownership status',
+        value: '⚠️ **Unverified**\nThe bot can verify public channel details, but Discord linked-account ownership requires the user to authorise the `connections` OAuth scope. Staff should verify ownership manually.',
+      },
+    )
+    .setFooter({ text: `YouTube channel ID: ${result.id}` });
+
+  if (result.thumbnail) embed.setThumbnail(result.thumbnail);
+  return embed;
+}
+
+async function handleYouTubeLinkModal(interaction) {
+  const [, creatorId, rangeKey] = interaction.customId.split(':');
+  const data = getTicketData(interaction.channel);
+
+  if (
+    !data ||
+    data.typeKey !== 'youtuber_submission' ||
+    data.creatorId !== creatorId ||
+    interaction.user.id !== creatorId
+  ) {
+    await interaction.reply({
+      content: 'This YouTube form is no longer valid for this ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.youtubeStatus === 'done') {
+    await interaction.reply({
+      content: 'Your YouTube submission has already been sent.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const submittedLink = interaction.fields.getTextInputValue('youtube_link').trim();
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const progressMessage = await interaction.channel.send({
+    content: `🔎 Checking the YouTube submission from <@${creatorId}>…`,
+    allowedMentions: { parse: [] },
+  }).catch(() => null);
+
+  let result;
+  try {
+    result = await resolveYouTubeChannel(submittedLink, process.env.YOUTUBE_API_KEY);
+  } catch (error) {
+    console.error('[YOUTUBE LOOKUP ERROR]', error);
+    result = { status: 'error' };
+  }
+
+  const resultEmbed = buildYouTubeResultEmbed(result, rangeKey, submittedLink);
+
+  if (progressMessage) {
+    await progressMessage.edit({ content: '', embeds: [resultEmbed] }).catch(() => null);
+  } else {
+    await interaction.channel.send({ embeds: [resultEmbed] }).catch(() => null);
+  }
+
+  let nextData = data;
+  try {
+    nextData = await updateTicketTopic(
+      interaction.channel,
+      data,
+      { youtubeStatus: 'done' },
+      `YouTube submission completed by ${interaction.user.tag}`,
+    );
+  } catch (error) {
+    console.error('[YOUTUBE TOPIC UPDATE ERROR]', error);
+  }
+
+  if (shouldCreatorBeUnlocked(nextData)) {
+    await setCreatorTyping(
+      interaction.channel,
+      creatorId,
+      true,
+      `YouTube ticket requirements completed by ${interaction.user.tag}`,
+    ).catch((error) => console.error('[YOUTUBE UNLOCK ERROR]', error));
+
+    await interaction.channel.send({
+      content: `<@${creatorId}> ✅ Your YouTube submission steps are complete. You can now type in this ticket while staff review it.`,
+      allowedMentions: { users: [creatorId] },
+    }).catch(() => null);
+  } else {
+    await interaction.channel.send({
+      content: `<@${creatorId}> ✅ YouTube submission received. You still need to submit your **in-game ID** using the button above.`,
+      allowedMentions: { users: [creatorId] },
+    }).catch(() => null);
+  }
+
+  await interaction.editReply(
+    result.status === 'found'
+      ? '✅ Your YouTube channel has been checked and the result was posted in the ticket.'
+      : '✅ Your YouTube link was submitted. Automatic verification was not complete, so staff will verify it manually.',
+  );
+}
+
 async function getRoleContext(interaction, creatorId) {
   const guild = interaction.guild;
   const actor = await guild.members.fetch(interaction.user.id).catch(() => null);
@@ -370,22 +1402,14 @@ function canActorManageMember(guild, actor, target) {
   return actor.roles.highest.comparePositionTo(target.roles.highest) > 0;
 }
 
-function canActorGiveRole(guild, actor, role) {
-  if (!actor.permissions.has(PermissionFlagsBits.ManageRoles)) return false;
-  if (guild.ownerId === actor.id) return true;
-  return actor.roles.highest.comparePositionTo(role) > 0;
-}
-
-function canBotGiveRole(botMember, role) {
-  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) return false;
-  return botMember.roles.highest.comparePositionTo(role) > 0;
-}
-
-function getAssignableRoles(guild, actor, creator, botMember) {
+function getAssignableRoles(guild, actor, creator, botMember, allowedRoleIds) {
   if (!canActorManageMember(guild, actor, creator)) return guild.roles.cache.filter(() => false);
+
+  const allowed = new Set(allowedRoleIds);
 
   return guild.roles.cache
     .filter((role) => {
+      if (!allowed.has(role.id)) return false;
       if (role.id === guild.roles.everyone.id) return false;
       if (role.managed) return false;
       if (creator.roles.cache.has(role.id)) return false;
@@ -413,7 +1437,7 @@ function buildRolePage(assignableRoles, creatorId, page) {
       roles.map((role) => ({
         label: role.name.slice(0, 100),
         value: role.id,
-        description: `Position ${role.position}`.slice(0, 100),
+        description: 'Allowed ticket role',
       })),
     );
 
@@ -450,45 +1474,52 @@ async function showRoleMenu(interaction, creatorId, page = 0, update = false) {
   const { guild, actor, creator, botMember } = await getRoleContext(interaction, creatorId);
 
   if (!actor?.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    const payload = {
+    await interaction.reply({
       content: 'You need **Manage Roles** to use this button.',
       flags: MessageFlags.Ephemeral,
-    };
-    if (update) await interaction.reply(payload);
-    else await interaction.reply(payload);
+    });
     return;
   }
 
   if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    const payload = {
+    await interaction.reply({
       content: 'I need **Manage Roles** before I can give roles.',
       flags: MessageFlags.Ephemeral,
-    };
-    if (update) await interaction.reply(payload);
-    else await interaction.reply(payload);
+    });
     return;
   }
 
   if (!creator) {
-    const payload = {
+    await interaction.reply({
       content: 'The user who created this ticket is no longer in the server.',
       flags: MessageFlags.Ephemeral,
-    };
-    if (update) await interaction.reply(payload);
-    else await interaction.reply(payload);
+    });
     return;
   }
 
-  const assignableRoles = getAssignableRoles(guild, actor, creator, botMember);
+  const config = await getGuildConfig(guild);
+  if (!config || !config.roleIds.length) {
+    await interaction.reply({
+      content: 'No ticket roles are configured. Run `/ticket-panel reconfigure:true` to choose them.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const assignableRoles = getAssignableRoles(
+    guild,
+    actor,
+    creator,
+    botMember,
+    config.roleIds,
+  );
 
   if (!assignableRoles.size) {
-    const payload = {
+    await interaction.reply({
       content:
-        'There are no roles you can give this user. Check your role position, my bot role position, and whether the user already has the role.',
+        'None of the configured ticket roles can currently be given by you. The user may already have them, or your/bot role hierarchy may be too low.',
       flags: MessageFlags.Ephemeral,
-    };
-    if (update) await interaction.reply(payload);
-    else await interaction.reply(payload);
+    });
     return;
   }
 
@@ -543,6 +1574,7 @@ async function giveSelectedRole(interaction) {
   }
 
   const { guild, actor, creator, botMember } = await getRoleContext(interaction, creatorId);
+  const config = await getGuildConfig(guild);
   const role = guild.roles.cache.get(roleId);
 
   if (!actor?.permissions.has(PermissionFlagsBits.ManageRoles)) {
@@ -552,6 +1584,14 @@ async function giveSelectedRole(interaction) {
 
   if (!creator || !role) {
     await interaction.update({ content: 'That user or role no longer exists.', components: [] });
+    return;
+  }
+
+  if (!config?.roleIds.includes(roleId)) {
+    await interaction.update({
+      content: 'That role is no longer in the configured ticket-role list.',
+      components: [],
+    });
     return;
   }
 
@@ -596,25 +1636,58 @@ async function giveSelectedRole(interaction) {
 
 async function handleTicketInteraction(interaction) {
   if (interaction.isButton()) {
-    if (interaction.customId === 'ticket_create') return createTicket(interaction);
+    if (interaction.customId === 'ticket_create') {
+      await interaction.reply(buildTicketTypeMenu());
+      return true;
+    }
     if (interaction.customId === 'ticket_close') return closeTicket(interaction);
     if (interaction.customId === 'ticket_claim') return claimTicket(interaction);
     if (interaction.customId === 'ticket_role') return openRoleMenu(interaction);
     if (interaction.customId.startsWith('ticket_role_page:')) return changeRolePage(interaction);
+    if (interaction.customId.startsWith('ticket_ingame_id:')) return openInGameIdModal(interaction);
   }
 
   if (
-    interaction.isStringSelectMenu() &&
-    interaction.customId.startsWith('ticket_role_select:')
+    interaction.isChannelSelectMenu() &&
+    interaction.customId.startsWith('ticket_setup_category:')
   ) {
-    return giveSelectedRole(interaction);
+    return handleSetupCategory(interaction);
+  }
+
+  if (
+    interaction.isRoleSelectMenu() &&
+    interaction.customId.startsWith('ticket_setup_roles:')
+  ) {
+    return handleSetupRoles(interaction);
+  }
+
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === 'ticket_create_type') {
+      return createTicket(interaction, interaction.values[0]);
+    }
+    if (interaction.customId.startsWith('ticket_role_select:')) {
+      return giveSelectedRole(interaction);
+    }
+    if (interaction.customId.startsWith('ticket_youtube_range:')) {
+      return openYouTubeLinkModal(interaction);
+    }
+  }
+
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith('ticket_ingame_id_modal:')) {
+      return handleInGameIdModal(interaction);
+    }
+    if (interaction.customId.startsWith('ticket_youtube_link:')) {
+      return handleYouTubeLinkModal(interaction);
+    }
   }
 
   return false;
 }
 
 module.exports = {
-  TICKET_CATEGORY_ID,
   buildPanelMessage,
+  getGuildConfig,
   handleTicketInteraction,
+  sendTicketPanelCommand,
 };
