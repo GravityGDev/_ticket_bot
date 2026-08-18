@@ -981,14 +981,25 @@ async function reopenTicket(interaction) {
     return;
   }
 
-  await interaction.deferUpdate();
+  // Acknowledge the button with a separate private reply instead of deferUpdate().
+  // This means the original staff-control message can safely be deleted later
+  // without invalidating the interaction response.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
   const ticketNumber = data.number ?? 0;
   const openName = `${TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
   const creatorCanSend = shouldCreatorBeUnlocked(data);
 
+  console.log(
+    `[TICKET REOPEN] Starting ticket #${ticketNumber} in ${interaction.channel.id} ` +
+      `by ${interaction.user.tag} (${interaction.user.id}).`,
+  );
+
+  // Step 1: restore the ticket creator's channel permissions.
   try {
+    console.log('[TICKET REOPEN] Restoring creator permissions...');
+
     await setCreatorTyping(
       interaction.channel,
       data.creatorId,
@@ -996,9 +1007,22 @@ async function reopenTicket(interaction) {
       `Ticket reopened by ${interaction.user.tag}`,
     );
 
-    // Remove the old closed-ticket controls completely. The next close will
-    // always create a fresh Transcript / Open / Delete control panel.
-    await interaction.message.delete().catch(() => {});
+    console.log(
+      `[TICKET REOPEN] Creator permissions restored. ` +
+        `ViewChannel=true SendMessages=${creatorCanSend}.`,
+    );
+  } catch (error) {
+    console.error('[TICKET REOPEN PERMISSIONS ERROR]', error);
+    await interaction.editReply(
+      'I could not restore the ticket creator\'s access. The staff controls have been left in place so you can try again.',
+    ).catch(() => {});
+    return;
+  }
+
+  // Step 2: notify the creator. Do this before removing the staff controls so a
+  // failed send never leaves the ticket with no way to retry reopening.
+  try {
+    console.log('[TICKET REOPEN] Sending reopen notification...');
 
     const reopenedEmbed = new EmbedBuilder()
       .setColor(0x57f287)
@@ -1012,18 +1036,56 @@ async function reopenTicket(interaction) {
       allowedMentions: { users: [data.creatorId, interaction.user.id] },
     });
 
-    requestTicketChannelRename(
-      interaction.channel,
-      openName,
-      `Ticket reopened by ${interaction.user.tag}`,
-    );
+    console.log('[TICKET REOPEN] Reopen notification sent.');
   } catch (error) {
-    console.error('[TICKET REOPEN ERROR]', error);
-    await interaction.followUp({
-      content: 'I could not reopen this ticket. Check my channel permissions.',
-      flags: MessageFlags.Ephemeral,
+    console.error('[TICKET REOPEN NOTIFICATION ERROR]', error);
+
+    // Best effort: put the creator back into the closed state because the reopen
+    // did not complete. This prevents a half-open ticket.
+    await interaction.channel.permissionOverwrites.edit(
+      data.creatorId,
+      {
+        ViewChannel: false,
+        SendMessages: false,
+      },
+      'Reopen rolled back after notification failure',
+    ).catch((rollbackError) => {
+      console.error('[TICKET REOPEN ROLLBACK ERROR]', rollbackError);
+    });
+
+    await interaction.editReply(
+      'I could not send the reopen notification, so the ticket was left closed and the staff controls are still available.',
+    ).catch(() => {});
+    return;
+  }
+
+  // Step 3: request the channel rename. Discord can rate-limit channel renames,
+  // so this is deliberately non-blocking and is not allowed to make reopening fail.
+  console.log(`[TICKET REOPEN] Requesting channel rename to ${openName}...`);
+  requestTicketChannelRename(
+    interaction.channel,
+    openName,
+    `Ticket reopened by ${interaction.user.tag}`,
+  );
+
+  // Step 4: only now remove the old closed-ticket staff controls.
+  try {
+    console.log('[TICKET REOPEN] Removing old staff control message...');
+    await interaction.message.delete();
+    console.log('[TICKET REOPEN] Old staff control message removed.');
+  } catch (error) {
+    // The ticket is already successfully reopened at this point. A stale control
+    // message is safer than treating the reopen as failed.
+    console.error('[TICKET REOPEN CONTROL CLEANUP ERROR]', error);
+
+    await interaction.message.edit({
+      components: [],
     }).catch(() => {});
   }
+
+  console.log(`[TICKET REOPEN] Ticket #${ticketNumber} reopened successfully.`);
+
+  await interaction.editReply('✅ Ticket reopened.').catch(() => {});
 }
 
 function escapeHtml(value) {
