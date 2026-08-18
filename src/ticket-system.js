@@ -16,6 +16,7 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-store');
+const { getTicketState, setTicketState, deleteTicketState } = require('./ticket-store');
 
 const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
@@ -565,19 +566,16 @@ function initialSubmissionState(typeKey) {
   };
 }
 
-function makeTicketTopic(ticketNumber, typeKey, creatorId, claimedById = null, state = null) {
-  const submission = state || initialSubmissionState(typeKey);
-  const claimText = claimedById
-    ? `Ticket claimed by <@${claimedById}>`
-    : 'Unclaimed';
-
+function makeTicketTopic(ticketNumber, typeKey, creatorId) {
+  // Keep the channel topic IMMUTABLE after creation.
+  //
+  // Claim/form state is stored in MongoDB. Editing the channel topic uses the
+  // same Modify Channel API route as renaming the ticket, which can cause the
+  // ticket name to be delayed by Discord's rate limiting.
   return [
     `Ticket #${ticketNumber}`,
     `Type=${typeKey}`,
     `Created by <@${creatorId}>`,
-    `IG=${submission.inGameIdStatus}`,
-    `YT=${submission.youtubeStatus}`,
-    claimText,
   ].join(' | ');
 }
 
@@ -612,18 +610,44 @@ function getTicketData(channel) {
 }
 
 async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket data updated') {
+  // Historical function name retained to minimise churn in the ticket workflow.
+  // It now stores mutable ticket state in MongoDB instead of editing the
+  // Discord channel topic.
   const next = { ...data, ...patch };
-  await channel.setTopic(
-    makeTicketTopic(
-      next.number,
-      next.typeKey,
-      next.creatorId,
-      next.claimedById,
-      next,
-    ),
-    reason,
-  );
+
+  await setTicketState(channel.id, {
+    guildId: channel.guildId,
+    number: next.number,
+    typeKey: next.typeKey,
+    creatorId: next.creatorId,
+    claimedById: next.claimedById || null,
+    inGameIdStatus: next.inGameIdStatus,
+    youtubeStatus: next.youtubeStatus,
+    updatedAt: new Date().toISOString(),
+    updateReason: reason,
+  });
+
   return next;
+}
+
+async function getLiveTicketData(channel) {
+  const base = getTicketData(channel);
+  if (!base) return null;
+
+  try {
+    const stored = await getTicketState(channel.id);
+    if (!stored) return base;
+
+    return {
+      ...base,
+      claimedById: stored.claimedById ?? base.claimedById,
+      inGameIdStatus: stored.inGameIdStatus || base.inGameIdStatus,
+      youtubeStatus: stored.youtubeStatus || base.youtubeStatus,
+    };
+  } catch (error) {
+    console.error('[TICKET STATE READ ERROR]', error);
+    return base;
+  }
 }
 
 async function runTicketCreationQueued(guildId, task) {
@@ -830,6 +854,22 @@ async function createTicket(interaction, typeKey) {
     }
 
     try {
+      await setTicketState(channel.id, {
+        guildId: guild.id,
+        number: ticketNumber,
+        typeKey,
+        creatorId: interaction.user.id,
+        claimedById: null,
+        inGameIdStatus: state.inGameIdStatus,
+        youtubeStatus: state.youtubeStatus,
+        updatedAt: new Date().toISOString(),
+        updateReason: 'Ticket created',
+      });
+    } catch (error) {
+      console.error('[TICKET STATE CREATE ERROR]', error);
+    }
+
+    try {
       await channel.send(buildTicketWelcome(ticketNumber, interaction.user, typeKey));
     } catch (error) {
       console.error('[TICKET WELCOME ERROR]', error);
@@ -851,17 +891,10 @@ function messageHasButton(message, customId) {
   );
 }
 
-async function findActiveClosedControlMessage(channel) {
-  const messages = await channel.messages.fetch({ limit: 50, cache: false }).catch(() => null);
-  if (!messages) return null;
-
-  return (
-    messages.find(
-      (message) =>
-        message.author?.id === channel.client.user?.id &&
-        messageHasButton(message, 'ticket_reopen') &&
-        messageHasButton(message, 'ticket_delete'),
-    ) || null
+function isTicketClosedForCreator(channel, creatorId) {
+  const overwrite = channel.permissionOverwrites.cache.get(creatorId);
+  return Boolean(
+    overwrite?.deny?.has(PermissionFlagsBits.ViewChannel),
   );
 }
 
@@ -937,10 +970,11 @@ async function processTicketChannelRename(state) {
         } catch (error) {
           console.error('[TICKET RENAME ERROR]', error);
 
-          // Keep the latest desired state and retry after a short delay. Most
-          // normal Discord rate limits are already handled by discord.js; this
-          // also protects against a transient API failure.
-          await new Promise((resolve) => setTimeout(resolve, 2500));
+          // Do not make ticket close/open wait on a channel-name edit. Discord
+          // has route-specific rate limits and discord.js handles retry timing.
+          // The permission state and staff controls are the source of truth.
+          ticketRenameStates.delete(state.channelId);
+          return;
         }
       }
 
@@ -990,15 +1024,15 @@ async function closeTicket(interaction) {
     return;
   }
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  // Acknowledge instantly so Discord never sits on "thinking..." while the bot
+  // performs permission/message work.
+  await interaction.reply({
+    content: '🔒 Closing ticket…',
+    flags: MessageFlags.Ephemeral,
+  });
 
-  const existingControls = await findActiveClosedControlMessage(interaction.channel);
-  if (existingControls) {
-    await interaction.editReply(
-      isStaff
-        ? `This ticket is already closed. Use the existing staff controls: ${existingControls.url}`
-        : 'This ticket is already closed.',
-    );
+  if (isTicketClosedForCreator(interaction.channel, data.creatorId)) {
+    await interaction.editReply('This ticket is already closed.');
     return;
   }
 
@@ -1054,8 +1088,8 @@ function isStaffForTicket(interaction, member) {
 }
 
 async function reopenTicket(interaction) {
-  const data = getTicketData(interaction.channel);
-  if (!data || !messageHasButton(interaction.message, 'ticket_reopen')) {
+  const baseData = getTicketData(interaction.channel);
+  if (!baseData || !messageHasButton(interaction.message, 'ticket_reopen')) {
     await interaction.reply({
       content: 'These closed-ticket controls are no longer active.',
       flags: MessageFlags.Ephemeral,
@@ -1072,11 +1106,12 @@ async function reopenTicket(interaction) {
     return;
   }
 
-  // Acknowledge the button with a separate private reply instead of deferUpdate().
-  // This means the original staff-control message can safely be deleted later
-  // without invalidating the interaction response.
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  await interaction.reply({
+    content: '🔓 Reopening ticket…',
+    flags: MessageFlags.Ephemeral,
+  });
 
+  const data = (await getLiveTicketData(interaction.channel)) || baseData;
   const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
   const ticketNumber = data.number ?? 0;
   const openName = `${TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
@@ -1464,17 +1499,24 @@ async function deleteTicket(interaction) {
   }
 
   await delay(1000);
-  await interaction.channel.delete(`Closed ticket deleted by ${interaction.user.tag}`).catch(async (error) => {
+  const channelId = interaction.channel.id;
+
+  try {
+    await interaction.channel.delete(`Closed ticket deleted by ${interaction.user.tag}`);
+    await deleteTicketState(channelId).catch((error) => {
+      console.error('[TICKET STATE DELETE ERROR]', error);
+    });
+  } catch (error) {
     console.error('[TICKET DELETE ERROR]', error);
     await interaction.followUp({
       content: 'I could not delete this ticket. Check my **Manage Channels** permission.',
       flags: MessageFlags.Ephemeral,
     }).catch(() => {});
-  });
+  }
 }
 
 async function claimTicket(interaction) {
-  const data = getTicketData(interaction.channel);
+  const data = await getLiveTicketData(interaction.channel);
   if (!data) {
     await interaction.reply({
       content: 'This button can only be used inside a ticket channel.',
@@ -1515,9 +1557,9 @@ async function claimTicket(interaction) {
       `Ticket claimed by ${interaction.user.tag}`,
     );
   } catch (error) {
-    console.error('[TICKET CLAIM TOPIC ERROR]', error);
+    console.error('[TICKET CLAIM STATE ERROR]', error);
     await interaction.reply({
-      content: 'I could not update the channel topic. Make sure I have **Manage Channels**.',
+      content: 'I could not save the claim state. Please try again.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1574,7 +1616,7 @@ async function sendAndPinInGameId(channel, creatorId, inGameId) {
 
 async function openInGameIdModal(interaction) {
   const [, creatorId] = interaction.customId.split(':');
-  const data = getTicketData(interaction.channel);
+  const data = await getLiveTicketData(interaction.channel);
 
   if (!data || data.creatorId !== creatorId || interaction.user.id !== creatorId) {
     await interaction.reply({
@@ -1619,7 +1661,7 @@ async function openInGameIdModal(interaction) {
 
 async function handleInGameIdModal(interaction) {
   const [, creatorId] = interaction.customId.split(':');
-  const data = getTicketData(interaction.channel);
+  const data = await getLiveTicketData(interaction.channel);
 
   if (!data || data.creatorId !== creatorId || interaction.user.id !== creatorId) {
     await interaction.reply({
@@ -1685,7 +1727,7 @@ async function handleInGameIdModal(interaction) {
 async function openYouTubeLinkModal(interaction) {
   const [, creatorId] = interaction.customId.split(':');
   const rangeKey = interaction.values[0];
-  const data = getTicketData(interaction.channel);
+  const data = await getLiveTicketData(interaction.channel);
 
   if (!data || data.typeKey !== 'youtuber_submission' || data.creatorId !== creatorId) {
     await interaction.reply({
@@ -1888,7 +1930,7 @@ function buildYouTubeResultEmbed(result, rangeKey, submittedLink) {
 
 async function handleYouTubeLinkModal(interaction) {
   const [, creatorId, rangeKey] = interaction.customId.split(':');
-  const data = getTicketData(interaction.channel);
+  const data = await getLiveTicketData(interaction.channel);
 
   if (
     !data ||
