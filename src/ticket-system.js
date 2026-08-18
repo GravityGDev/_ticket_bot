@@ -843,19 +843,43 @@ async function createTicket(interaction, typeKey) {
   });
 }
 
+function messageHasButton(message, customId) {
+  return Boolean(
+    message?.components?.some((row) =>
+      row.components?.some((component) => component.customId === customId),
+    ),
+  );
+}
+
+async function findActiveClosedControlMessage(channel) {
+  const messages = await channel.messages.fetch({ limit: 50, cache: false }).catch(() => null);
+  if (!messages) return null;
+
+  return (
+    messages.find(
+      (message) =>
+        message.author?.id === channel.client.user?.id &&
+        messageHasButton(message, 'ticket_reopen') &&
+        messageHasButton(message, 'ticket_delete'),
+    ) || null
+  );
+}
+
+function requestTicketChannelRename(channel, name, reason) {
+  if (!channel || channel.name === name) return;
+
+  // Discord can heavily rate-limit repeated channel-name changes. Do not block
+  // the ticket controls while a rename is queued by discord.js.
+  channel.setName(name, reason).catch((error) => {
+    console.error('[TICKET RENAME ERROR]', error);
+  });
+}
+
 async function closeTicket(interaction) {
   const data = getTicketData(interaction.channel);
   if (!data) {
     await interaction.reply({
       content: 'This button can only be used inside a ticket channel.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (interaction.channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)) {
-    await interaction.reply({
-      content: 'This ticket is already closed.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -874,10 +898,17 @@ async function closeTicket(interaction) {
     return;
   }
 
-  await interaction.reply({
-    content: '🔒 Closing the ticket…',
-    flags: MessageFlags.Ephemeral,
-  });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const existingControls = await findActiveClosedControlMessage(interaction.channel);
+  if (existingControls) {
+    await interaction.editReply(
+      isStaff
+        ? `This ticket is already closed. Use the existing staff controls: ${existingControls.url}`
+        : 'This ticket is already closed.',
+    );
+    return;
+  }
 
   const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
   const ticketNumber = data.number ?? 0;
@@ -906,14 +937,21 @@ async function closeTicket(interaction) {
       );
     }
 
-    await interaction.channel.setName(closedName, `Ticket closed by ${interaction.user.tag}`);
+    // Send the controls BEFORE requesting the rename. This keeps close/reopen
+    // instant even when Discord queues repeated channel-name changes.
     await interaction.channel.send(buildClosedTicketMessage(interaction.user.id));
+    await interaction.editReply('✅ Ticket closed.');
+
+    requestTicketChannelRename(
+      interaction.channel,
+      closedName,
+      `Ticket closed by ${interaction.user.tag}`,
+    );
   } catch (error) {
     console.error('[TICKET CLOSE ERROR]', error);
-    await interaction.followUp({
-      content: 'I could not fully close the ticket. Check my **Manage Channels** permission.',
-      flags: MessageFlags.Ephemeral,
-    }).catch(() => {});
+    await interaction.editReply(
+      'I could not fully close the ticket. Check my **Manage Channels**, **Manage Messages**, and channel permissions.',
+    ).catch(() => {});
   }
 }
 
@@ -926,9 +964,9 @@ function isStaffForTicket(interaction, member) {
 
 async function reopenTicket(interaction) {
   const data = getTicketData(interaction.channel);
-  if (!data || !interaction.channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)) {
+  if (!data || !messageHasButton(interaction.message, 'ticket_reopen')) {
     await interaction.reply({
-      content: 'This ticket is not currently closed.',
+      content: 'These closed-ticket controls are no longer active.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -958,24 +996,27 @@ async function reopenTicket(interaction) {
       `Ticket reopened by ${interaction.user.tag}`,
     );
 
-    await interaction.channel.setName(openName, `Ticket reopened by ${interaction.user.tag}`);
+    // Remove the old closed-ticket controls completely. The next close will
+    // always create a fresh Transcript / Open / Delete control panel.
+    await interaction.message.delete().catch(() => {});
 
     const reopenedEmbed = new EmbedBuilder()
       .setColor(0x57f287)
       .setDescription(`🔓 **Ticket reopened by <@${interaction.user.id}>**`);
 
-    await interaction.message.edit({
-      embeds: [reopenedEmbed],
-      components: [],
-      allowedMentions: { users: [interaction.user.id] },
-    }).catch(() => {});
-
     await interaction.channel.send({
       content: creatorCanSend
         ? `<@${data.creatorId}> your ticket has been reopened.`
         : `<@${data.creatorId}> your ticket has been reopened. Complete the required submission steps above before you can type.`,
-      allowedMentions: { users: [data.creatorId] },
+      embeds: [reopenedEmbed],
+      allowedMentions: { users: [data.creatorId, interaction.user.id] },
     });
+
+    requestTicketChannelRename(
+      interaction.channel,
+      openName,
+      `Ticket reopened by ${interaction.user.tag}`,
+    );
   } catch (error) {
     console.error('[TICKET REOPEN ERROR]', error);
     await interaction.followUp({
@@ -1229,9 +1270,9 @@ function delay(ms) {
 
 async function deleteTicket(interaction) {
   const data = getTicketData(interaction.channel);
-  if (!data || !interaction.channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)) {
+  if (!data || !messageHasButton(interaction.message, 'ticket_delete')) {
     await interaction.reply({
-      content: 'Only closed tickets can be deleted from these controls.',
+      content: 'These closed-ticket controls are no longer active.',
       flags: MessageFlags.Ephemeral,
     });
     return;
