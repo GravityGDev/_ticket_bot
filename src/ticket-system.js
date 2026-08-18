@@ -1033,7 +1033,11 @@ async function reopenTicket(interaction) {
         ? `<@${data.creatorId}> your ticket has been reopened.`
         : `<@${data.creatorId}> your ticket has been reopened. Complete the required submission steps above before you can type.`,
       embeds: [reopenedEmbed],
-      allowedMentions: { users: [data.creatorId, interaction.user.id] },
+      // The ticket creator can also be the staff member reopening the ticket.
+      // Discord rejects duplicate IDs in allowed_mentions.users, so de-duplicate them.
+      allowedMentions: {
+        users: [...new Set([data.creatorId, interaction.user.id])],
+      },
     });
 
     console.log('[TICKET REOPEN] Reopen notification sent.');
