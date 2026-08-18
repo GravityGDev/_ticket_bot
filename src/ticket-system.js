@@ -17,6 +17,7 @@ const {
 } = require('discord.js');
 const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-store');
 const { getTicketState, setTicketState, deleteTicketState } = require('./ticket-store');
+const { getNextTicketNumber } = require('./ticket-counter-store');
 
 const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
@@ -82,7 +83,6 @@ const YOUTUBE_RANGES = {
 
 // Prevent two button presses at the same moment from receiving the same ticket number.
 const ticketCreationQueues = new Map();
-const runtimeHighestTicketNumber = new Map();
 
 function getTicketButtons() {
   return new ActionRowBuilder().addComponents(
@@ -671,23 +671,6 @@ async function runTicketCreationQueued(guildId, task) {
   }
 }
 
-function getNextTicketNumber(guild, categoryId) {
-  const key = `${guild.id}:${categoryId}`;
-  let highest = runtimeHighestTicketNumber.get(key) || 0;
-
-  for (const channel of guild.channels.cache.values()) {
-    if (channel.parentId !== categoryId) continue;
-
-    const match = channel.name.match(/^(?:ticket|closed)-(\d+)(?:_|$)/i);
-    if (!match) continue;
-
-    highest = Math.max(highest, Number(match[1]));
-  }
-
-  const next = highest + 1;
-  runtimeHighestTicketNumber.set(key, next);
-  return next;
-}
 
 function mergeOverwrite(map, id, type, allowBits = 0n, denyBits = 0n) {
   const existing = map.get(id) || { id, type, allow: 0n, deny: 0n };
@@ -823,7 +806,20 @@ async function createTicket(interaction, typeKey) {
       return;
     }
 
-    const ticketNumber = getNextTicketNumber(guild, category.id);
+    let ticketNumber;
+    try {
+      ticketNumber = await getNextTicketNumber(guild.id);
+      console.log(
+        `[TICKET COUNTER] Allocated ticket #${ticketNumber} for guild ${guild.id}.`,
+      );
+    } catch (error) {
+      console.error('[TICKET COUNTER ERROR]', error);
+      await interaction.editReply({
+        content: 'I could not allocate a ticket number from the database. Please try again.',
+        components: [],
+      });
+      return;
+    }
     const state = initialSubmissionState(typeKey);
     const creatorCanSend = shouldCreatorBeUnlocked({ typeKey, ...state });
     const permissionOverwrites = buildTicketPermissionOverwrites(
