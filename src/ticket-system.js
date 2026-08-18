@@ -1,11 +1,13 @@
 const {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ChannelSelectMenuBuilder,
   ChannelType,
   EmbedBuilder,
   MessageFlags,
+  MessageType,
   ModalBuilder,
   PermissionFlagsBits,
   RoleSelectMenuBuilder,
@@ -16,7 +18,9 @@ const {
 const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-store');
 
 const TICKET_NAME_PREFIX = 'ticket-';
+const CLOSED_TICKET_NAME_PREFIX = 'closed-';
 const ROLE_PAGE_SIZE = 25;
+const DELETE_COUNTDOWN_SECONDS = 5;
 
 const TICKET_TYPES = {
   bug_report: {
@@ -97,6 +101,39 @@ function getTicketButtons() {
       .setEmoji('🏷️')
       .setStyle(ButtonStyle.Success),
   );
+}
+
+function getClosedTicketButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('ticket_transcript')
+      .setLabel('Transcript')
+      .setEmoji('📑')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('ticket_reopen')
+      .setLabel('Open')
+      .setEmoji('🔓')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('ticket_delete')
+      .setLabel('Delete')
+      .setEmoji('⛔')
+      .setStyle(ButtonStyle.Danger),
+  );
+}
+
+function buildClosedTicketMessage(closedById) {
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setDescription(`🔒 **Ticket Closed by <@${closedById}>**`)
+    .setFooter({ text: 'Support team ticket controls' });
+
+  return {
+    embeds: [embed],
+    components: [getClosedTicketButtons()],
+    allowedMentions: { users: [closedById] },
+  };
 }
 
 function buildPanelMessage() {
@@ -546,7 +583,10 @@ function makeTicketTopic(ticketNumber, typeKey, creatorId, claimedById = null, s
 
 function getTicketData(channel) {
   if (!channel || channel.type !== ChannelType.GuildText) return null;
-  if (!channel.name.startsWith(TICKET_NAME_PREFIX)) return null;
+  if (
+    !channel.name.startsWith(TICKET_NAME_PREFIX) &&
+    !channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)
+  ) return null;
 
   const topic = channel.topic || '';
   const numberMatch = topic.match(/Ticket #(\d+)/i);
@@ -614,7 +654,7 @@ function getNextTicketNumber(guild, categoryId) {
   for (const channel of guild.channels.cache.values()) {
     if (channel.parentId !== categoryId) continue;
 
-    const match = channel.name.match(/^ticket-(\d+)(?:_|$)/i);
+    const match = channel.name.match(/^(?:ticket|closed)-(\d+)(?:_|$)/i);
     if (!match) continue;
 
     highest = Math.max(highest, Number(match[1]));
@@ -671,7 +711,8 @@ function buildTicketPermissionOverwrites(guild, category, creatorId, botId, crea
     baseTicketMemberPermissions |
     PermissionFlagsBits.SendMessages |
     PermissionFlagsBits.ManageChannels |
-    PermissionFlagsBits.ManageMessages;
+    PermissionFlagsBits.ManageMessages |
+    PermissionFlagsBits.PinMessages;
   mergeOverwrite(overwriteMap, botId, 1, botPermissions, 0n);
 
   const staffPermissions = baseTicketMemberPermissions | PermissionFlagsBits.SendMessages;
@@ -812,6 +853,14 @@ async function closeTicket(interaction) {
     return;
   }
 
+  if (interaction.channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)) {
+    await interaction.reply({
+      content: 'This ticket is already closed.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
   const isCreator = data.creatorId === interaction.user.id;
   const isStaff =
@@ -825,13 +874,405 @@ async function closeTicket(interaction) {
     return;
   }
 
-  await interaction.reply({ content: '🔒 Closing this ticket in 3 seconds…' });
+  await interaction.reply({
+    content: '🔒 Closing the ticket…',
+    flags: MessageFlags.Ephemeral,
+  });
 
-  setTimeout(async () => {
-    await interaction.channel.delete(`Ticket closed by ${interaction.user.tag}`).catch((error) => {
-      console.error('[TICKET CLOSE ERROR]', error);
+  const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
+  const ticketNumber = data.number ?? 0;
+  const closedName = `${CLOSED_TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
+
+  try {
+    const creatorMember = await interaction.guild.members.fetch(data.creatorId).catch(() => null);
+    const creatorIsStaff = creatorMember
+      ? interaction.channel.permissionsFor(creatorMember)?.has(PermissionFlagsBits.ManageMessages)
+      : false;
+
+    if (!creatorIsStaff) {
+      await interaction.channel.permissionOverwrites.edit(
+        data.creatorId,
+        {
+          ViewChannel: false,
+          SendMessages: false,
+        },
+        `Ticket closed by ${interaction.user.tag}`,
+      );
+    } else {
+      await interaction.channel.permissionOverwrites.edit(
+        data.creatorId,
+        { SendMessages: false },
+        `Ticket closed by ${interaction.user.tag}`,
+      );
+    }
+
+    await interaction.channel.setName(closedName, `Ticket closed by ${interaction.user.tag}`);
+    await interaction.channel.send(buildClosedTicketMessage(interaction.user.id));
+  } catch (error) {
+    console.error('[TICKET CLOSE ERROR]', error);
+    await interaction.followUp({
+      content: 'I could not fully close the ticket. Check my **Manage Channels** permission.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+  }
+}
+
+function isStaffForTicket(interaction, member) {
+  return Boolean(
+    member &&
+      interaction.channel.permissionsFor(member)?.has(PermissionFlagsBits.ManageMessages),
+  );
+}
+
+async function reopenTicket(interaction) {
+  const data = getTicketData(interaction.channel);
+  if (!data || !interaction.channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)) {
+    await interaction.reply({
+      content: 'This ticket is not currently closed.',
+      flags: MessageFlags.Ephemeral,
     });
-  }, 3000);
+    return;
+  }
+
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaffForTicket(interaction, member)) {
+    await interaction.reply({
+      content: 'You need **Manage Messages** to reopen tickets.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
+  const ticketNumber = data.number ?? 0;
+  const openName = `${TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
+  const creatorCanSend = shouldCreatorBeUnlocked(data);
+
+  try {
+    await setCreatorTyping(
+      interaction.channel,
+      data.creatorId,
+      creatorCanSend,
+      `Ticket reopened by ${interaction.user.tag}`,
+    );
+
+    await interaction.channel.setName(openName, `Ticket reopened by ${interaction.user.tag}`);
+
+    const reopenedEmbed = new EmbedBuilder()
+      .setColor(0x57f287)
+      .setDescription(`🔓 **Ticket reopened by <@${interaction.user.id}>**`);
+
+    await interaction.message.edit({
+      embeds: [reopenedEmbed],
+      components: [],
+      allowedMentions: { users: [interaction.user.id] },
+    }).catch(() => {});
+
+    await interaction.channel.send({
+      content: creatorCanSend
+        ? `<@${data.creatorId}> your ticket has been reopened.`
+        : `<@${data.creatorId}> your ticket has been reopened. Complete the required submission steps above before you can type.`,
+      allowedMentions: { users: [data.creatorId] },
+    });
+  } catch (error) {
+    console.error('[TICKET REOPEN ERROR]', error);
+    await interaction.followUp({
+      content: 'I could not reopen this ticket. Check my channel permissions.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function formatTranscriptContent(message) {
+  let content = message.content || '';
+
+  for (const user of message.mentions.users.values()) {
+    const member = message.guild?.members.cache.get(user.id);
+    const name = member?.displayName || user.globalName || user.username;
+    content = content
+      .replaceAll(`<@${user.id}>`, `@${name}`)
+      .replaceAll(`<@!${user.id}>`, `@${name}`);
+  }
+
+  for (const role of message.mentions.roles.values()) {
+    content = content.replaceAll(`<@&${role.id}>`, `@${role.name}`);
+  }
+
+  for (const channel of message.mentions.channels.values()) {
+    content = content.replaceAll(`<#${channel.id}>`, `#${channel.name || channel.id}`);
+  }
+
+  return escapeHtml(content);
+}
+
+function renderTranscriptEmbeds(message) {
+  if (!message.embeds?.length) return '';
+
+  return message.embeds.map((embed) => {
+    const title = embed.title ? `<div class="embed-title">${escapeHtml(embed.title)}</div>` : '';
+    const description = embed.description
+      ? `<div class="embed-description">${escapeHtml(embed.description)}</div>`
+      : '';
+    const fields = embed.fields?.length
+      ? `<div class="embed-fields">${embed.fields.map((field) => `
+          <div class="embed-field">
+            <div class="embed-field-name">${escapeHtml(field.name)}</div>
+            <div>${escapeHtml(field.value)}</div>
+          </div>`).join('')}</div>`
+      : '';
+    const thumbnail = embed.thumbnail?.url
+      ? `<img class="embed-thumb" src="${escapeHtml(embed.thumbnail.url)}" alt="">`
+      : '';
+    const image = embed.image?.url
+      ? `<img class="embed-image" src="${escapeHtml(embed.image.url)}" alt="">`
+      : '';
+
+    return `<div class="discord-embed">${thumbnail}<div>${title}${description}${fields}${image}</div></div>`;
+  }).join('');
+}
+
+function renderTranscriptAttachments(message) {
+  if (!message.attachments?.size) return '';
+
+  return [...message.attachments.values()].map((attachment) => {
+    const name = escapeHtml(attachment.name || 'attachment');
+    const url = escapeHtml(attachment.url);
+    const isImage = attachment.contentType?.startsWith('image/');
+
+    return `
+      <div class="attachment">
+        <a href="${url}" target="_blank" rel="noreferrer">${name}</a>
+        ${isImage ? `<img src="${url}" alt="${name}" loading="lazy">` : ''}
+      </div>`;
+  }).join('');
+}
+
+async function fetchAllChannelMessages(channel) {
+  const messages = [];
+  let before;
+
+  while (true) {
+    const batch = await channel.messages.fetch({
+      limit: 100,
+      before,
+      cache: false,
+    });
+
+    if (!batch.size) break;
+
+    messages.push(...batch.values());
+    before = batch.last().id;
+    if (batch.size < 100) break;
+  }
+
+  return messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+}
+
+function buildTranscriptHtml(channel, data, messages) {
+  const type = TICKET_TYPES[data.typeKey] || { label: data.typeKey };
+  const generatedAt = new Date();
+  const participantIds = new Set(
+    messages
+      .filter((message) => !message.author?.bot)
+      .map((message) => message.author?.id)
+      .filter(Boolean),
+  );
+
+  const messageHtml = messages
+    .filter((message) => message.type !== MessageType.ChannelPinnedMessage)
+    .map((message) => {
+      const author = message.author;
+      const displayName =
+        message.member?.displayName ||
+        author?.globalName ||
+        author?.username ||
+        'Unknown User';
+      const username = author?.username || 'unknown';
+      const avatar = author?.displayAvatarURL({ extension: 'png', size: 128 }) || '';
+      const timestamp = new Date(message.createdTimestamp).toLocaleString('en-GB', {
+        dateStyle: 'medium',
+        timeStyle: 'medium',
+      });
+      const content = formatTranscriptContent(message);
+      const edited = message.editedTimestamp ? '<span class="edited">(edited)</span>' : '';
+      const botBadge = author?.bot ? '<span class="bot-badge">BOT</span>' : '';
+
+      return `
+        <article class="message">
+          <img class="avatar" src="${escapeHtml(avatar)}" alt="">
+          <div class="message-body">
+            <div class="message-meta">
+              <strong>${escapeHtml(displayName)}</strong>
+              ${botBadge}
+              <span class="username">@${escapeHtml(username)}</span>
+              <time>${escapeHtml(timestamp)}</time>
+              ${edited}
+            </div>
+            ${content ? `<div class="content">${content}</div>` : ''}
+            ${renderTranscriptEmbeds(message)}
+            ${renderTranscriptAttachments(message)}
+          </div>
+        </article>`;
+    })
+    .join('\n');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ticket #${escapeHtml(data.number)} Transcript</title>
+<style>
+  :root{color-scheme:dark;--bg:#111214;--panel:#1e1f22;--panel2:#2b2d31;--text:#dbdee1;--muted:#949ba4;--accent:#5865f2;--green:#23a55a;--border:#3f4147}
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#0b0c0e,#16171a);color:var(--text);font:15px/1.45 Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  .shell{max-width:1100px;margin:0 auto;padding:32px 18px 60px}
+  .hero{background:linear-gradient(135deg,#24262b,#191a1e);border:1px solid var(--border);border-radius:18px;padding:24px;box-shadow:0 18px 50px rgba(0,0,0,.3)}
+  .hero h1{margin:0 0 8px;font-size:28px}
+  .subtitle{color:var(--muted);margin-bottom:20px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+  .stat{background:#111214;border:1px solid #313338;border-radius:12px;padding:12px}
+  .stat b{display:block;color:#fff;font-size:17px}.stat span{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+  .messages{margin-top:20px;background:var(--panel);border:1px solid var(--border);border-radius:18px;overflow:hidden}
+  .message{display:flex;gap:14px;padding:16px 18px;border-bottom:1px solid rgba(255,255,255,.045)}
+  .message:hover{background:#232428}
+  .message:last-child{border-bottom:0}
+  .avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#313338;flex:0 0 auto}
+  .message-body{min-width:0;flex:1}
+  .message-meta{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+  .message-meta strong{color:#f2f3f5}.username,time,.edited{color:var(--muted);font-size:12px}
+  .bot-badge{font-size:10px;font-weight:800;background:var(--accent);padding:1px 5px;border-radius:4px;color:white}
+  .content{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:3px}
+  .discord-embed{position:relative;display:flex;max-width:650px;margin-top:9px;padding:12px 14px;border-left:4px solid var(--accent);border-radius:4px;background:#2b2d31}
+  .embed-title{font-weight:700;color:white;margin-bottom:5px}.embed-description{white-space:pre-wrap}
+  .embed-fields{display:grid;gap:8px;margin-top:8px}.embed-field-name{font-weight:700;color:white}
+  .embed-thumb{width:72px;height:72px;object-fit:cover;border-radius:8px;margin-right:12px}
+  .embed-image{display:block;max-width:100%;max-height:380px;border-radius:8px;margin-top:10px}
+  .attachment{max-width:680px;margin-top:10px;padding:10px;border:1px solid #404249;border-radius:10px;background:#232428}
+  .attachment a{color:#00a8fc;text-decoration:none;font-weight:600}
+  .attachment img{display:block;max-width:100%;max-height:480px;margin-top:8px;border-radius:8px}
+  .footer{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="shell">
+  <section class="hero">
+    <h1>🎫 Ticket #${escapeHtml(data.number)} Transcript</h1>
+    <div class="subtitle">${escapeHtml(channel.guild.name)} • #${escapeHtml(channel.name)}</div>
+    <div class="stats">
+      <div class="stat"><b>${escapeHtml(type.label)}</b><span>Ticket type</span></div>
+      <div class="stat"><b>${messages.length}</b><span>Messages</span></div>
+      <div class="stat"><b>${participantIds.size}</b><span>Participants</span></div>
+      <div class="stat"><b>${escapeHtml(generatedAt.toLocaleString('en-GB'))}</b><span>Generated</span></div>
+    </div>
+  </section>
+  <section class="messages">${messageHtml || '<div class="message">No messages found.</div>'}</section>
+  <div class="footer">Generated by Snay Ticket Tool • Ticket creator ID: ${escapeHtml(data.creatorId)}</div>
+</div>
+</body>
+</html>`;
+}
+
+async function sendTranscript(interaction) {
+  const data = getTicketData(interaction.channel);
+  if (!data) {
+    await interaction.reply({
+      content: 'This button can only be used inside a ticket channel.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaffForTicket(interaction, member)) {
+    await interaction.reply({
+      content: 'You need **Manage Messages** to download ticket transcripts.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  try {
+    const messages = await fetchAllChannelMessages(interaction.channel);
+    const html = buildTranscriptHtml(interaction.channel, data, messages);
+    const safeType = TICKET_TYPES[data.typeKey]?.slug || 'ticket';
+    const filename = `ticket-${data.number}_${safeType}-transcript.html`;
+
+    await interaction.editReply({
+      content: `📑 Transcript ready — **${messages.length} messages** captured.`,
+      files: [new AttachmentBuilder(Buffer.from(html, 'utf8'), { name: filename })],
+    });
+  } catch (error) {
+    console.error('[TICKET TRANSCRIPT ERROR]', error);
+    await interaction.editReply(
+      'I could not generate the transcript. Make sure I have **Read Message History** and that **Message Content Intent** is enabled in the Discord Developer Portal.',
+    );
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function deleteTicket(interaction) {
+  const data = getTicketData(interaction.channel);
+  if (!data || !interaction.channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)) {
+    await interaction.reply({
+      content: 'Only closed tickets can be deleted from these controls.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaffForTicket(interaction, member)) {
+    await interaction.reply({
+      content: 'You need **Manage Messages** to delete tickets.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const countdownEmbed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('⛔ Deleting ticket')
+    .setDescription(`This ticket will be deleted in **${DELETE_COUNTDOWN_SECONDS}** seconds.`)
+    .setFooter({ text: `Delete requested by ${interaction.user.username}` });
+
+  await interaction.message.edit({
+    embeds: [countdownEmbed],
+    components: [],
+  }).catch(() => {});
+
+  for (let seconds = DELETE_COUNTDOWN_SECONDS - 1; seconds >= 1; seconds -= 1) {
+    await delay(1000);
+    countdownEmbed.setDescription(`This ticket will be deleted in **${seconds}** second${seconds === 1 ? '' : 's'}.`);
+    await interaction.message.edit({ embeds: [countdownEmbed], components: [] }).catch(() => {});
+  }
+
+  await delay(1000);
+  await interaction.channel.delete(`Closed ticket deleted by ${interaction.user.tag}`).catch(async (error) => {
+    console.error('[TICKET DELETE ERROR]', error);
+    await interaction.followUp({
+      content: 'I could not delete this ticket. Check my **Manage Channels** permission.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+  });
 }
 
 async function claimTicket(interaction) {
@@ -894,15 +1335,41 @@ function sanitizeCodeBlock(value) {
   return String(value).replace(/```/g, '``\u200b`').trim();
 }
 
+async function deletePinSystemNotice(channel, pinnedMessageId) {
+  await delay(700);
+
+  try {
+    const recent = await channel.messages.fetch({ limit: 8, cache: false });
+    const notices = recent.filter(
+      (message) =>
+        message.type === MessageType.ChannelPinnedMessage &&
+        message.reference?.messageId === pinnedMessageId,
+    );
+
+    for (const notice of notices.values()) {
+      await notice.delete().catch(() => {});
+    }
+  } catch (error) {
+    console.error('[TICKET PIN NOTICE CLEANUP ERROR]', error);
+  }
+}
+
 async function sendAndPinInGameId(channel, creatorId, inGameId) {
   const message = await channel.send({
     content: `**In-game User ID — <@${creatorId}>**\n\`\`\`\n${sanitizeCodeBlock(inGameId)}\n\`\`\``,
     allowedMentions: { parse: [] },
   });
 
-  await message.pin('In-game user ID submitted for ticket').catch((error) => {
-    console.error('[TICKET PIN ID ERROR]', error);
-  });
+  const pinned = await message.pin('In-game user ID submitted for ticket')
+    .then(() => true)
+    .catch((error) => {
+      console.error('[TICKET PIN ID ERROR]', error);
+      return false;
+    });
+
+  if (pinned) {
+    void deletePinSystemNotice(channel, message.id);
+  }
 
   return message;
 }
@@ -1184,10 +1651,10 @@ function buildYouTubeResultEmbed(result, rangeKey, submittedLink) {
 
   if (result.status !== 'found') {
     const reasons = {
-      no_api_key: 'Automatic YouTube checking is not configured, so staff need to verify this submission manually.',
+      no_api_key: 'Automatic YouTube checking is not configured. Staff will need to review this submission manually.',
       invalid_link: 'The submitted link could not be recognised as a YouTube channel link.',
-      not_found: 'The bot could not find the submitted YouTube channel.',
-      error: 'The YouTube lookup failed, so staff need to verify this submission manually.',
+      not_found: 'The bot could not find the submitted YouTube channel. Staff will need to review it manually.',
+      error: 'The YouTube lookup failed. Staff will need to review this submission manually.',
     };
 
     return new EmbedBuilder()
@@ -1196,8 +1663,7 @@ function buildYouTubeResultEmbed(result, rangeKey, submittedLink) {
       .addFields(
         { name: 'Submitted link', value: submittedLink.slice(0, 1024) },
         { name: 'Selected subscribers', value: selectedRange, inline: true },
-        { name: 'Status', value: '⚠️ Awaiting staff verification', inline: true },
-        { name: 'Result', value: reasons[result.status] || reasons.error },
+        { name: 'Staff note', value: reasons[result.status] || reasons.error },
       );
   }
 
@@ -1206,25 +1672,15 @@ function buildYouTubeResultEmbed(result, rangeKey, submittedLink) {
     : Number.isFinite(result.subscriberCount)
       ? result.subscriberCount.toLocaleString('en-GB')
       : 'Unavailable';
-  const matches = result.hiddenSubscriberCount ? null : rangeMatches(rangeKey, result.subscriberCount);
-  const rangeStatus = matches === null
-    ? 'Unable to compare'
-    : matches
-      ? '✅ Matches selected range'
-      : '⚠️ Does not match selected range';
 
   const embed = new EmbedBuilder()
     .setColor(0xff0000)
-    .setTitle('▶️ YouTube Submission Check')
+    .setTitle('▶️ YouTube Submission')
     .addFields(
       { name: 'Channel', value: `[${result.title}](https://www.youtube.com/channel/${result.id})` },
       { name: 'Subscribers', value: subscribers, inline: true },
-      { name: 'Selected range', value: selectedRange, inline: true },
-      { name: 'Range check', value: rangeStatus },
-      {
-        name: 'Ownership status',
-        value: '⚠️ **Unverified**\nThe bot can verify public channel details, but Discord linked-account ownership requires the user to authorise the `connections` OAuth scope. Staff should verify ownership manually.',
-      },
+      { name: 'Selected subscribers', value: selectedRange, inline: true },
+      { name: 'Submitted link', value: submittedLink.slice(0, 1024) },
     )
     .setFooter({ text: `YouTube channel ID: ${result.id}` });
 
@@ -1276,10 +1732,14 @@ async function handleYouTubeLinkModal(interaction) {
   const resultEmbed = buildYouTubeResultEmbed(result, rangeKey, submittedLink);
 
   if (progressMessage) {
-    await progressMessage.edit({ content: '', embeds: [resultEmbed] }).catch(() => null);
-  } else {
-    await interaction.channel.send({ embeds: [resultEmbed] }).catch(() => null);
+    await progressMessage.delete().catch(() => null);
   }
+
+  await interaction.channel.send({
+    content: `<@${creatorId}>`,
+    embeds: [resultEmbed],
+    allowedMentions: { users: [creatorId] },
+  }).catch(() => null);
 
   let nextData = data;
   try {
@@ -1573,6 +2033,9 @@ async function handleTicketInteraction(interaction) {
       return true;
     }
     if (interaction.customId === 'ticket_close') return closeTicket(interaction);
+    if (interaction.customId === 'ticket_transcript') return sendTranscript(interaction);
+    if (interaction.customId === 'ticket_reopen') return reopenTicket(interaction);
+    if (interaction.customId === 'ticket_delete') return deleteTicket(interaction);
     if (interaction.customId === 'ticket_claim') return claimTicket(interaction);
     if (interaction.customId === 'ticket_role') return openRoleMenu(interaction);
     if (interaction.customId.startsWith('ticket_role_page:')) return changeRolePage(interaction);
