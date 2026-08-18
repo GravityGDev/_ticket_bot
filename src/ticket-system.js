@@ -865,14 +865,106 @@ async function findActiveClosedControlMessage(channel) {
   );
 }
 
-function requestTicketChannelRename(channel, name, reason) {
-  if (!channel || channel.name === name) return;
+// One rename worker per ticket channel.
+//
+// Discord rate-limits channel edits. If a ticket is opened/closed several times
+// quickly, sending every rename request independently can leave old queued
+// renames running after the ticket state has already changed again.
+//
+// This worker collapses pending requests down to the NEWEST desired name, so
+// after Discord's rate limit clears the channel always catches up to the latest
+// open/closed state instead of replaying every stale rename.
+const ticketRenameStates = new Map();
 
-  // Discord can heavily rate-limit repeated channel-name changes. Do not block
-  // the ticket controls while a rename is queued by discord.js.
-  channel.setName(name, reason).catch((error) => {
-    console.error('[TICKET RENAME ERROR]', error);
-  });
+function requestTicketChannelRename(channel, name, reason) {
+  if (!channel || !name) return;
+
+  let state = ticketRenameStates.get(channel.id);
+
+  if (!state) {
+    state = {
+      channelId: channel.id,
+      client: channel.client,
+      desiredName: name,
+      reason,
+      running: false,
+    };
+    ticketRenameStates.set(channel.id, state);
+  } else {
+    state.desiredName = name;
+    state.reason = reason;
+  }
+
+  if (!state.running) {
+    processTicketChannelRename(state).catch((error) => {
+      console.error('[TICKET RENAME WORKER ERROR]', error);
+    });
+  }
+}
+
+async function processTicketChannelRename(state) {
+  state.running = true;
+
+  try {
+    while (ticketRenameStates.get(state.channelId) === state) {
+      let channel;
+      try {
+        channel =
+          state.client.channels.cache.get(state.channelId) ||
+          (await state.client.channels.fetch(state.channelId));
+      } catch (error) {
+        console.error('[TICKET RENAME FETCH ERROR]', error);
+        ticketRenameStates.delete(state.channelId);
+        return;
+      }
+
+      const targetName = state.desiredName;
+      const targetReason = state.reason;
+
+      if (channel.name !== targetName) {
+        try {
+          console.log(
+            `[TICKET RENAME] ${channel.name} -> ${targetName} (${state.channelId})`,
+          );
+
+          // Await this one request so discord.js can respect Discord's route
+          // rate-limit instead of us stacking lots of stale channel edits.
+          await channel.setName(targetName, targetReason);
+
+          console.log(
+            `[TICKET RENAME] Channel ${state.channelId} is now ${targetName}.`,
+          );
+        } catch (error) {
+          console.error('[TICKET RENAME ERROR]', error);
+
+          // Keep the latest desired state and retry after a short delay. Most
+          // normal Discord rate limits are already handled by discord.js; this
+          // also protects against a transient API failure.
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+        }
+      }
+
+      // If the target did not change while the request was in progress, we're
+      // caught up and can stop this worker. If it changed, loop once more using
+      // only the newest requested state.
+      if (state.desiredName === targetName) {
+        ticketRenameStates.delete(state.channelId);
+        return;
+      }
+    }
+  } finally {
+    state.running = false;
+
+    // A new target may have arrived at the exact moment the worker stopped.
+    if (
+      ticketRenameStates.get(state.channelId) === state &&
+      !state.running
+    ) {
+      processTicketChannelRename(state).catch((error) => {
+        console.error('[TICKET RENAME WORKER ERROR]', error);
+      });
+    }
+  }
 }
 
 async function closeTicket(interaction) {
@@ -915,27 +1007,26 @@ async function closeTicket(interaction) {
   const closedName = `${CLOSED_TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
 
   try {
-    const creatorMember = await interaction.guild.members.fetch(data.creatorId).catch(() => null);
-    const creatorIsStaff = creatorMember
-      ? interaction.channel.permissionsFor(creatorMember)?.has(PermissionFlagsBits.ManageMessages)
-      : false;
+    // Closed means closed for the ticket creator: explicitly remove their
+    // channel visibility and ability to send messages.
+    //
+    // Discord members with Administrator bypass channel overwrites, so server
+    // admins will still be able to view/manage the closed ticket as expected.
+    // Other support staff continue to see it through their staff-role
+    // permission overwrite, unless that same staff member is the ticket
+    // creator (their member-specific deny intentionally wins until reopened).
+    await interaction.channel.permissionOverwrites.edit(
+      data.creatorId,
+      {
+        ViewChannel: false,
+        SendMessages: false,
+      },
+      `Ticket closed by ${interaction.user.tag}`,
+    );
 
-    if (!creatorIsStaff) {
-      await interaction.channel.permissionOverwrites.edit(
-        data.creatorId,
-        {
-          ViewChannel: false,
-          SendMessages: false,
-        },
-        `Ticket closed by ${interaction.user.tag}`,
-      );
-    } else {
-      await interaction.channel.permissionOverwrites.edit(
-        data.creatorId,
-        { SendMessages: false },
-        `Ticket closed by ${interaction.user.tag}`,
-      );
-    }
+    console.log(
+      `[TICKET CLOSE] Creator ${data.creatorId} hidden from ticket #${ticketNumber}.`,
+    );
 
     // Send the controls BEFORE requesting the rename. This keeps close/reopen
     // instant even when Discord queues repeated channel-name changes.
