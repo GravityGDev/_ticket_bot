@@ -13,11 +13,10 @@ const {
   TextInputBuilder,
   TextInputStyle,
 } = require('discord.js');
+const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-store');
 
 const TICKET_NAME_PREFIX = 'ticket-';
 const ROLE_PAGE_SIZE = 25;
-const CONFIG_CHANNEL_NAME = 'ticket-bot-config';
-const CONFIG_PREFIX = 'ticket-config:v1';
 
 const TICKET_TYPES = {
   bug_report: {
@@ -246,52 +245,23 @@ function buildTicketWelcome(ticketNumber, creator, typeKey) {
   };
 }
 
-function encodeConfig(categoryId, roleIds) {
-  return `${CONFIG_PREFIX}|category=${categoryId}|roles=${roleIds.join(',')}`;
-}
-
-function parseConfigTopic(topic) {
-  if (!topic || !topic.startsWith(CONFIG_PREFIX)) return null;
-
-  const categoryMatch = topic.match(/(?:^|\|)category=(\d+)/);
-  const rolesMatch = topic.match(/(?:^|\|)roles=([\d,]*)/);
-
-  if (!categoryMatch) return null;
-
-  const roleIds = rolesMatch && rolesMatch[1]
-    ? rolesMatch[1].split(',').filter(Boolean)
-    : [];
-
-  return {
-    categoryId: categoryMatch[1],
-    roleIds: [...new Set(roleIds)],
-  };
-}
-
 async function getGuildConfig(guild) {
   if (!guild) return null;
 
-  await guild.channels.fetch().catch(() => null);
+  let config;
+  try {
+    config = await getServerConfig(guild.id);
+  } catch (error) {
+    console.error(`[CONFIG READ ERROR] Failed to read ${CONFIG_PATH}:`, error);
+    return null;
+  }
 
-  const configChannel = guild.channels.cache.find(
-    (channel) =>
-      channel.type === ChannelType.GuildText &&
-      typeof channel.topic === 'string' &&
-      channel.topic.startsWith(CONFIG_PREFIX),
-  );
-
-  if (!configChannel) return null;
-
-  const config = parseConfigTopic(configChannel.topic);
   if (!config) return null;
 
   const category = await guild.channels.fetch(config.categoryId).catch(() => null);
   if (!category || category.type !== ChannelType.GuildCategory) return null;
 
-  return {
-    ...config,
-    configChannelId: configChannel.id,
-  };
+  return config;
 }
 
 function hasSetupPermission(member) {
@@ -313,57 +283,19 @@ function canBotGiveRole(botMember, role) {
 }
 
 async function saveGuildConfig(guild, category, roleIds, actor) {
-  const botMember = guild.members.me || (await guild.members.fetchMe());
-  const topic = encodeConfig(category.id, roleIds);
+  const saved = await setServerConfig(guild.id, {
+    categoryId: category.id,
+    roleIds,
+    updatedAt: new Date().toISOString(),
+    updatedBy: actor.id,
+  });
 
-  let configChannel = guild.channels.cache.find(
-    (channel) =>
-      channel.type === ChannelType.GuildText &&
-      typeof channel.topic === 'string' &&
-      channel.topic.startsWith(CONFIG_PREFIX),
+  console.log(
+    `[CONFIG] Saved ticket config for guild ${guild.id} to ${CONFIG_PATH} ` +
+      `(category=${saved.categoryId}, roles=${saved.roleIds.length}).`,
   );
 
-  const configPermissions = [
-    {
-      id: guild.roles.everyone.id,
-      deny: [PermissionFlagsBits.ViewChannel],
-    },
-    {
-      id: botMember.id,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-        PermissionFlagsBits.ManageChannels,
-      ],
-    },
-  ];
-
-  if (!configChannel) {
-    configChannel = await guild.channels.create({
-      name: CONFIG_CHANNEL_NAME,
-      type: ChannelType.GuildText,
-      parent: category.id,
-      topic,
-      permissionOverwrites: configPermissions,
-      reason: `Ticket system configured by ${actor.user.tag}`,
-    });
-  } else {
-    if (configChannel.parentId !== category.id) {
-      await configChannel.setParent(category.id, {
-        lockPermissions: false,
-        reason: `Ticket category changed by ${actor.user.tag}`,
-      });
-    }
-
-    await configChannel.permissionOverwrites.set(
-      configPermissions,
-      `Ticket config permissions updated by ${actor.user.tag}`,
-    );
-    await configChannel.setTopic(topic, `Ticket system configured by ${actor.user.tag}`);
-  }
-
-  return configChannel;
+  return saved;
 }
 
 function buildCategorySetupMessage(panelChannelId) {
@@ -500,7 +432,7 @@ async function handleSetupRoles(interaction) {
 
   if (!botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
     await interaction.update({
-      content: 'I need **Manage Channels** before I can save the ticket setup.',
+      content: 'I need **Manage Channels** before this ticket system can create/manage ticket channels.',
       components: [],
     });
     return;
@@ -546,7 +478,7 @@ async function handleSetupRoles(interaction) {
   } catch (error) {
     console.error('[TICKET CONFIG SAVE ERROR]', error);
     await interaction.update({
-      content: 'I could not save the ticket configuration. Check my **Manage Channels** permission.',
+      content: `I could not save the ticket configuration to the local config file. Check that \`${CONFIG_PATH}\` is writable.`,
       components: [],
     });
     return;
