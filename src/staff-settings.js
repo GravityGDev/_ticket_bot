@@ -418,7 +418,11 @@ function buildGoalModal(mode, goal = null) {
 }
 
 function warningScheduleSummary(schedule) {
-  return `<@${schedule.userId}> • remove <@&${schedule.roleId}> • ${discordTime(schedule.executeAt, 'f')} (${discordTime(schedule.executeAt, 'R')})`;
+  const reason = schedule.reason
+    ? ` • Reason: ${truncate(schedule.reason, 80)}`
+    : '';
+
+  return `<@${schedule.userId}> • remove <@&${schedule.roleId}> • ${discordTime(schedule.executeAt, 'f')} (${discordTime(schedule.executeAt, 'R')})${reason}`;
 }
 
 async function buildWarningsPage(guild) {
@@ -441,7 +445,7 @@ async function buildWarningsPage(guild) {
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId('staffsettings:warnadd')
-          .setLabel('Schedule Removal')
+          .setLabel('Set Removal for Staff')
           .setEmoji('➕')
           .setStyle(ButtonStyle.Success)
           .setDisabled(schedules.length >= 25),
@@ -1083,4 +1087,5 @@ module.exports = {
   evaluateAllStaffGoals,
   queueStaffGoalEvaluation,
   processDueWarningRemovals,
+  parseLondonLocalDateTime,
 };

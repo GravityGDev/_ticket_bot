@@ -62,6 +62,8 @@ async function initializeStaffTracking() {
 }
 
 function getPeriodStart(periodKey) {
+  if (periodKey === 'lifetime') return null;
+
   const days = {
     weekly: 7,
     monthly: 30,
@@ -178,15 +180,18 @@ async function getStaffSnapshot(guildId, periodKey) {
   const start = getPeriodStart(periodKey);
   const guildKey = String(guildId);
 
+  const claimMatch = { guildId: guildKey };
+  const activityMatch = { guildId: guildKey };
+
+  if (start) {
+    claimMatch.claimedAt = { $gte: start };
+    activityMatch.createdAt = { $gte: start };
+  }
+
   const [claimRows, activityRows] = await Promise.all([
     (await claimsCollection())
       .aggregate([
-        {
-          $match: {
-            guildId: guildKey,
-            claimedAt: { $gte: start },
-          },
-        },
+        { $match: claimMatch },
         {
           $group: {
             _id: '$staffId',
@@ -197,12 +202,7 @@ async function getStaffSnapshot(guildId, periodKey) {
       .toArray(),
     (await activityCollection())
       .aggregate([
-        {
-          $match: {
-            guildId: guildKey,
-            createdAt: { $gte: start },
-          },
-        },
+        { $match: activityMatch },
         {
           $group: {
             _id: '$staffId',

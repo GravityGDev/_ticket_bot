@@ -698,8 +698,12 @@ async function buildDetailPayload(
 }
 
 async function canViewStaffPanel(interaction) {
+  // Every staff member is identified by View Audit Log permission and may view
+  // the dashboard. Admin Settings remains a separate permission check and is
+  // only rendered for the owner / whitelisted Settings Editors.
   if (
-    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+    interaction.memberPermissions?.has(PermissionFlagsBits.ViewAuditLog)
   ) {
     return true;
   }
@@ -721,7 +725,7 @@ async function sendStaffTrackingPanel(interaction) {
 
   if (!(await canViewStaffPanel(interaction))) {
     await interaction.reply({
-      content: 'You need **Administrator** permission or Staff Settings access to view this panel.',
+      content: 'You need **View Audit Log** staff permission to view this panel.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -774,7 +778,7 @@ async function handleStaffTrackingInteraction(interaction) {
 
   if (!(await canViewStaffPanel(interaction))) {
     await interaction.reply({
-      content: 'You need **Administrator** permission or Staff Settings access to use this panel.',
+      content: 'You need **View Audit Log** staff permission to use this panel.',
       flags: MessageFlags.Ephemeral,
     }).catch(() => {});
     return true;

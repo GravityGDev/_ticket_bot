@@ -274,7 +274,9 @@ function normalizeWarningScheduleInput(input) {
     throw new Error('Warning removal date/time must be in the future.');
   }
 
-  return { userId, roleId, executeAt };
+  const reason = String(input.reason || '').trim().slice(0, 1000);
+
+  return { userId, roleId, executeAt, reason };
 }
 
 async function getWarningRemovalSchedules(guildId, { includeCompleted = false } = {}) {
