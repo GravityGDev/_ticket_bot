@@ -190,7 +190,7 @@ async function renderRankCard(guild, member, periodKey) {
 
   const progressWidth = Math.max(
     xp.progress > 0 ? 4 : 0,
-    Math.round(890 * xp.progress),
+    Math.round(650 * xp.progress),
   );
   const progressPercent = Math.round(xp.progress * 100);
   const score = tickets * 100 + messages;
@@ -220,7 +220,7 @@ async function renderRankCard(guild, member, periodKey) {
         <circle cx="125" cy="128" r="75"/>
       </clipPath>
       <clipPath id="levelBarClip">
-        <rect x="235" y="200" width="890" height="40" rx="20"/>
+        <rect x="235" y="200" width="650" height="40" rx="20"/>
       </clipPath>
     </defs>
 
@@ -239,9 +239,9 @@ async function renderRankCard(guild, member, periodKey) {
     <text x="238" y="123" font-family="Arial, Helvetica, sans-serif"
           font-size="22" fill="#aeb5c2">${username}</text>
 
-    <rect x="760" y="48" width="205" height="46" rx="23"
+    <rect x="700" y="48" width="185" height="46" rx="23"
           fill="#2b303a" stroke="#444b59"/>
-    <text x="862" y="78" text-anchor="middle"
+    <text x="792" y="78" text-anchor="middle"
           font-family="Arial, Helvetica, sans-serif" font-size="17"
           font-weight="700" fill="#cfd5df">${period}</text>
 
@@ -253,87 +253,88 @@ async function renderRankCard(guild, member, periodKey) {
           font-size="25" fill="#c9ced7">
       XP ${xp.currentXp.toLocaleString()} / ${xp.requiredXp.toLocaleString()}
     </text>
-    <text x="780" y="172" font-family="Arial, Helvetica, sans-serif"
+    <text x="710" y="172" font-family="Arial, Helvetica, sans-serif"
           font-size="27" font-weight="700" fill="#f2f4f8">
       RANK #${rank}
     </text>
 
-    <rect x="235" y="200" width="890" height="40" rx="20"
+    <text x="885" y="190" text-anchor="end"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="13" font-weight="700" fill="#aeb5c2">
+      ${progressPercent}% TO NEXT LEVEL
+    </text>
+
+    <rect x="235" y="200" width="650" height="40" rx="20"
           fill="#0d1016" stroke="#414856" stroke-width="2"/>
     <g clip-path="url(#levelBarClip)">
       <rect x="235" y="200" width="${progressWidth}" height="40"
             fill="url(#bar)"/>
-      <rect x="235" y="200" width="${progressWidth}" height="11"
-            fill="#ffffff" opacity=".11"/>
+      <rect x="235" y="200" width="${progressWidth}" height="10"
+            fill="#ffffff" opacity=".10"/>
     </g>
-    <rect x="235" y="200" width="890" height="40" rx="20"
+    <rect x="235" y="200" width="650" height="40" rx="20"
           fill="none" stroke="#ffffff" stroke-opacity=".14"/>
-    <text x="1124" y="190" text-anchor="end"
-          font-family="Arial, Helvetica, sans-serif"
-          font-size="13" font-weight="700" fill="#8e96a5">
-      ${progressPercent}% TO NEXT LEVEL
-    </text>
 
-    <rect x="235" y="274" width="255" height="94" rx="22" fill="#292e38"/>
-    <rect x="507" y="274" width="255" height="94" rx="22" fill="#292e38"/>
-    <rect x="779" y="274" width="255" height="94" rx="22" fill="#292e38"/>
+    <rect x="235" y="274" width="205" height="94" rx="20" fill="#292e38"/>
+    <rect x="458" y="274" width="205" height="94" rx="20" fill="#292e38"/>
+    <rect x="681" y="274" width="205" height="94" rx="20" fill="#292e38"/>
 
-    <text x="260" y="309" font-family="Arial, Helvetica, sans-serif"
-          font-size="16" font-weight="700" fill="#8e96a5">TICKETS CLAIMED</text>
-    <text x="260" y="351" font-family="Arial, Helvetica, sans-serif"
+    <text x="258" y="307" font-family="Arial, Helvetica, sans-serif"
+          font-size="14" font-weight="700" fill="#8e96a5">TICKETS CLAIMED</text>
+    <text x="258" y="350" font-family="Arial, Helvetica, sans-serif"
           font-size="34" font-weight="700" fill="#ffffff">${tickets.toLocaleString()}</text>
 
-    <text x="532" y="309" font-family="Arial, Helvetica, sans-serif"
-          font-size="16" font-weight="700" fill="#8e96a5">TRACKED MESSAGES</text>
-    <text x="532" y="351" font-family="Arial, Helvetica, sans-serif"
+    <text x="481" y="307" font-family="Arial, Helvetica, sans-serif"
+          font-size="14" font-weight="700" fill="#8e96a5">TRACKED MESSAGES</text>
+    <text x="481" y="350" font-family="Arial, Helvetica, sans-serif"
           font-size="34" font-weight="700" fill="#ffffff">${messages.toLocaleString()}</text>
 
-    <text x="804" y="309" font-family="Arial, Helvetica, sans-serif"
-          font-size="16" font-weight="700" fill="#8e96a5">ACTIVITY SCORE</text>
-    <text x="804" y="351" font-family="Arial, Helvetica, sans-serif"
+    <text x="704" y="307" font-family="Arial, Helvetica, sans-serif"
+          font-size="14" font-weight="700" fill="#8e96a5">ACTIVITY SCORE</text>
+    <text x="704" y="350" font-family="Arial, Helvetica, sans-serif"
           font-size="34" font-weight="700" fill="#ffffff">${score.toLocaleString()}</text>
 
     ${
       starLevel > 0
         ? `
-          <polygon points="66,244 70,254 81,255 72,262 75,273 66,267 57,273 60,262 51,255 62,254"
+          <polygon points="62,246 66,256 77,257 68,264 71,275 62,269 53,275 56,264 47,257 58,256"
                    fill="#f7c948"/>
           ${
             starLevel === 2
-              ? `<polygon points="90,244 94,254 105,255 96,262 99,273 90,267 81,273 84,262 75,255 86,254"
+              ? `<polygon points="84,246 88,256 99,257 90,264 93,275 84,269 75,275 78,264 69,257 80,256"
                           fill="#f7c948"/>`
               : ''
           }
         `
         : `
-          <circle cx="66" cy="258" r="9" fill="#64dfd2" opacity=".9"/>
+          <circle cx="63" cy="260" r="9" fill="#64dfd2" opacity=".9"/>
         `
     }
-    <text x="${starLevel === 2 ? 116 : 86}" y="264"
+    <text x="112" y="266"
           font-family="Arial, Helvetica, sans-serif"
-          font-size="16" font-weight="700" fill="#64dfd2">${escapeXml(starText)}</text>
+          font-size="15" font-weight="700" fill="#64dfd2">${escapeXml(starText)}</text>
 
     ${
       warningCount > 0
         ? `
-          <polygon points="61,280 73,302 49,302"
+          <polygon points="63,286 75,308 51,308"
                    fill="#ffb65c"/>
-          <rect x="60" y="287" width="2" height="8" rx="1" fill="#171a21"/>
-          <circle cx="61" cy="298.5" r="1.5" fill="#171a21"/>
+          <rect x="62" y="293" width="2" height="8" rx="1" fill="#171a21"/>
+          <circle cx="63" cy="304.5" r="1.5" fill="#171a21"/>
         `
         : `
-          <circle cx="61" cy="291" r="11" fill="#79dda6"/>
-          <path d="M55 291l4 4 8-9" fill="none" stroke="#17221c"
+          <circle cx="63" cy="298" r="11" fill="#79dda6"/>
+          <path d="M57 298l4 4 8-9" fill="none" stroke="#17221c"
                 stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
         `
     }
-    <text x="86" y="297" font-family="Arial, Helvetica, sans-serif"
+    <text x="112" y="304" font-family="Arial, Helvetica, sans-serif"
           font-size="15" font-weight="700"
           fill="${warningCount ? '#ffb65c' : '#79dda6'}">${escapeXml(warningText)}</text>
 
-    <text x="60" y="345" font-family="Arial, Helvetica, sans-serif"
+    <text x="60" y="348" font-family="Arial, Helvetica, sans-serif"
           font-size="13" fill="#737b89">PERFORMANCE XP</text>
-    <text x="60" y="371" font-family="Arial, Helvetica, sans-serif"
+    <text x="60" y="377" font-family="Arial, Helvetica, sans-serif"
           font-size="18" font-weight="700" fill="#cbd1da">${xp.totalXp.toLocaleString()} TOTAL XP</text>
   </svg>`;
 
