@@ -24,6 +24,14 @@ function uniqueSnowflakes(values) {
   )];
 }
 
+function normalizePointValue(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 1_000_000) {
+    return fallback;
+  }
+  return parsed;
+}
+
 function normalizeSettings(document, guildId) {
   return {
     guildId: String(guildId),
@@ -35,6 +43,8 @@ function normalizeSettings(document, guildId) {
     blacklistedChannelIds: uniqueSnowflakes(document?.blacklistedChannelIds),
     whitelistedChannelIds: uniqueSnowflakes(document?.whitelistedChannelIds),
     editorUserIds: uniqueSnowflakes(document?.editorUserIds),
+    ticketClaimPoints: normalizePointValue(document?.ticketClaimPoints, 100),
+    trackedMessagePoints: normalizePointValue(document?.trackedMessagePoints, 1),
     updatedAt: document?.updatedAt || null,
     updatedBy: document?.updatedBy || null,
   };
@@ -94,6 +104,8 @@ async function updateStaffTrackingSettings(guildId, patch, updatedBy) {
   next.editorUserIds = uniqueSnowflakes(next.editorUserIds).filter(
     (id) => id !== OWNER_USER_ID,
   );
+  next.ticketClaimPoints = normalizePointValue(next.ticketClaimPoints, 100);
+  next.trackedMessagePoints = normalizePointValue(next.trackedMessagePoints, 1);
   next.updatedAt = new Date();
   next.updatedBy = String(updatedBy || 'unknown');
 
@@ -105,6 +117,8 @@ async function updateStaffTrackingSettings(guildId, patch, updatedBy) {
         blacklistedChannelIds: next.blacklistedChannelIds,
         whitelistedChannelIds: next.whitelistedChannelIds,
         editorUserIds: next.editorUserIds,
+        ticketClaimPoints: next.ticketClaimPoints,
+        trackedMessagePoints: next.trackedMessagePoints,
         updatedAt: next.updatedAt,
         updatedBy: next.updatedBy,
       },

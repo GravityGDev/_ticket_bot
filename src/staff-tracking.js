@@ -17,6 +17,9 @@ const {
   canManageStaffSettings,
   handleStaffSettingsInteraction,
 } = require('./staff-settings');
+const {
+  getStaffTrackingSettings,
+} = require('./staff-settings-store');
 
 const WARNING_ROLE_IDS = Object.freeze([
   '961199921841713162',
@@ -164,10 +167,35 @@ function sortLeaderboard(rows) {
   });
 }
 
-function getBestStarStaff(allRows) {
-  const activeStars = sortLeaderboard(
-    allRows.filter((row) => row.hasStar && row.active),
+function getActivityScore(row, pointSettings) {
+  return (
+    row.claims * pointSettings.ticketClaimPoints +
+    row.messages * pointSettings.trackedMessagePoints
   );
+}
+
+function getBestStarStaff(allRows, pointSettings) {
+  const activeStars = allRows
+    .filter((row) => row.hasStar && row.active)
+    .map((row) => ({
+      ...row,
+      activityScore: getActivityScore(row, pointSettings),
+    }))
+    .sort((a, b) => {
+      if (b.activityScore !== a.activityScore) {
+        return b.activityScore - a.activityScore;
+      }
+
+      // Stable tie-breakers when two staff have the same combined score.
+      if (b.claims !== a.claims) return b.claims - a.claims;
+      if (b.messages !== a.messages) return b.messages - a.messages;
+
+      return (a.member.displayName || a.member.user.username).localeCompare(
+        b.member.displayName || b.member.user.username,
+        undefined,
+        { sensitivity: 'base' },
+      );
+    });
 
   return activeStars[0] || null;
 }
@@ -312,10 +340,11 @@ function buildLeaderboardEmbed({
   filteredRows,
   pageInfo,
   trackingRules,
+  pointSettings,
 }) {
   const period = PERIODS[periodKey];
   const filter = FILTERS[filterKey];
-  const bestStar = getBestStarStaff(allRows);
+  const bestStar = getBestStarStaff(allRows, pointSettings);
 
   const rankingText = pageInfo.rows.length
     ? pageInfo.rows
@@ -338,7 +367,9 @@ function buildLeaderboardEmbed({
     : '*No staff match this filter for the selected period.*';
 
   const bestStarText = bestStar
-    ? `${getStarBadge(bestStar.starLevel)} <@${bestStar.member.id}> — **${bestStar.claims}** claimed • **${bestStar.messages}** messages`
+    ? `${getStarBadge(bestStar.starLevel)} <@${bestStar.member.id}> — ` +
+      `**${bestStar.claims}** claimed • **${bestStar.messages}** messages • ` +
+      `**${bestStar.activityScore.toLocaleString()} activity points**`
     : 'No active Star Management staff in this period.';
 
   const trackedCategories = trackingRules.trackedCategoryIds.map((id) => {
@@ -389,11 +420,18 @@ async function buildLeaderboardPayload(guild, state = {}) {
   const filterKey = cleanFilter(state.filterKey);
   const viewerId = state.viewerId ? String(state.viewerId) : null;
 
-  const [members, snapshot, trackingRules, viewerCanManageSettings] = await Promise.all([
+  const [
+    members,
+    snapshot,
+    trackingRules,
+    viewerCanManageSettings,
+    pointSettings,
+  ] = await Promise.all([
     getCurrentStaffMembers(guild),
     getStaffSnapshot(guild.id, periodKey),
     getCurrentTrackingRules(guild.id),
     viewerId ? canManageStaffSettings(guild.id, viewerId) : Promise.resolve(false),
+    getStaffTrackingSettings(guild.id),
   ]);
 
   const allRows = sortLeaderboard(enrichStaff(members, snapshot));
@@ -445,6 +483,7 @@ async function buildLeaderboardPayload(guild, state = {}) {
         filteredRows,
         pageInfo,
         trackingRules,
+        pointSettings,
       }),
     ],
     components,

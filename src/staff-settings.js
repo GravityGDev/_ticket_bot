@@ -109,6 +109,12 @@ async function buildSettingsHome(guild) {
         value: truncate(userMentions(settings.editorUserIds)),
       },
       {
+        name: '📈 Performance Points',
+        value:
+          `**${settings.ticketClaimPoints}** per claimed ticket\n` +
+          `**${settings.trackedMessagePoints}** per tracked message`,
+      },
+      {
         name: '🎯 Goal Rewards',
         value: `${goals.length} configured`,
         inline: true,
@@ -161,6 +167,11 @@ async function buildSettingsHome(guild) {
           .setEmoji('👥')
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
+          .setCustomId('staffsettings:points')
+          .setLabel('Performance Points')
+          .setEmoji('📈')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
           .setCustomId('staffsettings:dashboard')
           .setLabel('Back to Dashboard')
           .setEmoji('🏆')
@@ -168,6 +179,93 @@ async function buildSettingsHome(guild) {
       ),
     ],
   };
+}
+
+
+function buildPointsPage(settings) {
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('📈 Performance Points')
+    .setDescription(
+      'These values control the combined **activity score** used for **Best Active Star Staff** and `/rank` performance XP/score.',
+    )
+    .addFields(
+      {
+        name: '🎫 Claimed Ticket',
+        value: `**${settings.ticketClaimPoints} points**`,
+        inline: true,
+      },
+      {
+        name: '💬 Tracked Message',
+        value: `**${settings.trackedMessagePoints} points**`,
+        inline: true,
+      },
+      {
+        name: 'Example',
+        value:
+          `4 claimed tickets + 120 tracked messages = **${(
+            4 * settings.ticketClaimPoints +
+            120 * settings.trackedMessagePoints
+          ).toLocaleString()} points**`,
+      },
+    );
+
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('staffsettings:pointsedit')
+          .setLabel('Edit Point Values')
+          .setEmoji('✏️')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId('staffsettings:home')
+          .setLabel('Back')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
+}
+
+function buildPointsModal(settings) {
+  return new ModalBuilder()
+    .setCustomId('staffsettings:pointsmodal')
+    .setTitle('Edit Performance Points')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('ticketPoints')
+          .setLabel('Points per claimed ticket')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setValue(String(settings.ticketClaimPoints))
+          .setPlaceholder('Example: 100')
+          .setMaxLength(7),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('messagePoints')
+          .setLabel('Points per tracked message')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setValue(String(settings.trackedMessagePoints))
+          .setPlaceholder('Example: 1')
+          .setMaxLength(7),
+      ),
+    );
+}
+
+function parsePointSetting(value, label) {
+  const parsed = Number(String(value || '').trim());
+
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 1_000_000) {
+    throw new Error(
+      `${label} must be a whole number between 0 and 1,000,000.`,
+    );
+  }
+
+  return parsed;
 }
 
 function buildTrackingListPage(kind, settings) {
@@ -814,6 +912,53 @@ async function handleStaffSettingsInteraction(interaction, dashboardBuilder) {
         clearwhitelist: 'whitelist',
       }[action];
       await interaction.update(buildTrackingListPage(kind, settings));
+      return true;
+    }
+
+    if (action === 'points') {
+      const current = await getStaffTrackingSettings(
+        interaction.guild.id,
+        { fresh: true },
+      );
+      await interaction.update(buildPointsPage(current));
+      return true;
+    }
+
+    if (action === 'pointsedit') {
+      const current = await getStaffTrackingSettings(
+        interaction.guild.id,
+        { fresh: true },
+      );
+      await interaction.showModal(buildPointsModal(current));
+      return true;
+    }
+
+    if (action === 'pointsmodal' && interaction.isModalSubmit()) {
+      const ticketClaimPoints = parsePointSetting(
+        interaction.fields.getTextInputValue('ticketPoints'),
+        'Ticket points',
+      );
+      const trackedMessagePoints = parsePointSetting(
+        interaction.fields.getTextInputValue('messagePoints'),
+        'Message points',
+      );
+
+      const updated = await updateStaffTrackingSettings(
+        interaction.guild.id,
+        {
+          ticketClaimPoints,
+          trackedMessagePoints,
+        },
+        interaction.user.id,
+      );
+
+      await interaction.reply({
+        content:
+          `✅ Performance points updated: **${ticketClaimPoints}** per ticket and ` +
+          `**${trackedMessagePoints}** per tracked message.`,
+        flags: MessageFlags.Ephemeral,
+        ...buildPointsPage(updated),
+      });
       return true;
     }
 

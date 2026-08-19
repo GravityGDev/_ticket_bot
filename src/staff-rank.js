@@ -5,6 +5,7 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 const { getStaffSnapshot } = require('./staff-tracking-store');
+const { getStaffTrackingSettings } = require('./staff-settings-store');
 
 const WARNING_ROLE_IDS = Object.freeze([
   '961199921841713162',
@@ -65,11 +66,11 @@ function getWarningCount(member) {
   ).length;
 }
 
-function getXpState(tickets, messages) {
-  // Simple performance XP:
-  // 1 claimed ticket = 50 XP
-  // 1 tracked activity message = 2 XP
-  const totalXp = tickets * 50 + messages * 2;
+function getXpState(tickets, messages, pointSettings) {
+  // Performance XP uses the same owner-editable weighting as Activity Score.
+  const totalXp =
+    tickets * pointSettings.ticketClaimPoints +
+    messages * pointSettings.trackedMessagePoints;
 
   let level = 1;
   let remaining = totalXp;
@@ -153,14 +154,17 @@ async function getRankRows(guild, snapshot) {
 }
 
 async function renderRankCard(guild, member, periodKey) {
-  const snapshot = await getStaffSnapshot(guild.id, periodKey);
+  const [snapshot, pointSettings] = await Promise.all([
+    getStaffSnapshot(guild.id, periodKey),
+    getStaffTrackingSettings(guild.id),
+  ]);
   const rows = await getRankRows(guild, snapshot);
 
   const rankIndex = rows.findIndex((row) => row.member.id === member.id);
   const tickets = snapshot.claimCounts.get(member.id) || 0;
   const messages = snapshot.messageCounts.get(member.id) || 0;
   const rank = rankIndex >= 0 ? rankIndex + 1 : rows.length + 1;
-  const xp = getXpState(tickets, messages);
+  const xp = getXpState(tickets, messages, pointSettings);
   const starLevel = getStarLevel(member);
   const warningCount = getWarningCount(member);
 
@@ -193,7 +197,9 @@ async function renderRankCard(guild, member, periodKey) {
     Math.round(650 * xp.progress),
   );
   const progressPercent = Math.round(xp.progress * 100);
-  const score = tickets * 100 + messages;
+  const score =
+    tickets * pointSettings.ticketClaimPoints +
+    messages * pointSettings.trackedMessagePoints;
 
   const svg = `
   <svg width="1200" height="430" viewBox="0 0 1200 430"
@@ -275,23 +281,23 @@ async function renderRankCard(guild, member, periodKey) {
     <rect x="235" y="200" width="650" height="40" rx="20"
           fill="none" stroke="#ffffff" stroke-opacity=".14"/>
 
-    <rect x="235" y="274" width="205" height="94" rx="20" fill="#292e38"/>
-    <rect x="458" y="274" width="205" height="94" rx="20" fill="#292e38"/>
-    <rect x="681" y="274" width="205" height="94" rx="20" fill="#292e38"/>
+    <rect x="320" y="274" width="176" height="94" rx="20" fill="#292e38"/>
+    <rect x="512" y="274" width="176" height="94" rx="20" fill="#292e38"/>
+    <rect x="704" y="274" width="176" height="94" rx="20" fill="#292e38"/>
 
-    <text x="258" y="307" font-family="Arial, Helvetica, sans-serif"
-          font-size="14" font-weight="700" fill="#8e96a5">TICKETS CLAIMED</text>
-    <text x="258" y="350" font-family="Arial, Helvetica, sans-serif"
+    <text x="340" y="307" font-family="Arial, Helvetica, sans-serif"
+          font-size="12.5" font-weight="700" fill="#8e96a5">TICKETS CLAIMED</text>
+    <text x="340" y="350" font-family="Arial, Helvetica, sans-serif"
           font-size="34" font-weight="700" fill="#ffffff">${tickets.toLocaleString()}</text>
 
-    <text x="481" y="307" font-family="Arial, Helvetica, sans-serif"
-          font-size="14" font-weight="700" fill="#8e96a5">TRACKED MESSAGES</text>
-    <text x="481" y="350" font-family="Arial, Helvetica, sans-serif"
+    <text x="532" y="307" font-family="Arial, Helvetica, sans-serif"
+          font-size="12.5" font-weight="700" fill="#8e96a5">TRACKED MESSAGES</text>
+    <text x="532" y="350" font-family="Arial, Helvetica, sans-serif"
           font-size="34" font-weight="700" fill="#ffffff">${messages.toLocaleString()}</text>
 
-    <text x="704" y="307" font-family="Arial, Helvetica, sans-serif"
-          font-size="14" font-weight="700" fill="#8e96a5">ACTIVITY SCORE</text>
-    <text x="704" y="350" font-family="Arial, Helvetica, sans-serif"
+    <text x="724" y="307" font-family="Arial, Helvetica, sans-serif"
+          font-size="12.5" font-weight="700" fill="#8e96a5">ACTIVITY SCORE</text>
+    <text x="724" y="350" font-family="Arial, Helvetica, sans-serif"
           font-size="34" font-weight="700" fill="#ffffff">${score.toLocaleString()}</text>
 
     ${
@@ -310,9 +316,9 @@ async function renderRankCard(guild, member, periodKey) {
           <circle cx="63" cy="260" r="9" fill="#64dfd2" opacity=".9"/>
         `
     }
-    <text x="112" y="266"
+    <text x="108" y="266"
           font-family="Arial, Helvetica, sans-serif"
-          font-size="15" font-weight="700" fill="#64dfd2">${escapeXml(starText)}</text>
+          font-size="13.5" font-weight="700" fill="#64dfd2">${escapeXml(starText)}</text>
 
     ${
       warningCount > 0
@@ -328,20 +334,29 @@ async function renderRankCard(guild, member, periodKey) {
                 stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
         `
     }
-    <text x="112" y="304" font-family="Arial, Helvetica, sans-serif"
-          font-size="15" font-weight="700"
+    <text x="108" y="304" font-family="Arial, Helvetica, sans-serif"
+          font-size="13.5" font-weight="700"
           fill="${warningCount ? '#ffb65c' : '#79dda6'}">${escapeXml(warningText)}</text>
 
     <text x="60" y="348" font-family="Arial, Helvetica, sans-serif"
           font-size="13" fill="#737b89">PERFORMANCE XP</text>
     <text x="60" y="377" font-family="Arial, Helvetica, sans-serif"
           font-size="18" font-weight="700" fill="#cbd1da">${xp.totalXp.toLocaleString()} TOTAL XP</text>
+    <text x="885" y="393" text-anchor="end"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="11" fill="#747d8b">
+      ${pointSettings.ticketClaimPoints} PTS/TICKET • ${pointSettings.trackedMessagePoints} PTS/MESSAGE
+    </text>
   </svg>`;
 
   return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
-async function sendRankCard(interaction, periodKey = 'lifetime') {
+async function sendRankCard(
+  interaction,
+  periodKey = 'lifetime',
+  targetUser = null,
+) {
   if (!interaction.inGuild()) {
     await interaction.reply({
       content: 'Use this command inside a server.',
@@ -350,16 +365,33 @@ async function sendRankCard(interaction, periodKey = 'lifetime') {
     return;
   }
 
-  const member = await interaction.guild.members
+  const requester = await interaction.guild.members
     .fetch(interaction.user.id)
     .catch(() => null);
 
   if (
-    !member ||
-    !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
+    !requester ||
+    !requester.permissions.has(PermissionFlagsBits.ViewAuditLog)
   ) {
     await interaction.reply({
       content: 'This command is available to staff with **View Audit Log** permission.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const targetId = targetUser?.id || interaction.user.id;
+  const member = await interaction.guild.members
+    .fetch(targetId)
+    .catch(() => null);
+
+  if (
+    !member ||
+    member.user.bot ||
+    !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
+  ) {
+    await interaction.reply({
+      content: 'That user is not a tracked staff member with **View Audit Log** permission.',
       flags: MessageFlags.Ephemeral,
     });
     return;
