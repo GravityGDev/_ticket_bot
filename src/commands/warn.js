@@ -132,6 +132,32 @@ function makeLondonLocalDate(year, month, day, hour, minute) {
   );
 }
 
+function getLondonDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+
+  const values = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, part.value]),
+  );
+
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+  };
+}
+
 function getRemovalDate(interaction, duration) {
   if (duration !== 'custom') {
     const milliseconds = REMOVE_DURATIONS[duration];
@@ -143,27 +169,35 @@ function getRemovalDate(interaction, duration) {
     return new Date(Date.now() + milliseconds);
   }
 
-  const year = interaction.options.getInteger('year');
-  const month = interaction.options.getInteger('month');
-  const day = interaction.options.getInteger('day');
-  const hour = interaction.options.getInteger('hour');
-  const minute = interaction.options.getInteger('minute');
+  // Use London time because the server's Render timezone may be UTC.
+  const nowParts = getLondonDateParts(new Date());
+  const fiveMinutesFromNowParts = getLondonDateParts(
+    new Date(Date.now() + 5 * 60 * 1000),
+  );
 
-  const missing = [
-    ['year', year],
-    ['month', month],
-    ['day', day],
-    ['hour', hour],
-    ['minute', minute],
-  ]
-    .filter(([, value]) => value === null)
-    .map(([name]) => name);
+  const selectedYear = interaction.options.getInteger('year');
+  const selectedMonth = interaction.options.getInteger('month');
+  const selectedDay = interaction.options.getInteger('day');
+  const selectedHour = interaction.options.getInteger('hour');
+  const selectedMinute = interaction.options.getInteger('minute');
 
-  if (missing.length) {
-    throw new Error(
-      `Custom date/time requires: ${missing.map((name) => `\`${name}\``).join(', ')}.`,
-    );
-  }
+  // Blank custom fields inherit the current UK date/time.
+  //
+  // Minute is special: when omitted it uses the minute from 5 minutes in the
+  // future. If hour/day/month/year are also omitted, their values come from
+  // that same +5 minute timestamp so rollover at 23:58, month-end, New Year,
+  // etc. works correctly.
+  const minuteWasOmitted = selectedMinute === null;
+
+  const fallbackParts = minuteWasOmitted
+    ? fiveMinutesFromNowParts
+    : nowParts;
+
+  const year = selectedYear ?? fallbackParts.year;
+  const month = selectedMonth ?? fallbackParts.month;
+  const day = selectedDay ?? fallbackParts.day;
+  const hour = selectedHour ?? fallbackParts.hour;
+  const minute = selectedMinute ?? fiveMinutesFromNowParts.minute;
 
   return makeLondonLocalDate(
     year,
@@ -229,14 +263,14 @@ module.exports = {
     .addIntegerOption((option) =>
       option
         .setName('year')
-        .setDescription('Custom only: select the year.')
+        .setDescription('Custom only: year. Blank = current UK year.')
         .setRequired(false)
         .addChoices(...buildYearChoices()),
     )
     .addIntegerOption((option) =>
       option
         .setName('month')
-        .setDescription('Custom only: select the month.')
+        .setDescription('Custom only: month. Blank = current UK month.')
         .setRequired(false)
         .addChoices(
           ...MONTHS.map(([name, value]) => ({ name, value })),
@@ -245,7 +279,7 @@ module.exports = {
     .addIntegerOption((option) =>
       option
         .setName('day')
-        .setDescription('Custom only: day of the month (1-31).')
+        .setDescription('Custom only: day (1-31). Blank = current UK day.')
         .setRequired(false)
         .setMinValue(1)
         .setMaxValue(31),
@@ -253,7 +287,7 @@ module.exports = {
     .addIntegerOption((option) =>
       option
         .setName('hour')
-        .setDescription('Custom only: hour in 24-hour time (0-23), e.g. 1, 13, 20.')
+        .setDescription('Custom only: hour 0-23. Blank = current UK hour.')
         .setRequired(false)
         .setMinValue(0)
         .setMaxValue(23),
@@ -261,7 +295,7 @@ module.exports = {
     .addIntegerOption((option) =>
       option
         .setName('minute')
-        .setDescription('Custom only: minute (0-59).')
+        .setDescription('Custom only: minute 0-59. Blank = 5 minutes from now.')
         .setRequired(false)
         .setMinValue(0)
         .setMaxValue(59),
