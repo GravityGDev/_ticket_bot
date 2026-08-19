@@ -436,7 +436,15 @@ async function buildLeaderboardPayload(guild, state = {}) {
     getStaffTrackingSettings(guild.id),
   ]);
 
-  const allRows = sortLeaderboard(enrichStaff(members, snapshot));
+  const hiddenStaffIds = new Set(
+    pointSettings.hiddenStaffUserIds || [],
+  );
+
+  const allRows = sortLeaderboard(
+    enrichStaff(members, snapshot).filter(
+      (row) => !hiddenStaffIds.has(row.member.id),
+    ),
+  );
   const filteredRows = sortLeaderboard(applyFilter(allRows, filterKey));
   const pageInfo = pageSlice(filteredRows, state.page);
 
@@ -664,14 +672,29 @@ async function buildDetailPayload(
   periodKey = cleanPeriod(periodKey);
   filterKey = cleanFilter(filterKey);
 
-  const [members, snapshot, detail, trackingRules] = await Promise.all([
+  const [
+    members,
+    snapshot,
+    detail,
+    trackingRules,
+    pointSettings,
+  ] = await Promise.all([
     getCurrentStaffMembers(guild),
     getStaffSnapshot(guild.id, periodKey),
     getStaffDetail(guild.id, memberId, periodKey),
     getCurrentTrackingRules(guild.id),
+    getStaffTrackingSettings(guild.id),
   ]);
 
-  const allRows = sortLeaderboard(enrichStaff(members, snapshot));
+  const hiddenStaffIds = new Set(
+    pointSettings.hiddenStaffUserIds || [],
+  );
+
+  const allRows = sortLeaderboard(
+    enrichStaff(members, snapshot).filter(
+      (row) => !hiddenStaffIds.has(row.member.id),
+    ),
+  );
   const filteredRows = sortLeaderboard(applyFilter(allRows, filterKey));
   const row =
     filteredRows.find((item) => item.member.id === memberId) ||

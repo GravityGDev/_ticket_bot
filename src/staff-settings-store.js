@@ -43,6 +43,7 @@ function normalizeSettings(document, guildId) {
     blacklistedChannelIds: uniqueSnowflakes(document?.blacklistedChannelIds),
     whitelistedChannelIds: uniqueSnowflakes(document?.whitelistedChannelIds),
     editorUserIds: uniqueSnowflakes(document?.editorUserIds),
+    hiddenStaffUserIds: uniqueSnowflakes(document?.hiddenStaffUserIds),
     ticketClaimPoints: normalizePointValue(document?.ticketClaimPoints, 100),
     trackedMessagePoints: normalizePointValue(document?.trackedMessagePoints, 1),
     updatedAt: document?.updatedAt || null,
@@ -104,6 +105,7 @@ async function updateStaffTrackingSettings(guildId, patch, updatedBy) {
   next.editorUserIds = uniqueSnowflakes(next.editorUserIds).filter(
     (id) => id !== OWNER_USER_ID,
   );
+  next.hiddenStaffUserIds = uniqueSnowflakes(next.hiddenStaffUserIds);
   next.ticketClaimPoints = normalizePointValue(next.ticketClaimPoints, 100);
   next.trackedMessagePoints = normalizePointValue(next.trackedMessagePoints, 1);
   next.updatedAt = new Date();
@@ -117,6 +119,7 @@ async function updateStaffTrackingSettings(guildId, patch, updatedBy) {
         blacklistedChannelIds: next.blacklistedChannelIds,
         whitelistedChannelIds: next.whitelistedChannelIds,
         editorUserIds: next.editorUserIds,
+        hiddenStaffUserIds: next.hiddenStaffUserIds,
         ticketClaimPoints: next.ticketClaimPoints,
         trackedMessagePoints: next.trackedMessagePoints,
         updatedAt: next.updatedAt,

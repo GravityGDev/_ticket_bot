@@ -123,18 +123,23 @@ async function fetchAvatarPng(member) {
   }
 }
 
-async function getRankRows(guild, snapshot) {
+async function getRankRows(guild, snapshot, hiddenStaffUserIds = []) {
   try {
     await guild.members.fetch();
   } catch (error) {
     console.error('[RANK CARD MEMBER FETCH ERROR]', error);
   }
 
+  const hidden = new Set(
+    (hiddenStaffUserIds || []).map(String),
+  );
+
   return [...guild.members.cache.values()]
     .filter(
       (member) =>
         !member.user.bot &&
-        member.permissions.has(PermissionFlagsBits.ViewAuditLog),
+        member.permissions.has(PermissionFlagsBits.ViewAuditLog) &&
+        !hidden.has(member.id),
     )
     .map((member) => ({
       member,
@@ -158,12 +163,20 @@ async function renderRankCard(guild, member, periodKey) {
     getStaffSnapshot(guild.id, periodKey),
     getStaffTrackingSettings(guild.id),
   ]);
-  const rows = await getRankRows(guild, snapshot);
+  const hiddenStaffIds = new Set(
+    pointSettings.hiddenStaffUserIds || [],
+  );
+  const isRankHidden = hiddenStaffIds.has(member.id);
+  const rows = await getRankRows(
+    guild,
+    snapshot,
+    pointSettings.hiddenStaffUserIds,
+  );
 
   const rankIndex = rows.findIndex((row) => row.member.id === member.id);
   const tickets = snapshot.claimCounts.get(member.id) || 0;
   const messages = snapshot.messageCounts.get(member.id) || 0;
-  const rank = rankIndex >= 0 ? rankIndex + 1 : rows.length + 1;
+  const rank = !isRankHidden && rankIndex >= 0 ? rankIndex + 1 : null;
   const xp = getXpState(tickets, messages, pointSettings);
   const starLevel = getStarLevel(member);
   const warningCount = getWarningCount(member);
@@ -261,7 +274,7 @@ async function renderRankCard(guild, member, periodKey) {
     </text>
     <text x="710" y="172" font-family="Arial, Helvetica, sans-serif"
           font-size="27" font-weight="700" fill="#f2f4f8">
-      RANK #${rank}
+      ${isRankHidden ? 'RANK HIDDEN' : `RANK #${rank}`}
     </text>
 
     <text x="885" y="190" text-anchor="end"

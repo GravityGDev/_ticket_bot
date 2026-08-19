@@ -109,6 +109,10 @@ async function buildSettingsHome(guild) {
         value: truncate(userMentions(settings.editorUserIds)),
       },
       {
+        name: `🙈 Hidden from Leaderboard • ${settings.hiddenStaffUserIds.length}`,
+        value: truncate(userMentions(settings.hiddenStaffUserIds)),
+      },
+      {
         name: '📈 Performance Points',
         value:
           `**${settings.ticketClaimPoints}** per claimed ticket\n` +
@@ -172,6 +176,11 @@ async function buildSettingsHome(guild) {
           .setEmoji('📈')
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
+          .setCustomId('staffsettings:hiddenstaff')
+          .setLabel('Hide Staff')
+          .setEmoji('🙈')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
           .setCustomId('staffsettings:dashboard')
           .setLabel('Back to Dashboard')
           .setEmoji('🏆')
@@ -181,6 +190,49 @@ async function buildSettingsHome(guild) {
   };
 }
 
+
+
+async function buildHiddenStaffPage(guild) {
+  const current = await getStaffTrackingSettings(guild.id, { fresh: true });
+
+  const embed = new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setTitle('🙈 Hide Staff from Leaderboard')
+    .setDescription(
+      'Hidden staff are completely excluded from leaderboard positions and **Best Active Staff**. ' +
+        'They can still use `/rank`, but their rank card will show **RANK HIDDEN** instead of a leaderboard position.',
+    )
+    .addFields({
+      name: `Currently Hidden • ${current.hiddenStaffUserIds.length}`,
+      value: truncate(userMentions(current.hiddenStaffUserIds)),
+    });
+
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder()
+          .setCustomId('staffsettings:sethiddenstaff')
+          .setPlaceholder('Select the complete hidden staff list')
+          .setMinValues(1)
+          .setMaxValues(25),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('staffsettings:clearhiddenstaff')
+          .setLabel('Clear Hidden Staff')
+          .setEmoji('👁️')
+          .setStyle(ButtonStyle.Danger)
+          .setDisabled(!current.hiddenStaffUserIds.length),
+        new ButtonBuilder()
+          .setCustomId('staffsettings:home')
+          .setLabel('Back')
+          .setEmoji('⬅️')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
+}
 
 function buildPointsPage(settings) {
   const embed = new EmbedBuilder()
@@ -912,6 +964,57 @@ async function handleStaffSettingsInteraction(interaction, dashboardBuilder) {
         clearwhitelist: 'whitelist',
       }[action];
       await interaction.update(buildTrackingListPage(kind, settings));
+      return true;
+    }
+
+    if (action === 'hiddenstaff') {
+      await interaction.update(
+        await buildHiddenStaffPage(interaction.guild),
+      );
+      return true;
+    }
+
+    if (action === 'sethiddenstaff') {
+      if (!interaction.isUserSelectMenu()) return true;
+
+      const validStaffIds = [];
+
+      for (const userId of interaction.values) {
+        const member = await interaction.guild.members
+          .fetch(userId)
+          .catch(() => null);
+
+        if (
+          member &&
+          !member.user.bot &&
+          member.permissions.has(PermissionFlagsBits.ViewAuditLog)
+        ) {
+          validStaffIds.push(member.id);
+        }
+      }
+
+      await updateStaffTrackingSettings(
+        interaction.guild.id,
+        { hiddenStaffUserIds: validStaffIds },
+        interaction.user.id,
+      );
+
+      await interaction.update(
+        await buildHiddenStaffPage(interaction.guild),
+      );
+      return true;
+    }
+
+    if (action === 'clearhiddenstaff') {
+      await updateStaffTrackingSettings(
+        interaction.guild.id,
+        { hiddenStaffUserIds: [] },
+        interaction.user.id,
+      );
+
+      await interaction.update(
+        await buildHiddenStaffPage(interaction.guild),
+      );
       return true;
     }
 
