@@ -11,6 +11,24 @@ function normalizeState(value) {
     typeKey: value.typeKey || null,
     creatorId: value.creatorId ? String(value.creatorId) : null,
     claimedById: value.claimedById ? String(value.claimedById) : null,
+    claimHistory: Array.isArray(value.claimHistory)
+      ? value.claimHistory
+          .map((entry) => ({
+            userId: entry?.userId ? String(entry.userId) : null,
+            claimedAt: entry?.claimedAt
+              ? String(entry.claimedAt)
+              : null,
+            previousClaimedById: entry?.previousClaimedById
+              ? String(entry.previousClaimedById)
+              : null,
+            action:
+              entry?.action === 'takeover'
+                ? 'takeover'
+                : 'claim',
+          }))
+          .filter((entry) => entry.userId)
+          .slice(-250)
+      : [],
     inGameIdStatus: value.inGameIdStatus || null,
     youtubeStatus: value.youtubeStatus || null,
     staffSelectionStatus: value.staffSelectionStatus || null,

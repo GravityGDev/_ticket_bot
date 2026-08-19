@@ -868,6 +868,7 @@ function initialSubmissionState(typeKey) {
     reportedStaffId: null,
     unmuteDecision: null,
     unmuteDecisionBy: null,
+    claimHistory: [],
   };
 }
 
@@ -915,6 +916,7 @@ function getTicketData(channel) {
     unmuteDecision: fallbackState.unmuteDecision,
     unmuteDecisionBy: fallbackState.unmuteDecisionBy,
     claimedById: claimedMatch ? claimedMatch[1] : null,
+    claimHistory: [],
   };
 }
 
@@ -930,6 +932,9 @@ async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket dat
     typeKey: next.typeKey,
     creatorId: next.creatorId,
     claimedById: next.claimedById || null,
+    claimHistory: Array.isArray(next.claimHistory)
+      ? next.claimHistory
+      : [],
     inGameIdStatus: next.inGameIdStatus,
     youtubeStatus: next.youtubeStatus,
     staffSelectionStatus: next.staffSelectionStatus,
@@ -954,6 +959,10 @@ async function getLiveTicketData(channel) {
     return {
       ...base,
       claimedById: stored.claimedById ?? base.claimedById,
+      claimHistory:
+        Array.isArray(stored.claimHistory) && stored.claimHistory.length
+          ? stored.claimHistory
+          : base.claimHistory,
       inGameIdStatus: stored.inGameIdStatus || base.inGameIdStatus,
       youtubeStatus: stored.youtubeStatus || base.youtubeStatus,
       staffSelectionStatus:
@@ -1221,6 +1230,7 @@ async function createTicket(interaction, typeKey) {
         typeKey,
         creatorId: interaction.user.id,
         claimedById: null,
+        claimHistory: [],
         inGameIdStatus: state.inGameIdStatus,
         youtubeStatus: state.youtubeStatus,
         staffSelectionStatus: state.staffSelectionStatus,
@@ -1780,7 +1790,208 @@ async function fetchAllChannelMessages(channel) {
   return messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 }
 
-function buildTranscriptHtml(channel, data, messages) {
+function getClosedByIdFromControlMessage(message) {
+  const description = message?.embeds?.[0]?.description || '';
+  const match = description.match(/Ticket Closed by <@!?(\d+)>/i);
+  return match ? match[1] : null;
+}
+
+function normalizedClaimHistory(data) {
+  const history = Array.isArray(data?.claimHistory)
+    ? data.claimHistory
+        .map((entry) => ({
+          userId: entry?.userId ? String(entry.userId) : null,
+          claimedAt: entry?.claimedAt ? String(entry.claimedAt) : null,
+          previousClaimedById: entry?.previousClaimedById
+            ? String(entry.previousClaimedById)
+            : null,
+          action: entry?.action === 'takeover' ? 'takeover' : 'claim',
+        }))
+        .filter((entry) => entry.userId)
+    : [];
+
+  // Backward compatibility for legacy claimed tickets.
+  if (!history.length && data?.claimedById) {
+    history.push({
+      userId: String(data.claimedById),
+      claimedAt: null,
+      previousClaimedById: null,
+      action: 'claim',
+    });
+  }
+
+  return history;
+}
+
+async function getTranscriptUserLabel(guild, userId) {
+  if (!userId) return 'Unknown';
+
+  const member =
+    guild.members.cache.get(String(userId)) ||
+    (await guild.members.fetch(String(userId)).catch(() => null));
+
+  const user = member?.user;
+
+  const display =
+    member?.displayName ||
+    user?.globalName ||
+    user?.username ||
+    `User ${userId}`;
+
+  return `@${display}`;
+}
+
+function formatAuditDate(value) {
+  if (!value) return 'Time unavailable';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Time unavailable';
+
+  return date.toLocaleString('en-GB', {
+    dateStyle: 'long',
+    timeStyle: 'short',
+    hour12: false,
+  });
+}
+
+async function buildTranscriptAuditData(
+  channel,
+  data,
+  {
+    transcriptCreatedByUser = null,
+    closedById = null,
+  } = {},
+) {
+  const claimHistory = normalizedClaimHistory(data);
+
+  const ids = new Set(
+    claimHistory
+      .flatMap((entry) => [
+        entry.userId,
+        entry.previousClaimedById,
+      ])
+      .filter(Boolean),
+  );
+
+  if (data?.claimedById) ids.add(String(data.claimedById));
+  if (closedById) ids.add(String(closedById));
+  if (transcriptCreatedByUser?.id) {
+    ids.add(String(transcriptCreatedByUser.id));
+  }
+
+  const labels = new Map();
+
+  await Promise.all(
+    [...ids].map(async (userId) => {
+      labels.set(
+        String(userId),
+        await getTranscriptUserLabel(channel.guild, userId),
+      );
+    }),
+  );
+
+  const firstClaim = claimHistory[0] || null;
+  const finalClaim = claimHistory[claimHistory.length - 1] || null;
+
+  return {
+    firstClaim,
+    finalClaim,
+    currentClaimedById: data?.claimedById || finalClaim?.userId || null,
+    claimHistory,
+    closedById: closedById || null,
+    transcriptCreatedById: transcriptCreatedByUser?.id || null,
+    labels,
+  };
+}
+
+function renderTranscriptAuditHtml(audit, data) {
+  const isClaimNotApplicable =
+    data.typeKey === 'report_staff' ||
+    data.typeKey === 'muted_without_reason';
+
+  const label = (userId) =>
+    userId
+      ? audit.labels.get(String(userId)) || `User ${userId}`
+      : 'Unclaimed';
+
+  const firstClaimedBy = isClaimNotApplicable
+    ? 'Not applicable'
+    : audit.firstClaim
+      ? label(audit.firstClaim.userId)
+      : 'Unclaimed';
+
+  const firstClaimedAt = isClaimNotApplicable
+    ? 'Not applicable'
+    : audit.firstClaim
+      ? formatAuditDate(audit.firstClaim.claimedAt)
+      : 'Not claimed';
+
+  const currentClaimer = isClaimNotApplicable
+    ? 'Not applicable'
+    : audit.currentClaimedById
+      ? label(audit.currentClaimedById)
+      : 'Unclaimed';
+
+  const transcriptCreatedBy = audit.transcriptCreatedById
+    ? label(audit.transcriptCreatedById)
+    : 'Unknown';
+
+  const closedBy = audit.closedById
+    ? label(audit.closedById)
+    : 'Unknown';
+
+  const historyHtml = isClaimNotApplicable
+    ? '<div class="claim-empty">Claiming is not used for this ticket type.</div>'
+    : audit.claimHistory.length
+      ? audit.claimHistory
+          .map((entry, index) => {
+            const actionLabel =
+              index === 0 || entry.action !== 'takeover'
+                ? 'First claim'
+                : 'Takeover';
+
+            const previous =
+              entry.previousClaimedById
+                ? `<span class="claim-from">from ${escapeHtml(
+                    label(entry.previousClaimedById),
+                  )}</span>`
+                : '';
+
+            return `
+              <div class="claim-row">
+                <div class="claim-index">${index + 1}</div>
+                <div class="claim-main">
+                  <b>${escapeHtml(actionLabel)} — ${escapeHtml(
+                    label(entry.userId),
+                  )}</b>
+                  ${previous}
+                  <span>${escapeHtml(formatAuditDate(entry.claimedAt))}</span>
+                </div>
+              </div>`;
+          })
+          .join('\n')
+      : '<div class="claim-empty">This ticket was never claimed.</div>';
+
+  return `
+  <section class="audit-card">
+    <h2>Ticket Audit</h2>
+    <div class="audit-grid">
+      <div class="audit-item"><span>Claimed By (First)</span><b>${escapeHtml(firstClaimedBy)}</b></div>
+      <div class="audit-item"><span>Claimed At</span><b>${escapeHtml(firstClaimedAt)}</b></div>
+      <div class="audit-item"><span>Current / Final Claimer</span><b>${escapeHtml(currentClaimer)}</b></div>
+      <div class="audit-item"><span>Transcript Created By</span><b>${escapeHtml(transcriptCreatedBy)}</b></div>
+      <div class="audit-item"><span>Ticket Closed By</span><b>${escapeHtml(closedBy)}</b></div>
+      <div class="audit-item"><span>Total Claims / Takeovers</span><b>${isClaimNotApplicable ? 'N/A' : audit.claimHistory.length}</b></div>
+    </div>
+
+    <h3>Claim / Takeover History</h3>
+    <div class="claim-history">
+      ${historyHtml}
+    </div>
+  </section>`;
+}
+
+function buildTranscriptHtml(channel, data, messages, audit) {
   const type = TICKET_TYPES[data.typeKey] || { label: data.typeKey };
   const generatedAt = new Date();
   const participantIds = new Set(
@@ -1845,6 +2056,20 @@ function buildTranscriptHtml(channel, data, messages) {
   .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
   .stat{background:#111214;border:1px solid #313338;border-radius:12px;padding:12px}
   .stat b{display:block;color:#fff;font-size:17px}.stat span{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+  .audit-card{margin-top:20px;background:#1b1c20;border:1px solid var(--border);border-left:5px solid #f0b232;border-radius:16px;padding:20px}
+  .audit-card h2{margin:0 0 16px;font-size:22px;color:#fff}
+  .audit-card h3{margin:20px 0 10px;font-size:16px;color:#fff}
+  .audit-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+  .audit-item{background:#111214;border:1px solid #313338;border-radius:10px;padding:12px}
+  .audit-item span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;margin-bottom:5px}
+  .audit-item b{color:#fff;font-size:15px;overflow-wrap:anywhere}
+  .claim-history{display:grid;gap:8px}
+  .claim-row{display:flex;gap:12px;align-items:flex-start;background:#111214;border:1px solid #313338;border-radius:10px;padding:11px 12px}
+  .claim-index{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#2b2d31;color:#fff;font-weight:800;flex:0 0 auto}
+  .claim-main{display:flex;flex-wrap:wrap;gap:5px 9px;align-items:baseline;min-width:0}
+  .claim-main b{color:#fff}.claim-main span{color:var(--muted);font-size:13px}
+  .claim-from{color:#f0b232!important}
+  .claim-empty{color:var(--muted);background:#111214;border:1px solid #313338;border-radius:10px;padding:12px}
   .messages{margin-top:20px;background:var(--panel);border:1px solid var(--border);border-radius:18px;overflow:hidden}
   .message{display:flex;gap:14px;padding:16px 18px;border-bottom:1px solid rgba(255,255,255,.045)}
   .message:hover{background:#232428}
@@ -1878,6 +2103,7 @@ function buildTranscriptHtml(channel, data, messages) {
       <div class="stat"><b>${escapeHtml(generatedAt.toLocaleString('en-GB'))}</b><span>Generated</span></div>
     </div>
   </section>
+  ${renderTranscriptAuditHtml(audit, data)}
   <section class="messages">${messageHtml || '<div class="message">No messages found.</div>'}</section>
   <div class="footer">Generated by Snay Ticket Tool • Ticket creator ID: ${escapeHtml(data.creatorId)}</div>
 </div>
@@ -1906,9 +2132,24 @@ function getTranscriptParticipants(messages) {
   return [...counts.values()].sort((a, b) => b.count - a.count);
 }
 
-async function buildTranscriptArtifact(channel, data) {
+async function buildTranscriptArtifact(
+  channel,
+  data,
+  {
+    transcriptCreatedByUser = null,
+    closedById = null,
+  } = {},
+) {
   const messages = await fetchAllChannelMessages(channel);
-  const html = buildTranscriptHtml(channel, data, messages);
+  const audit = await buildTranscriptAuditData(
+    channel,
+    data,
+    {
+      transcriptCreatedByUser,
+      closedById,
+    },
+  );
+  const html = buildTranscriptHtml(channel, data, messages, audit);
   const safeType = TICKET_TYPES[data.typeKey]?.slug || 'ticket';
   const safeChannelName = String(channel.name || `ticket-${data.number}`)
     .replace(/[^a-zA-Z0-9_-]/g, '-')
@@ -1919,6 +2160,7 @@ async function buildTranscriptArtifact(channel, data) {
     html,
     filename: `transcript-${safeChannelName}.html`,
     safeType,
+    audit,
   };
 }
 
@@ -1938,7 +2180,14 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
     );
   }
 
-  const artifact = await buildTranscriptArtifact(channel, data);
+  const artifact = await buildTranscriptArtifact(
+    channel,
+    data,
+    {
+      transcriptCreatedByUser: deletedByUser,
+      closedById: data.closedById || null,
+    },
+  );
   const creator =
     guild.members.cache.get(data.creatorId) ||
     (await guild.members.fetch(data.creatorId).catch(() => null));
@@ -1982,14 +2231,32 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
         value: `<@${data.creatorId}>`,
       },
       {
-        name: 'Claimed By',
+        name: 'First Claimed By',
         value:
           data.typeKey === 'report_staff' ||
           data.typeKey === 'muted_without_reason'
             ? 'Not applicable'
-            : data.claimedById
-              ? `<@${data.claimedById}>`
+            : artifact.audit.firstClaim
+              ? `<@${artifact.audit.firstClaim.userId}>`
               : 'Unclaimed',
+      },
+      {
+        name: 'Current / Final Claimer',
+        value:
+          data.typeKey === 'report_staff' ||
+          data.typeKey === 'muted_without_reason'
+            ? 'Not applicable'
+            : artifact.audit.currentClaimedById
+              ? `<@${artifact.audit.currentClaimedById}>`
+              : 'Unclaimed',
+      },
+      {
+        name: 'Claim / Takeover Count',
+        value:
+          data.typeKey === 'report_staff' ||
+          data.typeKey === 'muted_without_reason'
+            ? 'Not applicable'
+            : String(artifact.audit.claimHistory.length),
       },
       {
         name: 'Ticket Name',
@@ -2018,8 +2285,14 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
         value: participantText,
       },
       {
-        name: 'Deleted By',
+        name: 'Transcript Created By',
         value: `<@${deletedByUser.id}>`,
+      },
+      {
+        name: 'Ticket Closed By',
+        value: data.closedById
+          ? `<@${data.closedById}>`
+          : 'Unknown',
       },
     )
     .setFooter({
@@ -2089,7 +2362,14 @@ async function sendReportStaffSecurityTranscript(
     );
   }
 
-  const artifact = await buildTranscriptArtifact(channel, data);
+  const artifact = await buildTranscriptArtifact(
+    channel,
+    data,
+    {
+      transcriptCreatedByUser: attemptedByUser,
+      closedById: null,
+    },
+  );
 
   const creator =
     guild.members.cache.get(data.creatorId) ||
@@ -2190,7 +2470,11 @@ async function sendReportStaffSecurityTranscript(
 }
 
 async function sendTranscript(interaction) {
-  const data = getTicketData(interaction.channel);
+  const baseData = getTicketData(interaction.channel);
+  const data =
+    (await getLiveTicketData(interaction.channel).catch(() => null)) ||
+    baseData;
+
   if (!data) {
     await interaction.reply({
       content: 'This button can only be used inside a ticket channel.',
@@ -2211,7 +2495,14 @@ async function sendTranscript(interaction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
-    const artifact = await buildTranscriptArtifact(interaction.channel, data);
+    const artifact = await buildTranscriptArtifact(
+      interaction.channel,
+      data,
+      {
+        transcriptCreatedByUser: interaction.user,
+        closedById: getClosedByIdFromControlMessage(interaction.message),
+      },
+    );
 
     await interaction.editReply({
       content: `📑 Transcript ready — **${artifact.messages.length} messages** captured.`,
@@ -2282,6 +2573,17 @@ async function deleteTicket(interaction) {
     return;
   }
 
+  // Capture the original closer before the closed-ticket control embed is
+  // replaced by the deletion countdown.
+  const closedById =
+    getClosedByIdFromControlMessage(interaction.message) ||
+    null;
+
+  const transcriptData = {
+    ...data,
+    closedById,
+  };
+
   await interaction.deferUpdate();
 
   const countdownEmbed = new EmbedBuilder()
@@ -2317,7 +2619,11 @@ async function deleteTicket(interaction) {
       components: [],
     }).catch(() => {});
 
-    await sendTranscriptToLog(interaction.channel, data, interaction.user);
+    await sendTranscriptToLog(
+      interaction.channel,
+      transcriptData,
+      interaction.user,
+    );
   } catch (error) {
     console.error('[TICKET DELETE TRANSCRIPT LOG ERROR]', error);
 
@@ -2368,10 +2674,15 @@ async function claimTicket(interaction) {
     return;
   }
 
-  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
+
   if (
     !member ||
-    !interaction.channel.permissionsFor(member)?.has(PermissionFlagsBits.ManageMessages)
+    !interaction.channel
+      .permissionsFor(member)
+      ?.has(PermissionFlagsBits.ManageMessages)
   ) {
     await interaction.reply({
       content: 'You need **Manage Messages** to claim tickets.',
@@ -2380,38 +2691,73 @@ async function claimTicket(interaction) {
     return;
   }
 
-  if (data.claimedById) {
+  // The current claimer cannot create duplicate consecutive claim entries.
+  // A DIFFERENT staff member may press Claim at any time to take over.
+  if (data.claimedById === interaction.user.id) {
     await interaction.reply({
-      content:
-        data.claimedById === interaction.user.id
-          ? 'You have already claimed this ticket.'
-          : `This ticket is already claimed by <@${data.claimedById}>.`,
+      content: 'You are already the current claimer for this ticket.',
       flags: MessageFlags.Ephemeral,
-      allowedMentions: { parse: [] },
     });
     return;
   }
+
+  const claimedAt = new Date();
+  const previousClaimedById = data.claimedById || null;
+  const action = previousClaimedById ? 'takeover' : 'claim';
+
+  const existingHistory = Array.isArray(data.claimHistory)
+    ? data.claimHistory
+    : [];
+
+  // Backward compatibility for tickets that were already claimed before this
+  // update. We preserve the legacy claimer as the first history entry, although
+  // its original timestamp cannot be recovered.
+  const claimHistory = [...existingHistory];
+
+  if (
+    !claimHistory.length &&
+    previousClaimedById &&
+    previousClaimedById !== interaction.user.id
+  ) {
+    claimHistory.push({
+      userId: previousClaimedById,
+      claimedAt: null,
+      previousClaimedById: null,
+      action: 'claim',
+    });
+  }
+
+  claimHistory.push({
+    userId: interaction.user.id,
+    claimedAt: claimedAt.toISOString(),
+    previousClaimedById,
+    action,
+  });
 
   try {
     await updateTicketTopic(
       interaction.channel,
       data,
-      { claimedById: interaction.user.id },
-      `Ticket claimed by ${interaction.user.tag}`,
+      {
+        claimedById: interaction.user.id,
+        claimHistory,
+      },
+      previousClaimedById
+        ? `Ticket taken over by ${interaction.user.tag}`
+        : `Ticket claimed by ${interaction.user.tag}`,
     );
 
-    // Keep a permanent historical claim record. This remains even after the
-    // Discord ticket is closed/deleted, so staff performance stats are not
-    // lost with the ticket channel.
+    // Existing staff-performance tracking remains idempotent per ticket.
+    // This means takeover history can contain multiple staff members without
+    // allowing repeated handovers to inflate the same ticket's claim stat.
     await recordTicketClaim({
       guildId: interaction.guild.id,
       staffId: interaction.user.id,
       ticketNumber: data.number,
       typeKey: data.typeKey,
       channelId: interaction.channel.id,
-      claimedAt: new Date(),
+      claimedAt,
     }).catch((statsError) => {
-      // A stats failure must never undo a successful ticket claim.
       console.error('[STAFF TRACKING CLAIM ERROR]', statsError);
     });
 
@@ -2424,15 +2770,32 @@ async function claimTicket(interaction) {
   } catch (error) {
     console.error('[TICKET CLAIM STATE ERROR]', error);
     await interaction.reply({
-      content: 'I could not save the claim state. Please try again.',
+      content: 'I could not save the claim/takeover state. Please try again.',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
+  if (previousClaimedById) {
+    await interaction.reply({
+      content:
+        `🔄 Ticket taken over by <@${interaction.user.id}> ` +
+        `from <@${previousClaimedById}>.`,
+      allowedMentions: {
+        users: [...new Set([
+          interaction.user.id,
+          previousClaimedById,
+        ])],
+      },
+    });
+    return;
+  }
+
   await interaction.reply({
-    content: `Ticket claimed by <@${interaction.user.id}>`,
-    allowedMentions: { users: [interaction.user.id] },
+    content: `🎫 Ticket claimed by <@${interaction.user.id}>.`,
+    allowedMentions: {
+      users: [interaction.user.id],
+    },
   });
 }
 
