@@ -32,6 +32,23 @@ function escapeXml(value) {
     .replaceAll("'", '&apos;');
 }
 
+function safeCardText(value, fallback = '') {
+  // Discord display names can contain Mathematical Unicode alphabets and emoji.
+  // librsvg/Sharp may render those as hex-code boxes when the host does not
+  // have the matching glyph font. NFKC converts most styled alphabets back to
+  // normal letters, then we remove emoji/symbol-only characters that are not
+  // reliable in server-side SVG fonts.
+  const normalized = String(value ?? '')
+    .normalize('NFKC')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/[\uFE0E\uFE0F\u200D]/g, '')
+    .replace(/[^\p{L}\p{N}\s._\-()[\]{}'!@#$%&+,:;?]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized || String(fallback || '').normalize('NFKC').trim();
+}
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -150,23 +167,32 @@ async function renderRankCard(guild, member, periodKey) {
   const avatarPng = await fetchAvatarPng(member);
   const avatarData = `data:image/png;base64,${avatarPng.toString('base64')}`;
 
+  const rawDisplayName =
+    member.displayName || member.user.globalName || member.user.username;
   const displayName = escapeXml(
-    member.displayName || member.user.globalName || member.user.username,
+    safeCardText(rawDisplayName, member.user.username).slice(0, 26),
   );
-  const username = escapeXml(`@${member.user.username}`);
+  const username = escapeXml(
+    `@${safeCardText(member.user.username, member.user.id).slice(0, 30)}`,
+  );
   const period = escapeXml(PERIOD_LABELS[periodKey] || PERIOD_LABELS.lifetime);
+
   const starText =
     starLevel === 2
-      ? '⭐⭐ 2-STAR MANAGEMENT'
+      ? '2-STAR MANAGEMENT'
       : starLevel === 1
-        ? '⭐ 1-STAR MANAGEMENT'
+        ? '1-STAR MANAGEMENT'
         : 'STAFF';
   const warningText =
     warningCount > 0
-      ? `⚠ ${warningCount} WARNING ROLE${warningCount === 1 ? '' : 'S'}`
-      : '✓ NO WARNING ROLES';
+      ? `${warningCount} WARNING ROLE${warningCount === 1 ? '' : 'S'}`
+      : 'NO WARNING ROLES';
 
-  const progressWidth = Math.round(890 * xp.progress);
+  const progressWidth = Math.max(
+    xp.progress > 0 ? 4 : 0,
+    Math.round(890 * xp.progress),
+  );
+  const progressPercent = Math.round(xp.progress * 100);
   const score = tickets * 100 + messages;
 
   const svg = `
@@ -193,6 +219,9 @@ async function renderRankCard(guild, member, periodKey) {
       <clipPath id="avatarClip">
         <circle cx="125" cy="128" r="75"/>
       </clipPath>
+      <clipPath id="levelBarClip">
+        <rect x="235" y="200" width="890" height="40" rx="20"/>
+      </clipPath>
     </defs>
 
     <rect x="15" y="15" width="1170" height="400" rx="38"
@@ -206,7 +235,7 @@ async function renderRankCard(guild, member, periodKey) {
            preserveAspectRatio="xMidYMid slice" clip-path="url(#avatarClip)"/>
 
     <text x="235" y="86" font-family="Arial, Helvetica, sans-serif"
-          font-size="43" font-weight="700" fill="#ffffff">${displayName}</text>
+          font-size="39" font-weight="700" fill="#ffffff">${displayName}</text>
     <text x="238" y="123" font-family="Arial, Helvetica, sans-serif"
           font-size="22" fill="#aeb5c2">${username}</text>
 
@@ -230,11 +259,20 @@ async function renderRankCard(guild, member, periodKey) {
     </text>
 
     <rect x="235" y="200" width="890" height="40" rx="20"
-          fill="#0e1117" stroke="#414856" stroke-width="2"/>
-    <rect x="235" y="200" width="${progressWidth}" height="40" rx="20"
-          fill="url(#bar)"/>
+          fill="#0d1016" stroke="#414856" stroke-width="2"/>
+    <g clip-path="url(#levelBarClip)">
+      <rect x="235" y="200" width="${progressWidth}" height="40"
+            fill="url(#bar)"/>
+      <rect x="235" y="200" width="${progressWidth}" height="11"
+            fill="#ffffff" opacity=".11"/>
+    </g>
     <rect x="235" y="200" width="890" height="40" rx="20"
-          fill="none" stroke="#ffffff" stroke-opacity=".12"/>
+          fill="none" stroke="#ffffff" stroke-opacity=".14"/>
+    <text x="1124" y="190" text-anchor="end"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="13" font-weight="700" fill="#8e96a5">
+      ${progressPercent}% TO NEXT LEVEL
+    </text>
 
     <rect x="235" y="274" width="255" height="94" rx="22" fill="#292e38"/>
     <rect x="507" y="274" width="255" height="94" rx="22" fill="#292e38"/>
@@ -255,15 +293,47 @@ async function renderRankCard(guild, member, periodKey) {
     <text x="804" y="351" font-family="Arial, Helvetica, sans-serif"
           font-size="34" font-weight="700" fill="#ffffff">${score.toLocaleString()}</text>
 
-    <text x="60" y="258" font-family="Arial, Helvetica, sans-serif"
-          font-size="17" font-weight="700" fill="#64dfd2">${escapeXml(starText)}</text>
-    <text x="60" y="289" font-family="Arial, Helvetica, sans-serif"
+    ${
+      starLevel > 0
+        ? `
+          <polygon points="66,244 70,254 81,255 72,262 75,273 66,267 57,273 60,262 51,255 62,254"
+                   fill="#f7c948"/>
+          ${
+            starLevel === 2
+              ? `<polygon points="90,244 94,254 105,255 96,262 99,273 90,267 81,273 84,262 75,255 86,254"
+                          fill="#f7c948"/>`
+              : ''
+          }
+        `
+        : `
+          <circle cx="66" cy="258" r="9" fill="#64dfd2" opacity=".9"/>
+        `
+    }
+    <text x="${starLevel === 2 ? 116 : 86}" y="264"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="16" font-weight="700" fill="#64dfd2">${escapeXml(starText)}</text>
+
+    ${
+      warningCount > 0
+        ? `
+          <polygon points="61,280 73,302 49,302"
+                   fill="#ffb65c"/>
+          <rect x="60" y="287" width="2" height="8" rx="1" fill="#171a21"/>
+          <circle cx="61" cy="298.5" r="1.5" fill="#171a21"/>
+        `
+        : `
+          <circle cx="61" cy="291" r="11" fill="#79dda6"/>
+          <path d="M55 291l4 4 8-9" fill="none" stroke="#17221c"
+                stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        `
+    }
+    <text x="86" y="297" font-family="Arial, Helvetica, sans-serif"
           font-size="15" font-weight="700"
           fill="${warningCount ? '#ffb65c' : '#79dda6'}">${escapeXml(warningText)}</text>
 
-    <text x="60" y="354" font-family="Arial, Helvetica, sans-serif"
+    <text x="60" y="345" font-family="Arial, Helvetica, sans-serif"
           font-size="13" fill="#737b89">PERFORMANCE XP</text>
-    <text x="60" y="378" font-family="Arial, Helvetica, sans-serif"
+    <text x="60" y="371" font-family="Arial, Helvetica, sans-serif"
           font-size="18" font-weight="700" fill="#cbd1da">${xp.totalXp.toLocaleString()} TOTAL XP</text>
   </svg>`;
 
