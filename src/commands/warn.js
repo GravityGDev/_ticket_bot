@@ -340,8 +340,8 @@ module.exports = {
     .addAttachmentOption((option) =>
       option
         .setName('evidence-1')
-        .setDescription('Optional evidence image 1.')
-        .setRequired(false),
+        .setDescription('Required evidence image.')
+        .setRequired(true),
     )
     .addAttachmentOption((option) =>
       option
