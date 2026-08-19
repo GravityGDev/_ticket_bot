@@ -27,6 +27,7 @@ const {
   recordStaffActivityMessage,
 } = require('./staff-tracking-store');
 const { handleStaffTrackingInteraction } = require('./staff-tracking');
+const { handleWarningInteraction } = require('./warn-system');
 const {
   queueStaffGoalEvaluation,
   evaluateAllStaffGoals,
@@ -291,6 +292,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       await command.execute(interaction, client);
+      return;
+    }
+
+    if (await handleWarningInteraction(interaction)) {
       return;
     }
 

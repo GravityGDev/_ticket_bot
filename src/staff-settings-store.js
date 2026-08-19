@@ -324,6 +324,46 @@ async function createWarningRemovalSchedule(guildId, input, createdBy) {
   return { ...document, _id: result.insertedId };
 }
 
+async function getWarningRemovalSchedule(guildId, scheduleId) {
+  const objectId = parseObjectId(scheduleId);
+  if (!objectId) return null;
+
+  return (await warningRemovalsCollection()).findOne({
+    _id: objectId,
+    guildId: String(guildId),
+  });
+}
+
+async function revokeWarningRemovalSchedule(guildId, scheduleId, revokedBy) {
+  const objectId = parseObjectId(scheduleId);
+  if (!objectId) throw new Error('Invalid schedule ID.');
+
+  const result = await (await warningRemovalsCollection()).findOneAndUpdate(
+    {
+      _id: objectId,
+      guildId: String(guildId),
+      status: 'pending',
+    },
+    {
+      $set: {
+        status: 'revoked',
+        revokedAt: new Date(),
+        revokedBy: String(revokedBy),
+        finishedAt: new Date(),
+        updatedAt: new Date(),
+        updatedBy: String(revokedBy),
+      },
+    },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+
+  if (!result) {
+    throw new Error('This warning is no longer pending.');
+  }
+
+  return result;
+}
+
 async function updateWarningRemovalSchedule(guildId, scheduleId, executeAt, updatedBy) {
   const objectId = parseObjectId(scheduleId);
   if (!objectId) throw new Error('Invalid schedule ID.');
@@ -435,7 +475,9 @@ module.exports = {
   getGoalGrant,
   recordGoalGrant,
   getWarningRemovalSchedules,
+  getWarningRemovalSchedule,
   createWarningRemovalSchedule,
+  revokeWarningRemovalSchedule,
   updateWarningRemovalSchedule,
   deleteWarningRemovalSchedule,
   claimDueWarningRemovals,
