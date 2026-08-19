@@ -21,6 +21,7 @@ const {
   trackReportStaffMessageDeleteBulk,
   handleReportStaffChannelDelete,
 } = require('./report-staff-tracker');
+const { applySavedBotStatus } = require('./bot-status');
 
 const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID'];
 for (const key of requiredEnv) {
@@ -222,6 +223,12 @@ client.once(Events.ClientReady, (readyClient) => {
   // was deployed, so their earlier visible history is copied into MongoDB too.
   backfillOpenReportStaffTickets(readyClient).catch((error) => {
     console.error('[REPORT STAFF BACKFILL ERROR]', error);
+  });
+});
+
+client.once(Events.ClientReady, (readyClient) => {
+  applySavedBotStatus(readyClient).catch((error) => {
+    console.error('[BOT STATUS RESTORE ERROR]', error);
   });
 });
 
