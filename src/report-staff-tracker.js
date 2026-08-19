@@ -9,8 +9,12 @@ const {
 const { getMongoDb } = require('./database');
 const { getTicketState } = require('./ticket-store');
 
-const REPORT_STAFF_SECURITY_LOG_CHANNEL_ID =
-  process.env.REPORT_STAFF_SECURITY_LOG_CHANNEL_ID || '1150135578378125383';
+const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
+
+// This is a USER ID, not a guild channel ID.
+// Manual-deletion transcripts are sent directly to this user's DMs.
+const REPORT_STAFF_SECURITY_USER_ID =
+  process.env.REPORT_STAFF_SECURITY_USER_ID || '1150135578378125383';
 
 const ARCHIVE_COLLECTION = 'report_staff_archives';
 const MESSAGE_COLLECTION = 'report_staff_messages';
@@ -18,10 +22,18 @@ const MESSAGE_COLLECTION = 'report_staff_messages';
 const pendingChannelWrites = new Map();
 
 function isReportStaffChannel(channel) {
+  if (!channel || !channel.guild) return false;
+
+  // Primary detection: Report Staff tickets always live in the dedicated
+  // Report Staff category. This remains available on the deleted channel
+  // object delivered with ChannelDelete.
+  if (String(channel.parentId || '') === REPORT_STAFF_CATEGORY_ID) {
+    return true;
+  }
+
+  // Fallback for any older/moved Report Staff ticket.
   return Boolean(
-    channel &&
-      channel.guild &&
-      typeof channel.topic === 'string' &&
+    typeof channel.topic === 'string' &&
       channel.topic.includes('Type=report_staff'),
   );
 }
@@ -203,6 +215,11 @@ async function recordMessage(message) {
       },
     },
     { upsert: true },
+  );
+
+  console.log(
+    `[REPORT STAFF TRACKER] Saved message ${snapshot.messageId} ` +
+      `from ${snapshot.authorUsername} in ${snapshot.channelId}.`,
   );
 }
 
@@ -546,19 +563,13 @@ async function resolveChannelDeleter(channel) {
 }
 
 async function sendPersistentDeleteTranscript(channel, meta, messages) {
-  const logChannel =
-    channel.guild.channels.cache.get(REPORT_STAFF_SECURITY_LOG_CHANNEL_ID) ||
-    (await channel.guild.channels
-      .fetch(REPORT_STAFF_SECURITY_LOG_CHANNEL_ID)
-      .catch(() => null));
+  const recipient = await channel.client.users
+    .fetch(REPORT_STAFF_SECURITY_USER_ID)
+    .catch(() => null);
 
-  if (
-    !logChannel ||
-    !logChannel.isTextBased() ||
-    typeof logChannel.send !== 'function'
-  ) {
+  if (!recipient || typeof recipient.send !== 'function') {
     throw new Error(
-      `Security transcript channel ${REPORT_STAFF_SECURITY_LOG_CHANNEL_ID} is missing or not sendable.`,
+      `Could not fetch Report Staff security DM recipient ${REPORT_STAFF_SECURITY_USER_ID}.`,
     );
   }
 
@@ -610,7 +621,7 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
     )
     .setTimestamp();
 
-  const logMessage = await logChannel.send({
+  const logMessage = await recipient.send({
     files: [
       new AttachmentBuilder(Buffer.from(html, 'utf8'), {
         name: filename,
@@ -646,11 +657,31 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
 async function trackReportStaffChannelCreate(channel) {
   if (!isReportStaffChannel(channel)) return;
 
-  // Ticket state is persisted just after Discord creates the channel.
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-
   return queueChannelWrite(channel.id, async () => {
-    await ensureReportStaffArchive(channel);
+    // Ticket state is written just after the Discord channel is created.
+    // Retry briefly so metadata such as creator/reported staff is present even
+    // when Discord's ChannelCreate event arrives first.
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await ensureReportStaffArchive(channel);
+
+      const state = await resolveReportStaffState(channel.id);
+      if (state) {
+        console.log(
+          `[REPORT STAFF TRACKER] Registered ${channel.name} (${channel.id}) ` +
+            `on attempt ${attempt}.`,
+        );
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 750));
+    }
+
+    // Even if Mongo ticket-state lookup is delayed, the archive metadata has
+    // already been created using the category/topic detection.
+    console.log(
+      `[REPORT STAFF TRACKER] Registered ${channel.name} (${channel.id}) ` +
+        'without ticket state; message tracking is still active.',
+    );
   });
 }
 
@@ -774,7 +805,15 @@ async function backfillOpenReportStaffTickets(client) {
 
 async function handleReportStaffChannelDelete(channel) {
   if (!channel?.guild) return;
-  if (channel.id === REPORT_STAFF_SECURITY_LOG_CHANNEL_ID) return;
+
+  console.log(
+    `[REPORT STAFF DELETE EVENT] channel=${channel.id} name=${channel.name} ` +
+      `parent=${channel.parentId || 'none'} reportStaff=${isReportStaffChannel(channel)}`,
+  );
+
+  if (!isReportStaffChannel(channel)) {
+    return;
+  }
 
   // Finish any message writes that were already queued before the channel
   // deletion event arrived.
@@ -790,7 +829,7 @@ async function handleReportStaffChannelDelete(channel) {
 
   // If the archive metadata somehow has not been created yet but the deleted
   // channel topic proves it was Report Staff, recover metadata from ticket state.
-  if (!meta && isReportStaffChannel(channel)) {
+  if (!meta) {
     const state = await resolveReportStaffState(channel.id);
 
     meta = {
@@ -838,12 +877,12 @@ async function handleReportStaffChannelDelete(channel) {
     console.log(
       `[REPORT STAFF DELETE ARCHIVE] Ticket ${meta.ticketNumber ?? channel.id} ` +
         `deleted; ${messages.length} tracked message(s) sent to ` +
-        `${REPORT_STAFF_SECURITY_LOG_CHANNEL_ID}.`,
+        `${REPORT_STAFF_SECURITY_USER_ID}.`,
     );
   } catch (error) {
     // The Discord channel is already gone, but the MongoDB archive remains, so
-    // the transcript data itself is NOT lost even if the security channel send
-    // temporarily fails.
+    // the transcript data itself is NOT lost even if sending the security DM
+    // temporarily fails (for example, if the recipient has DMs disabled).
     await archives.updateOne(
       { _id: String(channel.id) },
       {
