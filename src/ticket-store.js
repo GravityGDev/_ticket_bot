@@ -35,6 +35,8 @@ function normalizeState(value) {
     reportedStaffId: value.reportedStaffId ? String(value.reportedStaffId) : null,
     unmuteDecision: value.unmuteDecision || null,
     unmuteDecisionBy: value.unmuteDecisionBy ? String(value.unmuteDecisionBy) : null,
+    closedById: value.closedById ? String(value.closedById) : null,
+    closedAt: value.closedAt ? String(value.closedAt) : null,
     updatedAt: value.updatedAt || null,
     updateReason: value.updateReason || null,
   };
