@@ -24,7 +24,9 @@ const CLOSED_TICKET_NAME_PREFIX = 'closed-';
 const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
 const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
-const REPORT_STAFF_PAGE_SIZE = 25;
+const REPORT_STAFF_PAGE_SIZE = 23;
+const REPORT_STAFF_SECURITY_LOG_CHANNEL_ID =
+  process.env.REPORT_STAFF_SECURITY_LOG_CHANNEL_ID || '1150135578378125383';
 const TRANSCRIPT_LOG_CHANNEL_ID =
   process.env.TRANSCRIPT_LOG_CHANNEL_ID || '1538580589542777055';
 
@@ -323,6 +325,9 @@ async function getReportableStaffMembers(guild, creatorId) {
 }
 
 function buildReportStaffSelector(creatorId, staffMembers, page = 0) {
+  // Discord select menus support a maximum of 25 options. We reserve space
+  // inside the menu itself for Back / Next navigation, so staff who do not fit
+  // on the first list can be browsed without separate buttons.
   const pageCount = Math.max(
     1,
     Math.ceil(staffMembers.length / REPORT_STAFF_PAGE_SIZE),
@@ -334,53 +339,47 @@ function buildReportStaffSelector(creatorId, staffMembers, page = 0) {
     start + REPORT_STAFF_PAGE_SIZE,
   );
 
-  const rows = [];
+  const options = pageMembers.map((member) => ({
+    label: (member.displayName || member.user.username).slice(0, 100),
+    description: `@${member.user.username}`.slice(0, 100),
+    value: member.id,
+  }));
 
-  if (pageMembers.length) {
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId(`ticket_report_staff_select:${creatorId}:${safePage}`)
-      .setPlaceholder(
-        pageCount > 1
-          ? `Select staff member • Page ${safePage + 1}/${pageCount}`
-          : 'Select the staff member you are reporting',
-      )
-      .setMinValues(1)
-      .setMaxValues(1)
-      .addOptions(
-        pageMembers.map((member) => ({
-          label: (member.displayName || member.user.username).slice(0, 100),
-          description: `@${member.user.username}`.slice(0, 100),
-          value: member.id,
-        })),
-      );
-
-    rows.push(new ActionRowBuilder().addComponents(menu));
+  // Put navigation at the BOTTOM of the menu, as requested.
+  if (safePage > 0) {
+    options.push({
+      label: 'Back',
+      description: 'View the previous staff list',
+      value: `__back__:${safePage - 1}`,
+      emoji: '⬅️',
+    });
   }
 
-  if (pageCount > 1) {
-    rows.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(
-            `ticket_report_staff_page:${creatorId}:${Math.max(safePage - 1, 0)}`,
-          )
-          .setLabel('Previous')
-          .setEmoji('◀️')
-          .setStyle(ButtonStyle.Secondary)
-          .setDisabled(safePage <= 0),
-        new ButtonBuilder()
-          .setCustomId(
-            `ticket_report_staff_page:${creatorId}:${Math.min(safePage + 1, pageCount - 1)}`,
-          )
-          .setLabel('Next')
-          .setEmoji('▶️')
-          .setStyle(ButtonStyle.Secondary)
-          .setDisabled(safePage >= pageCount - 1),
-      ),
-    );
+  if (safePage < pageCount - 1) {
+    options.push({
+      label: 'Next',
+      description: 'View more staff members',
+      value: `__next__:${safePage + 1}`,
+      emoji: '➡️',
+    });
   }
 
-  return rows;
+  if (!options.length) {
+    return [];
+  }
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`ticket_report_staff_select:${creatorId}:${safePage}`)
+    .setPlaceholder(
+      pageCount > 1
+        ? `Select staff member • List ${safePage + 1}/${pageCount}`
+        : 'Select the staff member you are reporting',
+    )
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(options);
+
+  return [new ActionRowBuilder().addComponents(menu)];
 }
 
 function buildReportStaffPermissionOverwrites(guild, creatorId, botId) {
@@ -1245,8 +1244,8 @@ async function processTicketChannelRename(state) {
 }
 
 async function closeTicket(interaction) {
-  const data = getTicketData(interaction.channel);
-  if (!data) {
+  const baseData = getTicketData(interaction.channel);
+  if (!baseData) {
     await interaction.reply({
       content: 'This button can only be used inside a ticket channel.',
       flags: MessageFlags.Ephemeral,
@@ -1254,17 +1253,87 @@ async function closeTicket(interaction) {
     return;
   }
 
-  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-  const isCreator = data.creatorId === interaction.user.id;
-  const isStaff =
-    interaction.channel.permissionsFor(member)?.has(PermissionFlagsBits.ManageMessages) || false;
+  const data =
+    (await getLiveTicketData(interaction.channel).catch(() => null)) ||
+    baseData;
 
-  if (!isCreator && !isStaff) {
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
+
+  if (!member) {
     await interaction.reply({
-      content: 'Only the ticket creator or staff with **Manage Messages** can close this ticket.',
+      content: 'I could not verify your server permissions.',
       flags: MessageFlags.Ephemeral,
     });
     return;
+  }
+
+  const isReportStaff = data.typeKey === 'report_staff';
+  const isAdmin = member.permissions.has(PermissionFlagsBits.Administrator);
+  const isReportedStaff =
+    isReportStaff &&
+    data.reportedStaffId &&
+    data.reportedStaffId === interaction.user.id;
+
+  if (isReportStaff) {
+    // If the person being reported is an Administrator, they are NEVER allowed
+    // to close their own report. Their attempt is automatically archived to the
+    // protected transcript channel.
+    if (isReportedStaff && isAdmin) {
+      await interaction.reply({
+        content:
+          '⛔ You cannot close a **Report Staff** ticket that is reporting you. ' +
+          'A transcript of the current ticket is being archived automatically.',
+        flags: MessageFlags.Ephemeral,
+      });
+
+      try {
+        await sendReportStaffSecurityTranscript(
+          interaction.channel,
+          data,
+          interaction.user,
+          'Reported administrator attempted to close their own report',
+        );
+
+        await interaction.editReply(
+          `⛔ Close blocked. The transcript was sent to <#${REPORT_STAFF_SECURITY_LOG_CHANNEL_ID}>.`,
+        );
+      } catch (error) {
+        console.error('[REPORT STAFF BLOCKED CLOSE TRANSCRIPT ERROR]', error);
+        await interaction.editReply(
+          '⛔ Close blocked. I could not archive the transcript, so an administrator should check the security log channel permissions.',
+        ).catch(() => {});
+      }
+
+      return;
+    }
+
+    // Report Staff tickets are deliberately stricter than normal tickets:
+    // ONLY members with Administrator may close them.
+    if (!isAdmin) {
+      await interaction.reply({
+        content:
+          'Only a server member with **Administrator** permission can close a **Report Staff** ticket.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+  } else {
+    const isCreator = data.creatorId === interaction.user.id;
+    const isStaff =
+      interaction.channel
+        .permissionsFor(member)
+        ?.has(PermissionFlagsBits.ManageMessages) || false;
+
+    if (!isCreator && !isStaff) {
+      await interaction.reply({
+        content:
+          'Only the ticket creator or staff with **Manage Messages** can close this ticket.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
   }
 
   // Acknowledge instantly so Discord never sits on "thinking..." while the bot
@@ -1341,7 +1410,36 @@ async function reopenTicket(interaction) {
   }
 
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-  if (!isStaffForTicket(interaction, member)) {
+  const liveForPermissionCheck =
+    (await getLiveTicketData(interaction.channel).catch(() => null)) ||
+    baseData;
+
+  if (
+    liveForPermissionCheck.typeKey === 'report_staff' &&
+    liveForPermissionCheck.reportedStaffId === interaction.user.id
+  ) {
+    await interaction.reply({
+      content: 'You cannot reopen a **Report Staff** ticket that is reporting you.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (
+    liveForPermissionCheck.typeKey === 'report_staff' &&
+    !member?.permissions.has(PermissionFlagsBits.Administrator)
+  ) {
+    await interaction.reply({
+      content: 'Only a server **Administrator** can reopen a Report Staff ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (
+    liveForPermissionCheck.typeKey !== 'report_staff' &&
+    !isStaffForTicket(interaction, member)
+  ) {
     await interaction.reply({
       content: 'You need **Manage Messages** to reopen tickets.',
       flags: MessageFlags.Ephemeral,
@@ -1830,6 +1928,130 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
   };
 }
 
+
+async function sendReportStaffSecurityTranscript(
+  channel,
+  data,
+  attemptedByUser,
+  eventLabel = 'Blocked close attempt',
+) {
+  const guild = channel.guild;
+  const logChannel =
+    guild.channels.cache.get(REPORT_STAFF_SECURITY_LOG_CHANNEL_ID) ||
+    (await guild.channels
+      .fetch(REPORT_STAFF_SECURITY_LOG_CHANNEL_ID)
+      .catch(() => null));
+
+  if (
+    !logChannel ||
+    !logChannel.isTextBased() ||
+    typeof logChannel.send !== 'function'
+  ) {
+    throw new Error(
+      `Report Staff security log channel ${REPORT_STAFF_SECURITY_LOG_CHANNEL_ID} is missing or not sendable.`,
+    );
+  }
+
+  const artifact = await buildTranscriptArtifact(channel, data);
+
+  const creator =
+    guild.members.cache.get(data.creatorId) ||
+    (await guild.members.fetch(data.creatorId).catch(() => null));
+  const reported =
+    (data.reportedStaffId &&
+      (guild.members.cache.get(data.reportedStaffId) ||
+        (await guild.members.fetch(data.reportedStaffId).catch(() => null)))) ||
+    null;
+
+  const embed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('🛡️ Report Staff Security Transcript')
+    .setDescription(
+      `A protected action was blocked on a **Report Staff** ticket and a transcript was archived automatically.`,
+    )
+    .addFields(
+      {
+        name: 'Event',
+        value: eventLabel,
+      },
+      {
+        name: 'Ticket',
+        value: `#${data.number} • ${channel.name}`,
+      },
+      {
+        name: 'Ticket Owner',
+        value: `<@${data.creatorId}>`,
+        inline: true,
+      },
+      {
+        name: 'Reported Staff',
+        value: data.reportedStaffId
+          ? `<@${data.reportedStaffId}>`
+          : 'Not selected',
+        inline: true,
+      },
+      {
+        name: 'Attempted By',
+        value: `<@${attemptedByUser.id}>`,
+      },
+      {
+        name: 'Messages Captured',
+        value: String(artifact.messages.length),
+        inline: true,
+      },
+    )
+    .setTimestamp();
+
+  if (creator?.user?.displayAvatarURL) {
+    embed.setAuthor({
+      name:
+        creator.displayName ||
+        creator.user.globalName ||
+        creator.user.username,
+      iconURL: creator.user.displayAvatarURL({ size: 128 }),
+    });
+  }
+
+  if (reported?.user) {
+    embed.setFooter({
+      text: `Reported staff: ${reported.user.username}`,
+    });
+  }
+
+  const logMessage = await logChannel.send({
+    files: [
+      new AttachmentBuilder(Buffer.from(artifact.html, 'utf8'), {
+        name: artifact.filename,
+      }),
+    ],
+    embeds: [embed],
+    allowedMentions: { parse: [] },
+  });
+
+  const uploadedTranscript = logMessage.attachments.first();
+
+  if (uploadedTranscript?.url) {
+    await logMessage.edit({
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('Direct Link')
+            .setEmoji('📎')
+            .setStyle(ButtonStyle.Link)
+            .setURL(uploadedTranscript.url),
+        ),
+      ],
+    });
+  }
+
+  console.log(
+    `[REPORT STAFF SECURITY] Transcript for ticket #${data.number} sent to ` +
+      `${REPORT_STAFF_SECURITY_LOG_CHANNEL_ID} after ${eventLabel}.`,
+  );
+
+  return logMessage;
+}
+
 async function sendTranscript(interaction) {
   const data = getTicketData(interaction.channel);
   if (!data) {
@@ -1875,7 +2097,11 @@ function delay(ms) {
 }
 
 async function deleteTicket(interaction) {
-  const data = getTicketData(interaction.channel);
+  const baseData = getTicketData(interaction.channel);
+  const data =
+    (await getLiveTicketData(interaction.channel).catch(() => null)) ||
+    baseData;
+
   if (!data || !messageHasButton(interaction.message, 'ticket_delete')) {
     await interaction.reply({
       content: 'These closed-ticket controls are no longer active.',
@@ -1885,7 +2111,33 @@ async function deleteTicket(interaction) {
   }
 
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-  if (!isStaffForTicket(interaction, member)) {
+
+  if (
+    data.typeKey === 'report_staff' &&
+    data.reportedStaffId === interaction.user.id
+  ) {
+    await interaction.reply({
+      content: 'You cannot delete a **Report Staff** ticket that is reporting you.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (
+    data.typeKey === 'report_staff' &&
+    !member?.permissions.has(PermissionFlagsBits.Administrator)
+  ) {
+    await interaction.reply({
+      content: 'Only a server **Administrator** can delete a Report Staff ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (
+    data.typeKey !== 'report_staff' &&
+    !isStaffForTicket(interaction, member)
+  ) {
     await interaction.reply({
       content: 'You need **Manage Messages** to delete tickets.',
       flags: MessageFlags.Ephemeral,
@@ -2721,63 +2973,6 @@ async function giveSelectedRole(interaction) {
 }
 
 
-async function changeReportStaffPage(interaction) {
-  const [, creatorId, rawPage] = interaction.customId.split(':');
-  const data = await getLiveTicketData(interaction.channel);
-
-  if (
-    !data ||
-    data.typeKey !== 'report_staff' ||
-    data.creatorId !== creatorId
-  ) {
-    await interaction.reply({
-      content: 'This staff-report menu is no longer valid.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (interaction.user.id !== creatorId) {
-    await interaction.reply({
-      content: 'Only the ticket creator can choose the staff member being reported.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (data.staffSelectionStatus === 'done') {
-    await interaction.reply({
-      content: 'The staff member for this report has already been selected.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const staffMembers = await getReportableStaffMembers(
-    interaction.guild,
-    creatorId,
-  );
-
-  if (!staffMembers.length) {
-    await interaction.reply({
-      content: 'No eligible staff members could be loaded.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  await interaction.update({
-    components: [
-      getTicketButtons('report_staff'),
-      ...buildReportStaffSelector(
-        creatorId,
-        staffMembers,
-        Number(rawPage) || 0,
-      ),
-    ],
-  });
-}
-
 async function selectReportedStaff(interaction) {
   const [, creatorId] = interaction.customId.split(':');
   const data = await getLiveTicketData(interaction.channel);
@@ -2810,7 +3005,41 @@ async function selectReportedStaff(interaction) {
     return;
   }
 
-  const selectedStaffId = interaction.values[0];
+  const selectedValue = interaction.values[0];
+
+  // Navigation is embedded inside the select menu itself.
+  if (
+    selectedValue.startsWith('__next__:') ||
+    selectedValue.startsWith('__back__:')
+  ) {
+    const [, rawPage] = selectedValue.split(':');
+    const staffMembers = await getReportableStaffMembers(
+      interaction.guild,
+      creatorId,
+    );
+
+    if (!staffMembers.length) {
+      await interaction.reply({
+        content: 'No eligible staff members could be loaded.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.update({
+      components: [
+        getTicketButtons('report_staff'),
+        ...buildReportStaffSelector(
+          creatorId,
+          staffMembers,
+          Number(rawPage) || 0,
+        ),
+      ],
+    });
+    return;
+  }
+
+  const selectedStaffId = selectedValue;
   const selectedStaff = await interaction.guild.members
     .fetch(selectedStaffId)
     .catch(() => null);
@@ -2845,6 +3074,22 @@ async function selectReportedStaff(interaction) {
       shouldCreatorBeUnlocked(next),
       `Staff report target selected by ${interaction.user.tag}`,
     );
+
+    // Add the selected/reported staff member directly to this private ticket.
+    // This works for both normal staff and administrators. Administrator users
+    // already bypass channel overwrites, but the explicit overwrite keeps the
+    // intended access clear and also handles non-admin staff.
+    await interaction.channel.permissionOverwrites.edit(
+      selectedStaff.id,
+      {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: true,
+        AttachFiles: true,
+        EmbedLinks: true,
+      },
+      `Reported staff added by ${interaction.user.tag}`,
+    );
   } catch (error) {
     console.error('[REPORT STAFF SELECTION ERROR]', error);
     await interaction.reply({
@@ -2868,13 +3113,15 @@ async function selectReportedStaff(interaction) {
       `You selected **${selectedName}**.\n\n` +
         'You can now type in this ticket. Please explain exactly what happened and provide evidence to support the report. ' +
         'Useful evidence can include screenshots, video, message links, dates/times, and any other relevant context.\n\n' +
-        '**Do not alert or contact the reported staff member through this ticket. This report is visible only to you and server administrators.**',
+        '**The selected staff member has now been added to this ticket. Only server administrators may close this report.**',
     );
 
   await interaction.channel.send({
-    content: `<@${creatorId}>`,
+    content: `<@${creatorId}> <@${selectedStaff.id}>`,
     embeds: [evidenceEmbed],
-    allowedMentions: { users: [creatorId] },
+    allowedMentions: {
+      users: [...new Set([creatorId, selectedStaff.id])],
+    },
   });
 }
 
@@ -2891,9 +3138,6 @@ async function handleTicketInteraction(interaction) {
     if (interaction.customId === 'ticket_claim') return claimTicket(interaction);
     if (interaction.customId === 'ticket_role') return openRoleMenu(interaction);
     if (interaction.customId.startsWith('ticket_role_page:')) return changeRolePage(interaction);
-    if (interaction.customId.startsWith('ticket_report_staff_page:')) {
-      return changeReportStaffPage(interaction);
-    }
     if (interaction.customId.startsWith('ticket_ingame_id:')) return openInGameIdModal(interaction);
   }
 

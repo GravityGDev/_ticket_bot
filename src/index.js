@@ -12,6 +12,15 @@ const {
   Routes,
 } = require('discord.js');
 const { handleTicketInteraction } = require('./ticket-system');
+const {
+  backfillOpenReportStaffTickets,
+  trackReportStaffChannelCreate,
+  trackReportStaffMessageCreate,
+  trackReportStaffMessageUpdate,
+  trackReportStaffMessageDelete,
+  trackReportStaffMessageDeleteBulk,
+  handleReportStaffChannelDelete,
+} = require('./report-staff-tracker');
 
 const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID'];
 for (const key of requiredEnv) {
@@ -27,6 +36,10 @@ const client = new Client({
     // Needed so Report Staff can load the complete staff list and filter it
     // by the View Audit Log permission.
     GatewayIntentBits.GuildMembers,
+    // Report Staff tickets are continuously archived so a manual channel
+    // deletion cannot destroy the transcript.
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
@@ -162,6 +175,55 @@ if (fs.existsSync(eventsPath)) {
     }
   }
 }
+
+// Persistent Report Staff transcript tracking.
+//
+// These listeners continuously mirror Report Staff ticket messages to MongoDB.
+// ChannelDelete then rebuilds the transcript from MongoDB, so even a manual
+// Discord channel deletion cannot erase the ticket history.
+client.on(Events.ChannelCreate, (channel) => {
+  trackReportStaffChannelCreate(channel).catch((error) => {
+    console.error('[REPORT STAFF CHANNEL CREATE TRACKER ERROR]', error);
+  });
+});
+
+client.on(Events.MessageCreate, (message) => {
+  trackReportStaffMessageCreate(message).catch((error) => {
+    console.error('[REPORT STAFF MESSAGE CREATE TRACKER ERROR]', error);
+  });
+});
+
+client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
+  trackReportStaffMessageUpdate(oldMessage, newMessage).catch((error) => {
+    console.error('[REPORT STAFF MESSAGE UPDATE TRACKER ERROR]', error);
+  });
+});
+
+client.on(Events.MessageDelete, (message) => {
+  trackReportStaffMessageDelete(message).catch((error) => {
+    console.error('[REPORT STAFF MESSAGE DELETE TRACKER ERROR]', error);
+  });
+});
+
+client.on(Events.MessageBulkDelete, (messages) => {
+  trackReportStaffMessageDeleteBulk(messages).catch((error) => {
+    console.error('[REPORT STAFF MESSAGE BULK DELETE TRACKER ERROR]', error);
+  });
+});
+
+client.on(Events.ChannelDelete, (channel) => {
+  handleReportStaffChannelDelete(channel).catch((error) => {
+    console.error('[REPORT STAFF CHANNEL DELETE ARCHIVE ERROR]', error);
+  });
+});
+
+client.once(Events.ClientReady, (readyClient) => {
+  // Backfill any Report Staff tickets that already existed when this update
+  // was deployed, so their earlier visible history is copied into MongoDB too.
+  backfillOpenReportStaffTickets(readyClient).catch((error) => {
+    console.error('[REPORT STAFF BACKFILL ERROR]', error);
+  });
+});
 
 // Slash commands, ticket buttons, and ticket select menus.
 client.on(Events.InteractionCreate, async (interaction) => {
