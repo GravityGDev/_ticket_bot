@@ -324,6 +324,57 @@ async function createWarningRemovalSchedule(guildId, input, createdBy) {
   return { ...document, _id: result.insertedId };
 }
 
+async function attachWarningMessage(
+  guildId,
+  scheduleId,
+  channelId,
+  messageId,
+) {
+  const objectId = parseObjectId(scheduleId);
+  if (!objectId) throw new Error('Invalid schedule ID.');
+
+  const channelKey = String(channelId || '').trim();
+  const messageKey = String(messageId || '').trim();
+
+  if (!/^\d{16,22}$/.test(channelKey)) {
+    throw new Error('Invalid warning channel ID.');
+  }
+  if (!/^\d{16,22}$/.test(messageKey)) {
+    throw new Error('Invalid warning message ID.');
+  }
+
+  const result = await (await warningRemovalsCollection()).findOneAndUpdate(
+    {
+      _id: objectId,
+      guildId: String(guildId),
+    },
+    {
+      $set: {
+        channelId: channelKey,
+        messageId: messageKey,
+        messageLinkedAt: new Date(),
+        updatedAt: new Date(),
+      },
+    },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+
+  if (!result) throw new Error('Warning schedule was not found.');
+  return result;
+}
+
+async function getPendingWarningMessageSchedules(limit = 500) {
+  return (await warningRemovalsCollection())
+    .find({
+      status: 'pending',
+      channelId: { $type: 'string' },
+      messageId: { $type: 'string' },
+    })
+    .sort({ executeAt: 1 })
+    .limit(Math.max(1, Math.min(Number(limit) || 500, 1000)))
+    .toArray();
+}
+
 async function getWarningRemovalSchedule(guildId, scheduleId) {
   const objectId = parseObjectId(scheduleId);
   if (!objectId) return null;
@@ -359,6 +410,111 @@ async function revokeWarningRemovalSchedule(guildId, scheduleId, revokedBy) {
 
   if (!result) {
     throw new Error('This warning is no longer pending.');
+  }
+
+  return result;
+}
+
+async function saveWarningRevokeDetails(
+  guildId,
+  scheduleId,
+  revokedBy,
+  revokeReason,
+) {
+  const objectId = parseObjectId(scheduleId);
+  if (!objectId) throw new Error('Invalid schedule ID.');
+
+  const reason = String(revokeReason || '').trim().slice(0, 1000);
+
+  if (!reason) {
+    throw new Error('A revoke reason is required.');
+  }
+
+  const result = await (await warningRemovalsCollection()).findOneAndUpdate(
+    {
+      _id: objectId,
+      guildId: String(guildId),
+      status: 'pending',
+    },
+    {
+      $set: {
+        status: 'revoked',
+        revokeReason: reason,
+        revokedAt: new Date(),
+        revokedBy: String(revokedBy),
+        finishedAt: new Date(),
+        updatedAt: new Date(),
+        updatedBy: String(revokedBy),
+      },
+    },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+
+  if (!result) {
+    throw new Error('This warning is no longer pending.');
+  }
+
+  return result;
+}
+
+async function saveWarningExtensionDetails(
+  guildId,
+  scheduleId,
+  executeAt,
+  extendedBy,
+  extensionReason,
+  extensionLabel,
+) {
+  const objectId = parseObjectId(scheduleId);
+  if (!objectId) throw new Error('Invalid schedule ID.');
+
+  const reason = String(extensionReason || '').trim().slice(0, 1000);
+
+  if (!reason) {
+    throw new Error('An extension reason is required.');
+  }
+
+  const normalized = normalizeWarningScheduleInput({
+    userId: '1000000000000000',
+    roleId: '1000000000000000',
+    executeAt,
+  });
+
+  const now = new Date();
+
+  const historyEntry = {
+    extendedAt: now,
+    extendedBy: String(extendedBy),
+    reason,
+    amount: String(extensionLabel || 'Custom extension').slice(0, 100),
+    newExecuteAt: normalized.executeAt,
+  };
+
+  const result = await (await warningRemovalsCollection()).findOneAndUpdate(
+    {
+      _id: objectId,
+      guildId: String(guildId),
+      status: 'pending',
+    },
+    {
+      $set: {
+        executeAt: normalized.executeAt,
+        lastExtensionReason: reason,
+        lastExtendedBy: String(extendedBy),
+        lastExtendedAt: now,
+        lastExtensionAmount: historyEntry.amount,
+        updatedAt: now,
+        updatedBy: String(extendedBy),
+      },
+      $push: {
+        extensionHistory: historyEntry,
+      },
+    },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+
+  if (!result) {
+    throw new Error('Pending warning-removal schedule not found.');
   }
 
   return result;
@@ -476,8 +632,12 @@ module.exports = {
   recordGoalGrant,
   getWarningRemovalSchedules,
   getWarningRemovalSchedule,
+  getPendingWarningMessageSchedules,
   createWarningRemovalSchedule,
+  attachWarningMessage,
   revokeWarningRemovalSchedule,
+  saveWarningRevokeDetails,
+  saveWarningExtensionDetails,
   updateWarningRemovalSchedule,
   deleteWarningRemovalSchedule,
   claimDueWarningRemovals,
