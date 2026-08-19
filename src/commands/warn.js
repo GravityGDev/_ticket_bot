@@ -6,6 +6,7 @@ const {
 } = require('discord.js');
 const {
   createWarningRemovalSchedule,
+  attachWarningMessage,
 } = require('../staff-settings-store');
 const {
   buildWarningActionRow,
@@ -385,17 +386,17 @@ module.exports = {
           },
           {
             name: 'Automatic Removal',
-            value: `<t:${unix}:F>\n**Removes <t:${unix}:R>**`,
+            value: `<t:${unix}:F>`,
           },
         )
         .setFooter({
-          text: 'The removal countdown updates automatically.',
+          text: 'The warning will be removed automatically at the time above.',
         })
         .setTimestamp();
 
       // Send only the embed; there is no separate ping/message above it.
       // Mentions inside the embed are displayed without generating notifications.
-      await interaction.channel.send({
+      const warningMessage = await interaction.channel.send({
         embeds: [embed],
         components: [
           buildWarningActionRow(String(schedule._id)),
@@ -404,6 +405,15 @@ module.exports = {
           parse: [],
         },
       });
+
+      // Persist the exact Discord warning message in MongoDB. The background
+      // countdown worker can therefore recover it after Render restarts.
+      await attachWarningMessage(
+        interaction.guild.id,
+        String(schedule._id),
+        interaction.channel.id,
+        warningMessage.id,
+      );
 
       await interaction.deleteReply().catch(() => {});
     } catch (error) {
