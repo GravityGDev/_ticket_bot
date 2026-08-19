@@ -7,6 +7,7 @@ const {
 const {
   createWarningRemovalSchedule,
   attachWarningMessage,
+  getStaffWarningHistoryCount,
 } = require('../staff-settings-store');
 const {
   buildWarningActionRow,
@@ -208,6 +209,82 @@ function getRemovalDate(interaction, duration) {
   );
 }
 
+function getEvidenceAttachments(interaction) {
+  const attachments = [];
+
+  for (let index = 1; index <= 5; index += 1) {
+    const attachment = interaction.options.getAttachment(
+      `evidence-${index}`,
+    );
+
+    if (!attachment) continue;
+
+    const contentType = String(attachment.contentType || '').toLowerCase();
+    const fileName = String(attachment.name || '').toLowerCase();
+    const imageExtension = /\.(png|jpe?g|gif|webp)$/i.test(fileName);
+
+    if (!contentType.startsWith('image/') && !imageExtension) {
+      throw new Error(
+        `Evidence ${index} must be an image (PNG, JPG, GIF or WEBP).`,
+      );
+    }
+
+    attachments.push(attachment);
+  }
+
+  return attachments;
+}
+
+async function downloadEvidenceFiles(attachments) {
+  const files = [];
+
+  for (let index = 0; index < attachments.length; index += 1) {
+    const attachment = attachments[index];
+    const response = await fetch(attachment.url);
+
+    if (!response.ok) {
+      throw new Error(
+        `I could not download evidence image ${index + 1}.`,
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // Keep filenames deterministic and attachment:// safe.
+    const originalName = String(
+      attachment.name || `evidence-${index + 1}.png`,
+    );
+    const extensionMatch = originalName.match(/\.[A-Za-z0-9]{2,5}$/);
+    const extension = extensionMatch
+      ? extensionMatch[0].toLowerCase()
+      : '.png';
+
+    files.push({
+      attachment: buffer,
+      name: `warning-evidence-${index + 1}${extension}`,
+      contentType: attachment.contentType || null,
+      originalName,
+    });
+  }
+
+  return files;
+}
+
+function buildEvidenceEmbeds(files) {
+  return files.map((file, index) => {
+    const embed = new EmbedBuilder()
+      .setColor(0x2b2d31)
+      .setImage(`attachment://${file.name}`);
+
+    if (index === 0) {
+      embed.setDescription('**Evidence:**');
+    }
+
+    return embed;
+  });
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('warn')
@@ -259,6 +336,36 @@ module.exports = {
           { name: '30 days', value: '30d' },
           { name: 'Custom date/time', value: 'custom' },
         ),
+    )
+    .addAttachmentOption((option) =>
+      option
+        .setName('evidence-1')
+        .setDescription('Optional evidence image 1.')
+        .setRequired(false),
+    )
+    .addAttachmentOption((option) =>
+      option
+        .setName('evidence-2')
+        .setDescription('Optional evidence image 2.')
+        .setRequired(false),
+    )
+    .addAttachmentOption((option) =>
+      option
+        .setName('evidence-3')
+        .setDescription('Optional evidence image 3.')
+        .setRequired(false),
+    )
+    .addAttachmentOption((option) =>
+      option
+        .setName('evidence-4')
+        .setDescription('Optional evidence image 4.')
+        .setRequired(false),
+    )
+    .addAttachmentOption((option) =>
+      option
+        .setName('evidence-5')
+        .setDescription('Optional evidence image 5.')
+        .setRequired(false),
     )
     .addIntegerOption((option) =>
       option
@@ -331,6 +438,7 @@ module.exports = {
       const reason = interaction.options.getString('reason', true).trim();
       const roleId = interaction.options.getString('warning-role', true);
       const duration = interaction.options.getString('remove-in', true);
+      const evidenceAttachments = getEvidenceAttachments(interaction);
 
       const member = await interaction.guild.members
         .fetch(targetUser.id)
@@ -395,6 +503,17 @@ module.exports = {
         interaction.user.id,
       );
 
+      const [
+        warningCount,
+        evidenceFiles,
+      ] = await Promise.all([
+        getStaffWarningHistoryCount(
+          interaction.guild.id,
+          member.id,
+        ),
+        downloadEvidenceFiles(evidenceAttachments),
+      ]);
+
       const unix = Math.floor(
         new Date(schedule.executeAt).getTime() / 1000,
       );
@@ -419,6 +538,12 @@ module.exports = {
             value: reason,
           },
           {
+            name: 'Warning History',
+            value:
+              `**${warningCount}** warning${warningCount === 1 ? '' : 's'} on record`,
+            inline: true,
+          },
+          {
             name: 'Automatic Removal',
             value: `<t:${unix}:F>`,
           },
@@ -430,8 +555,14 @@ module.exports = {
 
       // Send only the embed; there is no separate ping/message above it.
       // Mentions inside the embed are displayed without generating notifications.
+      const evidenceEmbeds = buildEvidenceEmbeds(evidenceFiles);
+
       const warningMessage = await interaction.channel.send({
-        embeds: [embed],
+        embeds: [embed, ...evidenceEmbeds],
+        files: evidenceFiles.map((file) => ({
+          attachment: file.attachment,
+          name: file.name,
+        })),
         components: [
           buildWarningActionRow(String(schedule._id)),
         ],
@@ -440,13 +571,21 @@ module.exports = {
         },
       });
 
-      // Persist the exact Discord warning message in MongoDB. The background
-      // countdown worker can therefore recover it after Render restarts.
+      const storedEvidence = [...warningMessage.attachments.values()]
+        .map((attachment) => ({
+          url: attachment.url,
+          name: attachment.name,
+          contentType: attachment.contentType,
+          size: attachment.size,
+        }));
+
+      // Persist the exact Discord warning message and evidence in MongoDB.
       await attachWarningMessage(
         interaction.guild.id,
         String(schedule._id),
         interaction.channel.id,
         warningMessage.id,
+        storedEvidence,
       );
 
       await interaction.deleteReply().catch(() => {});
