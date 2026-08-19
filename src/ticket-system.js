@@ -1980,6 +1980,16 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
         value: `<@${data.creatorId}>`,
       },
       {
+        name: 'Claimed By',
+        value:
+          data.typeKey === 'report_staff' ||
+          data.typeKey === 'muted_without_reason'
+            ? 'Not applicable'
+            : data.claimedById
+              ? `<@${data.claimedById}>`
+              : 'Unclaimed',
+      },
+      {
         name: 'Ticket Name',
         value: channel.name,
       },
