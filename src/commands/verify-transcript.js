@@ -1,3 +1,4 @@
+const { gunzipSync } = require('node:zlib');
 const {
   EmbedBuilder,
   MessageFlags,
@@ -33,7 +34,7 @@ module.exports = {
             'transcript',
           )
           .setDescription(
-            'The Snay ticket transcript HTML file.',
+            'The Snay ticket transcript (.html or .html.gz).',
           )
           .setRequired(
             true,
@@ -91,13 +92,13 @@ module.exports = {
       );
 
     if (
-      !/\.html?$/i.test(
+      !/\.html?(?:\.gz)?$/i.test(
         filename,
       )
     ) {
       await interaction.reply({
         content:
-          'Please upload the original `.html` ticket transcript.',
+          'Please upload the original `.html` or `.html.gz` ticket transcript.',
         flags:
           MessageFlags.Ephemeral,
       });
@@ -158,9 +159,14 @@ module.exports = {
         );
       }
 
+      const transcriptBuffer =
+        /\.gz$/i.test(filename)
+          ? gunzipSync(buffer)
+          : buffer;
+
       const result =
         await verifyTranscriptHtml(
-          buffer.toString(
+          transcriptBuffer.toString(
             'utf8',
           ),
         );
