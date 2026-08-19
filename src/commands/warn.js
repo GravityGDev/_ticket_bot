@@ -7,6 +7,9 @@ const {
 const {
   createWarningRemovalSchedule,
 } = require('../staff-settings-store');
+const {
+  buildWarningActionRow,
+} = require('../warn-system');
 
 const WARNING_ROLES = Object.freeze({
   warning1: '961199921841713162',
@@ -52,17 +55,6 @@ function buildYearChoices() {
   });
 }
 
-function buildHourChoices() {
-  return Array.from({ length: 13 }, (_, index) => {
-    const hour = index + 1;
-    const label = `${String(hour).padStart(2, '0')}:00`;
-
-    return {
-      name: label,
-      value: hour,
-    };
-  });
-}
 
 function daysInMonth(year, month) {
   return new Date(Date.UTC(year, month, 0)).getUTCDate();
@@ -260,9 +252,10 @@ module.exports = {
     .addIntegerOption((option) =>
       option
         .setName('hour')
-        .setDescription('Custom only: select hour 01:00 through 13:00.')
+        .setDescription('Custom only: hour in 24-hour time (0-23), e.g. 1, 13, 20.')
         .setRequired(false)
-        .addChoices(...buildHourChoices()),
+        .setMinValue(0)
+        .setMaxValue(23),
     )
     .addIntegerOption((option) =>
       option
@@ -400,20 +393,15 @@ module.exports = {
         })
         .setTimestamp();
 
-      // Prevent duplicate allowed_mentions when an admin warns themselves.
-      const mentionUsers = [
-        ...new Set([
-          member.id,
-          interaction.user.id,
-        ]),
-      ];
-
+      // Send only the embed; there is no separate ping/message above it.
+      // Mentions inside the embed are displayed without generating notifications.
       await interaction.channel.send({
-        content: `<@${member.id}>`,
         embeds: [embed],
+        components: [
+          buildWarningActionRow(String(schedule._id)),
+        ],
         allowedMentions: {
-          users: mentionUsers,
-          roles: [],
+          parse: [],
         },
       });
 
