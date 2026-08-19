@@ -1,3 +1,4 @@
+const { gzipSync } = require('node:zlib');
 const {
   ActionRowBuilder,
   AttachmentBuilder,
@@ -3817,31 +3818,237 @@ async function buildTranscriptArtifact(
   };
 }
 
-async function sendTranscriptToLog(channel, data, deletedByUser) {
-  const guild = channel.guild;
-  const logChannel =
-    guild.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID) ||
-    (await guild.channels.fetch(TRANSCRIPT_LOG_CHANNEL_ID).catch(() => null));
+function transcriptArchiveError(code, message, details = {}) {
+  const error = new Error(message);
+  error.transcriptArchiveCode = code;
+  error.transcriptArchiveDetails = details;
+  return error;
+}
 
+function isDiscordUploadTooLarge(error) {
+  const code = String(
+    error?.code ||
+    error?.rawError?.code ||
+    '',
+  );
+
+  const message = String(
+    error?.message ||
+    error?.rawError?.message ||
+    '',
+  ).toLowerCase();
+
+  return (
+    code === '40005' ||
+    message.includes('request entity too large') ||
+    message.includes('file too large') ||
+    message.includes('payload too large') ||
+    message.includes('maximum file size')
+  );
+}
+
+function getTranscriptArchiveFailureMessage(error) {
+  const code =
+    error?.transcriptArchiveCode ||
+    null;
+
+  if (code === 'SIGNING_SECRET') {
+    return (
+      'The transcript signing system is not configured. ' +
+      'Add **TRANSCRIPT_SIGNING_SECRET** in Render Environment (at least 32 characters), ' +
+      'then redeploy the bot.'
+    );
+  }
+
+  if (code === 'LOG_CHANNEL_MISSING') {
+    return (
+      `I cannot access the configured transcript log channel <#${TRANSCRIPT_LOG_CHANNEL_ID}>. ` +
+      'Check that the channel still exists and the configured ID is correct.'
+    );
+  }
+
+  if (code === 'LOG_PERMISSIONS') {
+    const missing =
+      error?.transcriptArchiveDetails?.missing ||
+      [];
+
+    return (
+      `I am missing permissions in <#${TRANSCRIPT_LOG_CHANNEL_ID}>: ` +
+      `**${missing.join(', ') || 'unknown permissions'}**.`
+    );
+  }
+
+  if (code === 'MONGODB') {
+    return (
+      'The transcript was generated, but I could not save its integrity record to **MongoDB**. ' +
+      'Check the MongoDB connection/configuration.'
+    );
+  }
+
+  if (code === 'UPLOAD_TOO_LARGE') {
+    return (
+      'The generated transcript is too large for Discord to upload, even after compression. ' +
+      'This usually happens when the ticket contains many large images.'
+    );
+  }
+
+  if (code === 'DISCORD_UPLOAD') {
+    const discordCode =
+      error?.transcriptArchiveDetails?.discordCode;
+
+    return (
+      'Discord rejected the transcript upload' +
+      (discordCode ? ` (error **${discordCode}**)` : '') +
+      '. The ticket was kept so no transcript data was lost.'
+    );
+  }
+
+  const message =
+    String(error?.message || '');
+
+  if (
+    message.includes(
+      'TRANSCRIPT_SIGNING_SECRET',
+    )
+  ) {
+    return (
+      'The transcript signing system is not configured. ' +
+      'Add **TRANSCRIPT_SIGNING_SECRET** in Render Environment (at least 32 characters), ' +
+      'then redeploy the bot.'
+    );
+  }
+
+  return (
+    'The transcript could not be archived because of an unexpected transcript-generation error. ' +
+    'Check the Render logs for **[TICKET DELETE TRANSCRIPT LOG ERROR]**.'
+  );
+}
+
+async function assertTranscriptLogReady(guild, logChannel) {
   if (
     !logChannel ||
     !logChannel.isTextBased() ||
     typeof logChannel.send !== 'function'
   ) {
-    throw new Error(
+    throw transcriptArchiveError(
+      'LOG_CHANNEL_MISSING',
       `Transcript log channel ${TRANSCRIPT_LOG_CHANNEL_ID} is missing or not sendable.`,
     );
   }
 
-  const artifact = await buildTranscriptArtifact(
-    channel,
-    data,
-    {
-      transcriptCreatedByUser: deletedByUser,
-      closedById: data.closedById || null,
-      closedAt: data.closedAt || null,
-    },
+  const me =
+    guild.members.me ||
+    (await guild.members
+      .fetchMe()
+      .catch(() => null));
+
+  if (!me) {
+    throw transcriptArchiveError(
+      'LOG_PERMISSIONS',
+      'Could not resolve the bot member to check transcript permissions.',
+      {
+        missing: ['Bot member unavailable'],
+      },
+    );
+  }
+
+  const permissions =
+    logChannel.permissionsFor(me);
+
+  const required = [
+    [
+      PermissionFlagsBits.ViewChannel,
+      'View Channel',
+    ],
+    [
+      PermissionFlagsBits.SendMessages,
+      'Send Messages',
+    ],
+    [
+      PermissionFlagsBits.AttachFiles,
+      'Attach Files',
+    ],
+    [
+      PermissionFlagsBits.EmbedLinks,
+      'Embed Links',
+    ],
+  ];
+
+  const missing =
+    required
+      .filter(
+        ([permission]) =>
+          !permissions?.has(permission),
+      )
+      .map(
+        ([, label]) => label,
+      );
+
+  if (missing.length) {
+    throw transcriptArchiveError(
+      'LOG_PERMISSIONS',
+      `Missing transcript log permissions: ${missing.join(', ')}`,
+      {
+        missing,
+      },
+    );
+  }
+}
+
+async function sendTranscriptToLog(channel, data, deletedByUser) {
+  const guild = channel.guild;
+  const logChannel =
+    guild.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID) ||
+    (await guild.channels
+      .fetch(TRANSCRIPT_LOG_CHANNEL_ID)
+      .catch(() => null));
+
+  await assertTranscriptLogReady(
+    guild,
+    logChannel,
   );
+
+  let artifact;
+
+  try {
+    artifact = await buildTranscriptArtifact(
+      channel,
+      data,
+      {
+        transcriptCreatedByUser: deletedByUser,
+        closedById: data.closedById || null,
+        closedAt: data.closedAt || null,
+      },
+    );
+  } catch (error) {
+    const message =
+      String(error?.message || '');
+
+    if (
+      message.includes(
+        'TRANSCRIPT_SIGNING_SECRET',
+      )
+    ) {
+      throw transcriptArchiveError(
+        'SIGNING_SECRET',
+        message,
+      );
+    }
+
+    if (
+      message.toLowerCase().includes('mongo') ||
+      message.toLowerCase().includes('database') ||
+      error?.name === 'MongoServerError' ||
+      error?.name === 'MongoNetworkError'
+    ) {
+      throw transcriptArchiveError(
+        'MONGODB',
+        message || 'MongoDB transcript integrity write failed.',
+      );
+    }
+
+    throw error;
+  }
   const creator =
     guild.members.cache.get(data.creatorId) ||
     (await guild.members.fetch(data.creatorId).catch(() => null));
@@ -3970,17 +4177,125 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
     })
     .setTimestamp();
 
-  const logMessage = await logChannel.send({
-    files: [
-      new AttachmentBuilder(Buffer.from(artifact.html, 'utf8'), {
-        name: artifact.filename,
-      }),
-    ],
-    embeds: [embed],
-    allowedMentions: { parse: [] },
-  });
+  const htmlBuffer =
+    Buffer.from(
+      artifact.html,
+      'utf8',
+    );
 
-  const uploadedTranscript = logMessage.attachments.first();
+  let logMessage;
+  let uploadedFilename =
+    artifact.filename;
+  let compressed = false;
+
+  try {
+    logMessage = await logChannel.send({
+      files: [
+        new AttachmentBuilder(
+          htmlBuffer,
+          {
+            name:
+              artifact.filename,
+          },
+        ),
+      ],
+      embeds: [embed],
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  } catch (error) {
+    if (
+      !isDiscordUploadTooLarge(
+        error,
+      )
+    ) {
+      throw transcriptArchiveError(
+        'DISCORD_UPLOAD',
+        error?.message ||
+          'Discord rejected the transcript upload.',
+        {
+          discordCode:
+            error?.code ||
+            error?.rawError?.code ||
+            null,
+        },
+      );
+    }
+
+    // Self-contained transcripts can become large because images are embedded
+    // directly in the HTML. Gzip usually reduces the base64/HTML overhead
+    // substantially while preserving every byte needed by /verify-transcript.
+    const gzipBuffer =
+      gzipSync(
+        htmlBuffer,
+        {
+          level: 9,
+        },
+      );
+
+    uploadedFilename =
+      `${artifact.filename}.gz`;
+    compressed = true;
+
+    try {
+      logMessage =
+        await logChannel.send({
+          files: [
+            new AttachmentBuilder(
+              gzipBuffer,
+              {
+                name:
+                  uploadedFilename,
+              },
+            ),
+          ],
+          embeds: [
+            EmbedBuilder.from(
+              embed,
+            ).setFooter({
+              text:
+                `Final transcript • ${artifact.messages.length} messages • GZIP compressed`,
+            }),
+          ],
+          allowedMentions: {
+            parse: [],
+          },
+        });
+    } catch (gzipError) {
+      if (
+        isDiscordUploadTooLarge(
+          gzipError,
+        )
+      ) {
+        throw transcriptArchiveError(
+          'UPLOAD_TOO_LARGE',
+          'Transcript remained too large after GZIP compression.',
+          {
+            htmlBytes:
+              htmlBuffer.length,
+            gzipBytes:
+              gzipBuffer.length,
+          },
+        );
+      }
+
+      throw transcriptArchiveError(
+        'DISCORD_UPLOAD',
+        gzipError?.message ||
+          'Discord rejected the compressed transcript upload.',
+        {
+          discordCode:
+            gzipError?.code ||
+            gzipError?.rawError?.code ||
+            null,
+        },
+      );
+    }
+  }
+
+  const uploadedTranscript =
+    logMessage.attachments.first();
 
   if (uploadedTranscript?.url) {
     const directLinkRow = new ActionRowBuilder().addComponents(
@@ -4003,8 +4318,13 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
 
   return {
     logMessage,
-    messageCount: artifact.messages.length,
-    filename: artifact.filename,
+    messageCount:
+      artifact.messages.length,
+    filename:
+      uploadedFilename,
+    compressed,
+    integrity:
+      artifact.integrity,
   };
 }
 
@@ -4320,20 +4640,35 @@ async function deleteTicket(interaction) {
     console.error('[TICKET DELETE TRANSCRIPT LOG ERROR]', error);
 
     const restoreMessage = buildClosedTicketMessage(interaction.user.id);
+    const publicFailure =
+      getTranscriptArchiveFailureMessage(
+        error,
+      );
+
     restoreMessage.embeds[0]
       .setColor(0xed4245)
       .setDescription(
-        '❌ **Ticket deletion cancelled**\nI could not save the final transcript to the transcript log channel.',
+        '❌ **Ticket deletion cancelled**\n' +
+        'I could not save the final transcript.\n\n' +
+        `**Reason:** ${publicFailure}`,
       );
 
     await interaction.message.edit(restoreMessage).catch(() => {});
 
+    const failureMessage =
+      getTranscriptArchiveFailureMessage(
+        error,
+      );
+
     await interaction.followUp({
       content:
-        `I did **not** delete the ticket because I could not archive the transcript in <#${TRANSCRIPT_LOG_CHANNEL_ID}>. ` +
-        'Check that I can **View Channel**, **Send Messages**, **Attach Files**, and **Embed Links** there.',
-      flags: MessageFlags.Ephemeral,
-      allowedMentions: { parse: [] },
+        'I did **not** delete the ticket because the final transcript could not be archived.\n\n' +
+        `**Reason:** ${failureMessage}`,
+      flags:
+        MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
     }).catch(() => {});
 
     return;
