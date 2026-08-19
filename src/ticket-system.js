@@ -16,7 +16,12 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-store');
-const { getTicketState, setTicketState, deleteTicketState } = require('./ticket-store');
+const {
+  getTicketState,
+  getTicketStatesForCreator,
+  setTicketState,
+  deleteTicketState,
+} = require('./ticket-store');
 const { getNextTicketNumber } = require('./ticket-counter-store');
 const { recordTicketClaim } = require('./staff-tracking-store');
 const { evaluateStaffGoalsForMember } = require('./staff-settings');
@@ -118,6 +123,42 @@ const YOUTUBE_RANGES = {
 
 // Prevent two button presses at the same moment from receiving the same ticket number.
 const ticketCreationQueues = new Map();
+
+// Serialize claim/takeover interactions per ticket. This keeps claim history
+// ordered and guarantees the first eligible staff claim is resolved before a
+// takeover is processed.
+const ticketClaimQueues = new Map();
+
+async function runTicketClaimQueued(channelId, task) {
+  const key = String(channelId);
+  const previous =
+    ticketClaimQueues.get(key) ||
+    Promise.resolve();
+
+  let releaseCurrent;
+  const current = new Promise((resolve) => {
+    releaseCurrent = resolve;
+  });
+
+  const chain = previous
+    .catch(() => {})
+    .then(() => current);
+
+  ticketClaimQueues.set(key, chain);
+
+  await previous.catch(() => {});
+
+  try {
+    return await task();
+  } finally {
+    releaseCurrent();
+
+    if (ticketClaimQueues.get(key) === chain) {
+      ticketClaimQueues.delete(key);
+    }
+  }
+}
+
 
 function getTicketButtons(typeKey = null, unmuteDecision = null) {
   const row = new ActionRowBuilder().addComponents(
@@ -1094,6 +1135,65 @@ async function setCreatorTyping(channel, creatorId, enabled, reason) {
   );
 }
 
+async function findExistingTicketForCreator(
+  guild,
+  creatorId,
+) {
+  const creatorKey = String(creatorId);
+
+  // MongoDB is the primary lookup. If a ticket state points at a channel that
+  // no longer exists (for example after a manual channel deletion), clean that
+  // stale state so it does not permanently block the user.
+  const storedTickets = await getTicketStatesForCreator(
+    guild.id,
+    creatorKey,
+  ).catch((error) => {
+    console.error('[TICKET CREATOR LOOKUP ERROR]', error);
+    return [];
+  });
+
+  for (const state of storedTickets) {
+    const channel =
+      guild.channels.cache.get(state.channelId) ||
+      (await guild.channels
+        .fetch(state.channelId)
+        .catch(() => null));
+
+    if (channel) {
+      const ticketData = getTicketData(channel);
+
+      if (
+        ticketData &&
+        String(ticketData.creatorId) === creatorKey
+      ) {
+        return channel;
+      }
+    } else {
+      await deleteTicketState(state.channelId).catch((error) => {
+        console.error(
+          '[STALE TICKET STATE CLEANUP ERROR]',
+          error,
+        );
+      });
+    }
+  }
+
+  // Legacy fallback: tickets created before Mongo state tracking may still be
+  // identifiable from their immutable channel topic.
+  for (const channel of guild.channels.cache.values()) {
+    const ticketData = getTicketData(channel);
+
+    if (
+      ticketData &&
+      String(ticketData.creatorId) === creatorKey
+    ) {
+      return channel;
+    }
+  }
+
+  return null;
+}
+
 async function createTicket(interaction, typeKey) {
   if (!TICKET_TYPES[typeKey]) {
     await interaction.reply({
@@ -1127,6 +1227,24 @@ async function createTicket(interaction, typeKey) {
   }
 
   await runTicketCreationQueued(guild.id, async () => {
+    const existingTicket = await findExistingTicketForCreator(
+      guild,
+      interaction.user.id,
+    );
+
+    if (existingTicket) {
+      await interaction.editReply({
+        content:
+          `❌ You already have a ticket open: <#${existingTicket.id}>\n` +
+          'You can create another ticket after your existing ticket has been deleted.',
+        components: [],
+        allowedMentions: {
+          parse: [],
+        },
+      });
+      return;
+    }
+
     const category = await guild.channels
       .fetch(configuredCategoryId)
       .catch(() => null);
@@ -2665,6 +2783,13 @@ async function deleteTicket(interaction) {
 }
 
 async function claimTicket(interaction) {
+  return runTicketClaimQueued(
+    interaction.channelId,
+    () => claimTicketUnlocked(interaction),
+  );
+}
+
+async function claimTicketUnlocked(interaction) {
   const data = await getLiveTicketData(interaction.channel);
   if (!data) {
     await interaction.reply({
@@ -2747,26 +2872,47 @@ async function claimTicket(interaction) {
         : `Ticket claimed by ${interaction.user.tag}`,
     );
 
-    // Existing staff-performance tracking remains idempotent per ticket.
-    // This means takeover history can contain multiple staff members without
-    // allowing repeated handovers to inflate the same ticket's claim stat.
-    await recordTicketClaim({
-      guildId: interaction.guild.id,
-      staffId: interaction.user.id,
-      ticketNumber: data.number,
-      typeKey: data.typeKey,
-      channelId: interaction.channel.id,
-      claimedAt,
-    }).catch((statsError) => {
-      console.error('[STAFF TRACKING CLAIM ERROR]', statsError);
-    });
+    let claimCountedForStats = false;
 
-    await evaluateStaffGoalsForMember(
-      interaction.guild,
-      interaction.user.id,
-    ).catch((goalError) => {
-      console.error('[STAFF GOAL CLAIM EVALUATION ERROR]', goalError);
-    });
+    // Claim abuse protection:
+    //
+    // 1. Claiming your OWN ticket never gives staff stats / rank points.
+    // 2. The staff_ticket_claims document is keyed by channel ID, so only the
+    //    first eligible non-creator staff member can ever insert it.
+    // 3. Later takeovers remain in claimHistory but receive no claim points.
+    if (String(interaction.user.id) !== String(data.creatorId)) {
+      claimCountedForStats = await recordTicketClaim({
+        guildId: interaction.guild.id,
+        staffId: interaction.user.id,
+        ticketNumber: data.number,
+        typeKey: data.typeKey,
+        channelId: interaction.channel.id,
+        claimedAt,
+      }).catch((statsError) => {
+        console.error(
+          '[STAFF TRACKING CLAIM ERROR]',
+          statsError,
+        );
+        return false;
+      });
+
+      if (claimCountedForStats) {
+        await evaluateStaffGoalsForMember(
+          interaction.guild,
+          interaction.user.id,
+        ).catch((goalError) => {
+          console.error(
+            '[STAFF GOAL CLAIM EVALUATION ERROR]',
+            goalError,
+          );
+        });
+      }
+    } else {
+      console.log(
+        `[STAFF TRACKING] Claim stats skipped: ${interaction.user.id} ` +
+          `claimed their own ticket #${data.number ?? '?'}.`,
+      );
+    }
   } catch (error) {
     console.error('[TICKET CLAIM STATE ERROR]', error);
     await interaction.reply({

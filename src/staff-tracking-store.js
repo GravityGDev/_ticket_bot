@@ -98,18 +98,30 @@ async function recordTicketClaim({
       claimedAt instanceof Date ? claimedAt : new Date(claimedAt),
   };
 
-  // Channel ID uniquely identifies the ticket, so this also protects against
-  // accidental double-counting if a claim interaction is retried.
-  await (await claimsCollection()).updateOne(
+  // Channel ID uniquely identifies the ticket. Only the FIRST eligible staff
+  // claim can create this document. Later takeovers return false and therefore
+  // do not award extra staff stats / rank points.
+  const result = await (await claimsCollection()).updateOne(
     { _id: document.channelId },
     { $setOnInsert: document },
     { upsert: true },
   );
 
-  console.log(
-    `[STAFF TRACKING] Claim recorded: staff=${document.staffId} ` +
-      `ticket=#${document.ticketNumber ?? '?'} type=${document.typeKey}`,
-  );
+  const recorded = Number(result.upsertedCount) === 1;
+
+  if (recorded) {
+    console.log(
+      `[STAFF TRACKING] First eligible claim recorded: staff=${document.staffId} ` +
+        `ticket=#${document.ticketNumber ?? '?'} type=${document.typeKey}`,
+    );
+  } else {
+    console.log(
+      `[STAFF TRACKING] Claim stats skipped: ticket=#${document.ticketNumber ?? '?'} ` +
+        `already has a counted first claim.`,
+    );
+  }
+
+  return recorded;
 }
 
 async function recordStaffActivityMessage(message) {

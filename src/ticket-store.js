@@ -67,12 +67,42 @@ async function setTicketState(channelId, state) {
   return normalized;
 }
 
+async function getTicketStatesForCreator(guildId, creatorId) {
+  const guildKey = String(guildId || '').trim();
+  const creatorKey = String(creatorId || '').trim();
+
+  if (!guildKey || !creatorKey) {
+    return [];
+  }
+
+  const documents = await (await collection())
+    .find({
+      guildId: guildKey,
+      creatorId: creatorKey,
+    })
+    .toArray();
+
+  return documents
+    .map((document) => {
+      const normalized = normalizeState(document);
+
+      if (!normalized) return null;
+
+      return {
+        channelId: String(document._id),
+        ...normalized,
+      };
+    })
+    .filter(Boolean);
+}
+
 async function deleteTicketState(channelId) {
   await (await collection()).deleteOne({ _id: String(channelId) });
 }
 
 module.exports = {
   getTicketState,
+  getTicketStatesForCreator,
   setTicketState,
   deleteTicketState,
 };
