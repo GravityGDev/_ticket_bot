@@ -9,6 +9,12 @@ module.exports = {
     .setName('rank')
     .setDescription('View your staff activity rank card.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ViewAuditLog)
+    .addUserOption((option) =>
+      option
+        .setName('staff')
+        .setDescription('Optional staff member to view. Defaults to yourself.')
+        .setRequired(false),
+    )
     .addStringOption((option) =>
       option
         .setName('period')
@@ -26,6 +32,7 @@ module.exports = {
     await sendRankCard(
       interaction,
       interaction.options.getString('period') || 'lifetime',
+      interaction.options.getUser('staff'),
     );
   },
 };
