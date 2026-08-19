@@ -25,6 +25,8 @@ const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
 const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
 const REPORT_STAFF_PAGE_SIZE = 23;
+// 22 leaves room for Back + Next + Skip/Not sure inside Discord's 25-option limit.
+const MUTED_STAFF_PAGE_SIZE = 22;
 const REPORT_STAFF_SECURITY_LOG_CHANNEL_ID =
   process.env.REPORT_STAFF_SECURITY_LOG_CHANNEL_ID || '1150135578378125383';
 const TRANSCRIPT_LOG_CHANNEL_ID =
@@ -48,6 +50,12 @@ const TICKET_TYPES = {
     slug: 'cheating-report',
     emoji: '🚨',
     requiresInGameId: false,
+  },
+  muted_without_reason: {
+    label: 'Muted without reason?',
+    slug: 'muted-without-reason',
+    emoji: '🔇',
+    requiresInGameId: true,
   },
   report_staff: {
     label: 'Report Staff',
@@ -109,7 +117,7 @@ const YOUTUBE_RANGES = {
 // Prevent two button presses at the same moment from receiving the same ticket number.
 const ticketCreationQueues = new Map();
 
-function getTicketButtons(typeKey = null) {
+function getTicketButtons(typeKey = null, unmuteDecision = null) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('ticket_close')
@@ -117,6 +125,26 @@ function getTicketButtons(typeKey = null) {
       .setEmoji('🔒')
       .setStyle(ButtonStyle.Secondary),
   );
+
+  // Muted-without-reason tickets have their own resolution controls.
+  if (typeKey === 'muted_without_reason') {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId('ticket_unmute_approve')
+        .setLabel('Approved Unmute')
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(Boolean(unmuteDecision)),
+      new ButtonBuilder()
+        .setCustomId('ticket_unmute_reject')
+        .setLabel('Reject Unmute')
+        .setEmoji('❌')
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(Boolean(unmuteDecision)),
+    );
+
+    return row;
+  }
 
   // Staff reports are intentionally restricted to Close only. They do not
   // expose Claim/Role because only administrators should handle these tickets.
@@ -246,6 +274,13 @@ function getTypeInstructions(typeKey) {
         '**Please provide details about the cheating report.**',
         'Include the player username/ID, what you saw, when it happened, and the server/mode if known.',
         '**Proof is required where possible** — attach screenshots or video evidence.',
+      ].join('\n');
+    case 'muted_without_reason':
+      return [
+        '**Muted without reason?**',
+        'First submit your **in-game user ID** using the button below. You cannot type until this is completed.',
+        'After your ID is submitted, explain why you believe the mute was not justified and provide evidence such as screenshots, videos, message links, dates/times, or other useful context.',
+        'If you know or suspect which staff member muted you, you can optionally select them from the staff menu below. You can also choose **Skip / Not sure**.',
       ].join('\n');
     case 'report_staff':
       return [
@@ -382,6 +417,76 @@ function buildReportStaffSelector(creatorId, staffMembers, page = 0) {
   return [new ActionRowBuilder().addComponents(menu)];
 }
 
+
+function buildMutedStaffSelector(creatorId, staffMembers, page = 0) {
+  const pageCount = Math.max(
+    1,
+    Math.ceil(staffMembers.length / MUTED_STAFF_PAGE_SIZE),
+  );
+  const safePage = Math.min(Math.max(Number(page) || 0, 0), pageCount - 1);
+  const start = safePage * MUTED_STAFF_PAGE_SIZE;
+  const pageMembers = staffMembers.slice(
+    start,
+    start + MUTED_STAFF_PAGE_SIZE,
+  );
+
+  const options = pageMembers.map((member) => ({
+    label: (member.displayName || member.user.username).slice(0, 100),
+    description: `@${member.user.username}`.slice(0, 100),
+    value: member.id,
+  }));
+
+  if (safePage > 0) {
+    options.push({
+      label: 'Back',
+      description: 'View the previous staff list',
+      value: `__back__:${safePage - 1}`,
+      emoji: '⬅️',
+    });
+  }
+
+  if (safePage < pageCount - 1) {
+    options.push({
+      label: 'Next',
+      description: 'View more staff members',
+      value: `__next__:${safePage + 1}`,
+      emoji: '➡️',
+    });
+  }
+
+  // This selector is OPTIONAL for mute appeals.
+  options.push({
+    label: 'Skip / Not sure',
+    description: 'Continue without naming a suspected staff member',
+    value: '__skip__',
+    emoji: '⏭️',
+  });
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`ticket_muted_staff_select:${creatorId}:${safePage}`)
+    .setPlaceholder(
+      pageCount > 1
+        ? `Optional: who muted you? • List ${safePage + 1}/${pageCount}`
+        : 'Optional: select who you think muted you',
+    )
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(options);
+
+  return [new ActionRowBuilder().addComponents(menu)];
+}
+
+function buildInGameIdActionRow(creatorId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`ticket_ingame_id:${creatorId}`)
+      .setLabel('Submit In-game ID')
+      .setEmoji('🆔')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled),
+  );
+}
+
 function buildReportStaffPermissionOverwrites(guild, creatorId, botId) {
   const baseMemberPermissions =
     PermissionFlagsBits.ViewChannel |
@@ -437,19 +542,21 @@ function buildTicketWelcome(ticketNumber, creator, typeKey, options = {}) {
   const components = [getTicketButtons(typeKey)];
 
   if (TICKET_TYPES[typeKey]?.requiresInGameId) {
-    components.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`ticket_ingame_id:${creator.id}`)
-          .setLabel('Submit In-game ID')
-          .setEmoji('🆔')
-          .setStyle(ButtonStyle.Primary),
-      ),
-    );
+    components.push(buildInGameIdActionRow(creator.id));
   }
 
   if (typeKey === 'youtuber_submission') {
     components.push(buildYouTubeSubscriberMenu(creator.id));
+  }
+
+  if (typeKey === 'muted_without_reason' && (options.reportStaffMembers || []).length) {
+    components.push(
+      ...buildMutedStaffSelector(
+        creator.id,
+        options.reportStaffMembers || [],
+        0,
+      ),
+    );
   }
 
   if (typeKey === 'report_staff') {
@@ -750,8 +857,15 @@ function initialSubmissionState(typeKey) {
   return {
     inGameIdStatus: TICKET_TYPES[typeKey]?.requiresInGameId ? 'pending' : 'na',
     youtubeStatus: typeKey === 'youtuber_submission' ? 'pending' : 'na',
-    staffSelectionStatus: typeKey === 'report_staff' ? 'pending' : 'na',
+    staffSelectionStatus:
+      typeKey === 'report_staff'
+        ? 'pending'
+        : typeKey === 'muted_without_reason'
+          ? 'optional'
+          : 'na',
     reportedStaffId: null,
+    unmuteDecision: null,
+    unmuteDecisionBy: null,
   };
 }
 
@@ -796,6 +910,8 @@ function getTicketData(channel) {
     youtubeStatus: ytMatch?.[1]?.toLowerCase() || fallbackState.youtubeStatus,
     staffSelectionStatus: fallbackState.staffSelectionStatus,
     reportedStaffId: fallbackState.reportedStaffId,
+    unmuteDecision: fallbackState.unmuteDecision,
+    unmuteDecisionBy: fallbackState.unmuteDecisionBy,
     claimedById: claimedMatch ? claimedMatch[1] : null,
   };
 }
@@ -816,6 +932,8 @@ async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket dat
     youtubeStatus: next.youtubeStatus,
     staffSelectionStatus: next.staffSelectionStatus,
     reportedStaffId: next.reportedStaffId || null,
+    unmuteDecision: next.unmuteDecision || null,
+    unmuteDecisionBy: next.unmuteDecisionBy || null,
     updatedAt: new Date().toISOString(),
     updateReason: reason,
   });
@@ -839,6 +957,8 @@ async function getLiveTicketData(channel) {
       staffSelectionStatus:
         stored.staffSelectionStatus || base.staffSelectionStatus,
       reportedStaffId: stored.reportedStaffId || base.reportedStaffId,
+      unmuteDecision: stored.unmuteDecision || base.unmuteDecision,
+      unmuteDecisionBy: stored.unmuteDecisionBy || base.unmuteDecisionBy,
     };
   } catch (error) {
     console.error('[TICKET STATE READ ERROR]', error);
@@ -1020,13 +1140,16 @@ async function createTicket(interaction, typeKey) {
     }
 
     let reportStaffMembers = [];
-    if (isReportStaff) {
+    if (isReportStaff || typeKey === 'muted_without_reason') {
       reportStaffMembers = await getReportableStaffMembers(
         guild,
         interaction.user.id,
       );
 
-      if (!reportStaffMembers.length) {
+      // Report Staff requires a staff selection, so it cannot continue with an
+      // empty list. The mute appeal selector is optional, so that ticket can
+      // still be created even if no eligible staff are currently returned.
+      if (isReportStaff && !reportStaffMembers.length) {
         await interaction.editReply({
           content:
             'I could not find any staff members with **View Audit Log** permission. ' +
@@ -1100,6 +1223,8 @@ async function createTicket(interaction, typeKey) {
         youtubeStatus: state.youtubeStatus,
         staffSelectionStatus: state.staffSelectionStatus,
         reportedStaffId: state.reportedStaffId,
+        unmuteDecision: state.unmuteDecision,
+        unmuteDecisionBy: state.unmuteDecisionBy,
         updatedAt: new Date().toISOString(),
         updateReason: 'Ticket created',
       });
@@ -2412,10 +2537,27 @@ async function handleInGameIdModal(interaction) {
         true,
         `Ticket requirements completed by ${interaction.user.tag}`,
       );
-      await interaction.channel.send({
-        content: `<@${creatorId}> ✅ Your required details are submitted. You can now type in this ticket.`,
-        allowedMentions: { users: [creatorId] },
-      });
+      if (data.typeKey === 'muted_without_reason') {
+        const evidenceEmbed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('🔇 Mute appeal evidence')
+          .setDescription(
+            'Your in-game ID has been received and you can now type.\n\n' +
+              'Please explain why you believe the mute was not justified and provide any evidence you have, such as screenshots, videos, message links, dates/times, or other relevant context.\n\n' +
+              'If you know who muted you, the staff selector on the ticket message is optional — you can select the person you suspect or choose **Skip / Not sure**.',
+          );
+
+        await interaction.channel.send({
+          content: `<@${creatorId}>`,
+          embeds: [evidenceEmbed],
+          allowedMentions: { users: [creatorId] },
+        });
+      } else {
+        await interaction.channel.send({
+          content: `<@${creatorId}> ✅ Your required details are submitted. You can now type in this ticket.`,
+          allowedMentions: { users: [creatorId] },
+        });
+      }
     } else if (data.typeKey === 'youtuber_submission') {
       await interaction.channel.send({
         content: `<@${creatorId}> ✅ In-game ID received. Now choose your subscriber range and submit your YouTube channel link.`,
@@ -3125,6 +3267,279 @@ async function selectReportedStaff(interaction) {
   });
 }
 
+
+async function selectMutedSuspectedStaff(interaction) {
+  const [, creatorId] = interaction.customId.split(':');
+  const data = await getLiveTicketData(interaction.channel);
+
+  if (
+    !data ||
+    data.typeKey !== 'muted_without_reason' ||
+    data.creatorId !== creatorId
+  ) {
+    await interaction.reply({
+      content: 'This mute-appeal staff selector is no longer valid.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.user.id !== creatorId) {
+    await interaction.reply({
+      content: 'Only the ticket creator can use the suspected-staff selector.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const selectedValue = interaction.values[0];
+
+  if (
+    selectedValue.startsWith('__next__:') ||
+    selectedValue.startsWith('__back__:')
+  ) {
+    const [, rawPage] = selectedValue.split(':');
+    const staffMembers = await getReportableStaffMembers(
+      interaction.guild,
+      creatorId,
+    );
+
+    if (!staffMembers.length) {
+      await interaction.reply({
+        content: 'No eligible staff members could be loaded right now.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.update({
+      components: [
+        getTicketButtons(
+          'muted_without_reason',
+          data.unmuteDecision,
+        ),
+        buildInGameIdActionRow(
+          creatorId,
+          data.inGameIdStatus === 'done',
+        ),
+        ...buildMutedStaffSelector(
+          creatorId,
+          staffMembers,
+          Number(rawPage) || 0,
+        ),
+      ],
+    });
+    return;
+  }
+
+  if (selectedValue === '__skip__') {
+    try {
+      await updateTicketTopic(
+        interaction.channel,
+        data,
+        {
+          staffSelectionStatus: 'skipped',
+          reportedStaffId: null,
+        },
+        `Optional suspected muting staff skipped by ${interaction.user.tag}`,
+      );
+
+      await interaction.update({
+        components: [
+          getTicketButtons(
+            'muted_without_reason',
+            data.unmuteDecision,
+          ),
+          buildInGameIdActionRow(
+            creatorId,
+            data.inGameIdStatus === 'done',
+          ),
+        ],
+      });
+
+      await interaction.followUp({
+        content: '✅ Staff selection skipped. You can continue with your mute appeal.',
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch (error) {
+      console.error('[MUTE APPEAL STAFF SKIP ERROR]', error);
+      await interaction.reply({
+        content: 'I could not save that selection. Please try again.',
+        flags: MessageFlags.Ephemeral,
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  const selectedStaff = await interaction.guild.members
+    .fetch(selectedValue)
+    .catch(() => null);
+
+  if (
+    !selectedStaff ||
+    selectedStaff.user.bot ||
+    !selectedStaff.permissions.has(PermissionFlagsBits.ViewAuditLog)
+  ) {
+    await interaction.reply({
+      content:
+        'That member is no longer in the eligible staff list. Please select another person.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  try {
+    await updateTicketTopic(
+      interaction.channel,
+      data,
+      {
+        staffSelectionStatus: 'done',
+        reportedStaffId: selectedStaff.id,
+      },
+      `Suspected muting staff selected by ${interaction.user.tag}`,
+    );
+
+    // Do NOT add or ping the suspected staff member. This is only an optional
+    // piece of information for the support team reviewing the appeal.
+    await interaction.update({
+      components: [
+        getTicketButtons(
+          'muted_without_reason',
+          data.unmuteDecision,
+        ),
+        buildInGameIdActionRow(
+          creatorId,
+          data.inGameIdStatus === 'done',
+        ),
+      ],
+    });
+
+    await interaction.followUp({
+      content:
+        `✅ Saved **${selectedStaff.displayName || selectedStaff.user.username}** as the staff member you suspect muted you. ` +
+        'They were **not** pinged or added to the ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+  } catch (error) {
+    console.error('[MUTE APPEAL STAFF SELECTION ERROR]', error);
+    await interaction.reply({
+      content: 'I could not save that staff selection. Please try again.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+  }
+}
+
+async function handleUnmuteDecision(interaction, decision) {
+  const data = await getLiveTicketData(interaction.channel);
+
+  if (!data || data.typeKey !== 'muted_without_reason') {
+    await interaction.reply({
+      content: 'This decision button only works inside a **Muted without reason?** ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
+
+  const canResolve = Boolean(
+    member &&
+      interaction.channel
+        .permissionsFor(member)
+        ?.has(PermissionFlagsBits.ManageMessages),
+  );
+
+  if (!canResolve) {
+    await interaction.reply({
+      content: 'You need **Manage Messages** to approve or reject an unmute appeal.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.inGameIdStatus !== 'done') {
+    await interaction.reply({
+      content: 'The ticket creator must submit their **in-game user ID** before this appeal can be resolved.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.unmuteDecision) {
+    await interaction.reply({
+      content:
+        `This appeal has already been **${data.unmuteDecision === 'approved' ? 'approved' : 'rejected'}**.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const approved = decision === 'approved';
+
+  await interaction.deferUpdate();
+
+  let nextData;
+  try {
+    nextData = await updateTicketTopic(
+      interaction.channel,
+      data,
+      {
+        unmuteDecision: approved ? 'approved' : 'rejected',
+        unmuteDecisionBy: interaction.user.id,
+      },
+      `Unmute appeal ${approved ? 'approved' : 'rejected'} by ${interaction.user.tag}`,
+    );
+  } catch (error) {
+    console.error('[UNMUTE DECISION STATE ERROR]', error);
+    await interaction.followUp({
+      content: 'I could not save the unmute decision. Please try again.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+    return;
+  }
+
+  // Keep the existing lower rows (In-game ID / any other components), but
+  // replace the decision row so both resolution buttons become disabled.
+  const remainingRows = interaction.message.components
+    .slice(1)
+    .map((row) => ActionRowBuilder.from(row));
+
+  await interaction.message.edit({
+    components: [
+      getTicketButtons('muted_without_reason', nextData.unmuteDecision),
+      ...remainingRows,
+    ],
+  }).catch((error) => {
+    console.error('[UNMUTE DECISION BUTTON UPDATE ERROR]', error);
+  });
+
+  const resultEmbed = new EmbedBuilder()
+    .setColor(approved ? 0x57f287 : 0xed4245)
+    .setTitle(approved ? '✅ Approved Unmute' : '❌ Unmute Rejected')
+    .setDescription(
+      approved
+        ? `<@${data.creatorId}> your account was mistakenly muted and the mute was not justified. We apologise.`
+        : `<@${data.creatorId}> Unfortunately, your mute was justifiable and valid. You won't be unmuted at this time. Stick to the rules to avoid these outcomes!`,
+    )
+    .setFooter({
+      text: `${approved ? 'Approved' : 'Rejected'} by ${interaction.user.username}`,
+    })
+    .setTimestamp();
+
+  await interaction.channel.send({
+    content: `<@${data.creatorId}>`,
+    embeds: [resultEmbed],
+    allowedMentions: { users: [data.creatorId] },
+  });
+
+  await interaction.followUp({
+    content: `✅ Unmute appeal ${approved ? 'approved' : 'rejected'}.`,
+    flags: MessageFlags.Ephemeral,
+  }).catch(() => {});
+}
+
 async function handleTicketInteraction(interaction) {
   if (interaction.isButton()) {
     if (interaction.customId === 'ticket_create') {
@@ -3137,6 +3552,12 @@ async function handleTicketInteraction(interaction) {
     if (interaction.customId === 'ticket_delete') return deleteTicket(interaction);
     if (interaction.customId === 'ticket_claim') return claimTicket(interaction);
     if (interaction.customId === 'ticket_role') return openRoleMenu(interaction);
+    if (interaction.customId === 'ticket_unmute_approve') {
+      return handleUnmuteDecision(interaction, 'approved');
+    }
+    if (interaction.customId === 'ticket_unmute_reject') {
+      return handleUnmuteDecision(interaction, 'rejected');
+    }
     if (interaction.customId.startsWith('ticket_role_page:')) return changeRolePage(interaction);
     if (interaction.customId.startsWith('ticket_ingame_id:')) return openInGameIdModal(interaction);
   }
@@ -3164,6 +3585,9 @@ async function handleTicketInteraction(interaction) {
     }
     if (interaction.customId.startsWith('ticket_report_staff_select:')) {
       return selectReportedStaff(interaction);
+    }
+    if (interaction.customId.startsWith('ticket_muted_staff_select:')) {
+      return selectMutedSuspectedStaff(interaction);
     }
     if (interaction.customId.startsWith('ticket_youtube_range:')) {
       return openYouTubeLinkModal(interaction);

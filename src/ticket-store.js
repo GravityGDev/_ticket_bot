@@ -15,6 +15,8 @@ function normalizeState(value) {
     youtubeStatus: value.youtubeStatus || null,
     staffSelectionStatus: value.staffSelectionStatus || null,
     reportedStaffId: value.reportedStaffId ? String(value.reportedStaffId) : null,
+    unmuteDecision: value.unmuteDecision || null,
+    unmuteDecisionBy: value.unmuteDecisionBy ? String(value.unmuteDecisionBy) : null,
     updatedAt: value.updatedAt || null,
     updateReason: value.updateReason || null,
   };
