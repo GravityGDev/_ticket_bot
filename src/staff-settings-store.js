@@ -307,6 +307,107 @@ async function getWarningRemovalSchedules(guildId, { includeCompleted = false } 
     .toArray();
 }
 
+function visibleWarningHistoryFilter(guildId, userId = null) {
+  const filter = {
+    guildId: String(guildId),
+    historyHidden: { $ne: true },
+  };
+
+  if (userId) {
+    filter.userId = String(userId);
+  }
+
+  return filter;
+}
+
+async function getStaffWarningHistoryCount(guildId, userId) {
+  return (await warningRemovalsCollection()).countDocuments(
+    visibleWarningHistoryFilter(guildId, userId),
+  );
+}
+
+async function getStaffWarningHistory(
+  guildId,
+  userId,
+  {
+    page = 0,
+    pageSize = 5,
+  } = {},
+) {
+  const size = Math.max(1, Math.min(Number(pageSize) || 5, 25));
+  const total = await getStaffWarningHistoryCount(guildId, userId);
+  const pageCount = Math.max(1, Math.ceil(total / size));
+  const safePage = Math.min(
+    Math.max(Number(page) || 0, 0),
+    pageCount - 1,
+  );
+
+  const warnings = await (await warningRemovalsCollection())
+    .find(visibleWarningHistoryFilter(guildId, userId))
+    .sort({ createdAt: -1, _id: -1 })
+    .skip(safePage * size)
+    .limit(size)
+    .toArray();
+
+  return {
+    total,
+    page: safePage,
+    pageCount,
+    pageSize: size,
+    warnings,
+  };
+}
+
+async function hideWarningHistoryRecord(
+  guildId,
+  scheduleId,
+  hiddenBy,
+) {
+  const objectId = parseObjectId(scheduleId);
+  if (!objectId) throw new Error('Invalid warning history ID.');
+
+  const result = await (await warningRemovalsCollection()).findOneAndUpdate(
+    {
+      _id: objectId,
+      guildId: String(guildId),
+      historyHidden: { $ne: true },
+    },
+    {
+      $set: {
+        historyHidden: true,
+        historyHiddenAt: new Date(),
+        historyHiddenBy: String(hiddenBy),
+      },
+    },
+    { returnDocument: 'after', includeResultMetadata: false },
+  );
+
+  if (!result) {
+    throw new Error('That warning history record is no longer available.');
+  }
+
+  return result;
+}
+
+async function hideAllStaffWarningHistory(
+  guildId,
+  userId,
+  hiddenBy,
+) {
+  const result = await (await warningRemovalsCollection()).updateMany(
+    visibleWarningHistoryFilter(guildId, userId),
+    {
+      $set: {
+        historyHidden: true,
+        historyHiddenAt: new Date(),
+        historyHiddenBy: String(hiddenBy),
+      },
+    },
+  );
+
+  return Number(result.modifiedCount) || 0;
+}
+
 async function createWarningRemovalSchedule(guildId, input, createdBy) {
   const normalized = normalizeWarningScheduleInput(input);
   const now = new Date();
@@ -329,6 +430,7 @@ async function attachWarningMessage(
   scheduleId,
   channelId,
   messageId,
+  evidence = [],
 ) {
   const objectId = parseObjectId(scheduleId);
   if (!objectId) throw new Error('Invalid schedule ID.');
@@ -352,6 +454,17 @@ async function attachWarningMessage(
       $set: {
         channelId: channelKey,
         messageId: messageKey,
+        evidence: Array.isArray(evidence)
+          ? evidence
+              .slice(0, 10)
+              .map((item) => ({
+                url: String(item?.url || '').slice(0, 2000),
+                name: String(item?.name || 'evidence').slice(0, 200),
+                contentType: String(item?.contentType || '').slice(0, 100),
+                size: Number(item?.size) || 0,
+              }))
+              .filter((item) => item.url)
+          : [],
         messageLinkedAt: new Date(),
         updatedAt: new Date(),
       },
@@ -631,6 +744,10 @@ module.exports = {
   getGoalGrant,
   recordGoalGrant,
   getWarningRemovalSchedules,
+  getStaffWarningHistoryCount,
+  getStaffWarningHistory,
+  hideWarningHistoryRecord,
+  hideAllStaffWarningHistory,
   getWarningRemovalSchedule,
   getPendingWarningMessageSchedules,
   createWarningRemovalSchedule,

@@ -27,7 +27,10 @@ const {
   recordStaffActivityMessage,
 } = require('./staff-tracking-store');
 const { handleStaffTrackingInteraction } = require('./staff-tracking');
-const { handleWarningInteraction } = require('./warn-system');
+const {
+  handleWarningInteraction,
+  refreshWarningCountdowns,
+} = require('./warn-system');
 const {
   queueStaffGoalEvaluation,
   evaluateAllStaffGoals,
@@ -268,13 +271,20 @@ client.once(Events.ClientReady, (readyClient) => {
     });
   }
 
-  const runWarningRemovalCheck = () => {
-    processDueWarningRemovals(readyClient).catch((error) => {
-      console.error('[WARNING REMOVAL SCHEDULER ERROR]', error);
-    });
+  const runWarningRemovalCheck = async () => {
+    try {
+      // Remove any warnings whose persisted MongoDB deadline has passed first.
+      await processDueWarningRemovals(readyClient);
+
+      // Then refresh every still-pending warning message from MongoDB.
+      await refreshWarningCountdowns(readyClient);
+    } catch (error) {
+      console.error('[WARNING REMOVAL/COUNTDOWN SCHEDULER ERROR]', error);
+    }
   };
 
-  // Process overdue jobs on startup, then check once per minute.
+  // Recover overdue jobs + warning countdown messages immediately on startup,
+  // then keep them synced once per minute.
   runWarningRemovalCheck();
   const timer = setInterval(runWarningRemovalCheck, 60_000);
   timer.unref?.();

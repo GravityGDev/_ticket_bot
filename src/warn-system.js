@@ -17,6 +17,10 @@ const {
   saveWarningExtensionDetails,
   updateWarningRemovalSchedule,
   getPendingWarningMessageSchedules,
+  canManageStaffSettings,
+  getStaffWarningHistory,
+  hideWarningHistoryRecord,
+  hideAllStaffWarningHistory,
 } = require('./staff-settings-store');
 
 const EXTEND_DURATIONS = Object.freeze({
@@ -154,6 +158,17 @@ function isAdmin(interaction) {
   );
 }
 
+function warningEmbedsWithPrimary(message, primaryEmbed) {
+  const evidenceEmbeds = (message?.embeds || [])
+    .slice(1)
+    .map((embed) => EmbedBuilder.from(embed));
+
+  return [
+    primaryEmbed,
+    ...evidenceEmbeds,
+  ];
+}
+
 function replaceEmbedField(embed, name, value) {
   const builder = EmbedBuilder.from(embed);
   const fields = [...(builder.data.fields || [])];
@@ -185,7 +200,7 @@ async function editWarningRemovalTime(message, executeAt) {
   );
 
   await message.edit({
-    embeds: [embed],
+    embeds: warningEmbedsWithPrimary(message, embed),
   });
 }
 
@@ -214,7 +229,7 @@ async function markWarningRevoked(message, interaction, schedule) {
   embed.setFields(fields);
 
   await message.edit({
-    embeds: [embed],
+    embeds: warningEmbedsWithPrimary(message, embed),
     components: [],
     allowedMentions: { parse: [] },
   });
@@ -347,7 +362,7 @@ async function handleRevokeModal(interaction, scheduleId) {
     embed.setFields(fields);
 
     await warningMessage.edit({
-      embeds: [embed],
+      embeds: warningEmbedsWithPrimary(warningMessage, embed),
       components: [],
       allowedMentions: { parse: [] },
     });
@@ -551,7 +566,7 @@ async function handleExtendModal(
     embed.setFields(fields);
 
     await warningMessage.edit({
-      embeds: [embed],
+      embeds: warningEmbedsWithPrimary(warningMessage, embed),
       allowedMentions: { parse: [] },
     });
   }
@@ -613,7 +628,7 @@ async function refreshWarningCountdowns(client) {
       );
 
       await message.edit({
-        embeds: [embed],
+        embeds: warningEmbedsWithPrimary(message, embed),
       });
 
       updatedCount += 1;
@@ -669,7 +684,7 @@ async function markWarningAutomaticallyRemoved(client, schedule) {
     embed.setFields(fields);
 
     await message.edit({
-      embeds: [embed],
+      embeds: warningEmbedsWithPrimary(message, embed),
       components: [],
       allowedMentions: { parse: [] },
     });
@@ -682,6 +697,514 @@ async function markWarningAutomaticallyRemoved(client, schedule) {
     );
     return false;
   }
+}
+
+
+const WARNING_HISTORY_PAGE_SIZE = 5;
+
+function truncateHistoryText(value, max = 260) {
+  const content = String(value || '').trim();
+
+  if (!content) return 'Not recorded';
+
+  return content.length <= max
+    ? content
+    : `${content.slice(0, Math.max(1, max - 1))}…`;
+}
+
+function warningStatusLabel(warning) {
+  switch (warning.status) {
+    case 'pending':
+      return '🟠 Active';
+    case 'processing':
+      return '🟡 Removing';
+    case 'completed':
+      return '✅ Removed';
+    case 'revoked':
+      return '🟢 Revoked';
+    case 'failed':
+      return '🔴 Removal Failed';
+    default:
+      return `⚪ ${String(warning.status || 'Unknown')}`;
+  }
+}
+
+function warningTime(value, style = 'f') {
+  const date = value instanceof Date
+    ? value
+    : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown';
+  }
+
+  return `<t:${Math.floor(date.getTime() / 1000)}:${style}>`;
+}
+
+function warningEvidenceText(warning) {
+  if (!Array.isArray(warning.evidence) || !warning.evidence.length) {
+    return null;
+  }
+
+  const links = warning.evidence
+    .slice(0, 5)
+    .map(
+      (item, index) =>
+        `[Image ${index + 1}](${item.url})`,
+    )
+    .join(' • ');
+
+  return `**Evidence:** ${links}`;
+}
+
+function warningHistoryEntry(warning, number) {
+  const lines = [
+    `**Status:** ${warningStatusLabel(warning)}`,
+    `**Warning Role:** <@&${warning.roleId}>`,
+    `**Issued:** ${warningTime(warning.createdAt, 'f')} (${warningTime(warning.createdAt, 'R')})`,
+    `**Issued By:** <@${warning.createdBy}>`,
+    `**Reason:** ${truncateHistoryText(warning.reason, 320)}`,
+  ];
+
+  const evidenceText = warningEvidenceText(warning);
+
+  if (evidenceText) {
+    lines.push(evidenceText);
+  }
+
+  if (
+    warning.status === 'pending' ||
+    warning.status === 'processing'
+  ) {
+    lines.push(
+      `**Scheduled Removal:** ${warningTime(warning.executeAt, 'f')}`,
+    );
+  }
+
+  if (warning.status === 'completed') {
+    lines.push(
+      `**Removed:** ${warningTime(
+        warning.finishedAt || warning.executeAt,
+        'f',
+      )}`,
+    );
+  }
+
+  if (warning.status === 'revoked') {
+    lines.push(
+      `**Revoked By:** <@${warning.revokedBy || warning.updatedBy}>`,
+      `**Revoked:** ${warningTime(
+        warning.revokedAt || warning.finishedAt,
+        'f',
+      )}`,
+      `**Revoke Reason:** ${truncateHistoryText(
+        warning.revokeReason,
+        320,
+      )}`,
+    );
+  }
+
+  if (warning.status === 'failed') {
+    lines.push(
+      `**Removal Error:** ${truncateHistoryText(
+        warning.error,
+        260,
+      )}`,
+    );
+  }
+
+  if (warning.lastExtendedAt) {
+    lines.push(
+      `**Latest Extension:** +${warning.lastExtensionAmount || 'time'} by <@${warning.lastExtendedBy}>`,
+      `**Extension Reason:** ${truncateHistoryText(
+        warning.lastExtensionReason,
+        280,
+      )}`,
+    );
+  }
+
+  return {
+    name: `${number}. ${warningStatusLabel(warning)}`,
+    value: lines.join('\n').slice(0, 1024),
+    inline: false,
+  };
+}
+
+function buildHistoryPageButtons(
+  userId,
+  page,
+  pageCount,
+) {
+  const previousPage = Math.max(0, page - 1);
+  const nextPage = Math.min(
+    Math.max(0, pageCount - 1),
+    page + 1,
+  );
+
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(
+        `staffwarn:historypage:${userId}:${previousPage}:prev`,
+      )
+      .setEmoji('⬅️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page <= 0),
+    new ButtonBuilder()
+      .setCustomId(
+        `staffwarn:historynoop:${userId}:${page}`,
+      )
+      .setLabel(`Page ${page + 1}/${pageCount}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(
+        `staffwarn:historypage:${userId}:${nextPage}:next`,
+      )
+      .setEmoji('➡️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page >= pageCount - 1),
+  );
+}
+
+function buildHistoryEditorControls(
+  userId,
+  page,
+  warnings,
+) {
+  const components = [];
+
+  if (warnings.length) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(
+            `staffwarn:historypick:${userId}:${page}`,
+          )
+          .setPlaceholder('Select a warning to remove from history')
+          .setMinValues(1)
+          .setMaxValues(1)
+          .addOptions(
+            warnings.map((warning, index) => ({
+              label: `Warning ${page * WARNING_HISTORY_PAGE_SIZE + index + 1}`,
+              description: truncateHistoryText(
+                `${warningStatusLabel(warning)} • ${warning.reason || 'No reason'}`,
+                95,
+              ),
+              value: String(warning._id),
+            })),
+          ),
+      ),
+    );
+  }
+
+  components.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(
+          `staffwarn:historyremoveall:${userId}:${page}`,
+        )
+        .setLabel('Remove All History')
+        .setEmoji('🗑️')
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(!warnings.length),
+    ),
+  );
+
+  return components;
+}
+
+async function buildWarningHistoryPayload(
+  guild,
+  targetMember,
+  viewerId,
+  requestedPage = 0,
+) {
+  const history = await getStaffWarningHistory(
+    guild.id,
+    targetMember.id,
+    {
+      page: requestedPage,
+      pageSize: WARNING_HISTORY_PAGE_SIZE,
+    },
+  );
+
+  const canEditHistory = await canManageStaffSettings(
+    guild.id,
+    viewerId,
+  );
+
+  const firstNumber =
+    history.page * WARNING_HISTORY_PAGE_SIZE + 1;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setAuthor({
+      name:
+        targetMember.displayName ||
+        targetMember.user.username,
+      iconURL: targetMember.user.displayAvatarURL({
+        size: 128,
+      }),
+    })
+    .setTitle('⚠️ Staff Warning History')
+    .setDescription(
+      `<@${targetMember.id}> has **${history.total}** warning${
+        history.total === 1 ? '' : 's'
+      } on record.`,
+    )
+    .setFooter({
+      text:
+        `Showing up to ${WARNING_HISTORY_PAGE_SIZE} warnings per page` +
+        (canEditHistory
+          ? ' • You can manage this history'
+          : ''),
+    })
+    .setTimestamp();
+
+  if (history.warnings.length) {
+    embed.addFields(
+      ...history.warnings.map((warning, index) =>
+        warningHistoryEntry(
+          warning,
+          firstNumber + index,
+        ),
+      ),
+    );
+  } else {
+    embed.addFields({
+      name: 'No Warning History',
+      value: 'This staff member has no warnings on record.',
+    });
+  }
+
+  const components = [
+    buildHistoryPageButtons(
+      targetMember.id,
+      history.page,
+      history.pageCount,
+    ),
+  ];
+
+  if (canEditHistory) {
+    components.push(
+      ...buildHistoryEditorControls(
+        targetMember.id,
+        history.page,
+        history.warnings,
+      ),
+    );
+  }
+
+  return {
+    embeds: [embed],
+    components,
+  };
+}
+
+async function getHistoryTargetMember(
+  guild,
+  userId,
+) {
+  return guild.members
+    .fetch(userId)
+    .catch(() => null);
+}
+
+async function assertHistoryEditor(interaction) {
+  const allowed = await canManageStaffSettings(
+    interaction.guild.id,
+    interaction.user.id,
+  );
+
+  if (!allowed) {
+    await interaction.reply({
+      content:
+        'Only Staff Stats **Settings Editors** can remove warning history.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+    return false;
+  }
+
+  return true;
+}
+
+async function handleHistoryPage(
+  interaction,
+  userId,
+  requestedPage,
+) {
+  const member = await getHistoryTargetMember(
+    interaction.guild,
+    userId,
+  );
+
+  if (!member) {
+    await interaction.update({
+      content:
+        'That staff member is no longer available in this server.',
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.update(
+    await buildWarningHistoryPayload(
+      interaction.guild,
+      member,
+      interaction.user.id,
+      Number(requestedPage) || 0,
+    ),
+  );
+}
+
+async function handleHistoryPick(
+  interaction,
+  userId,
+  page,
+) {
+  if (!(await assertHistoryEditor(interaction))) {
+    return;
+  }
+
+  const warningId = interaction.values[0];
+
+  await interaction.update({
+    content:
+      'Remove this warning from the staff member’s tracked history?\n\n' +
+      '**This only removes the history record from `/warnings`. ' +
+      'If the warning is still active, its automatic role-removal schedule continues normally.**',
+    embeds: [],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            `staffwarn:historyremoveone:${userId}:${page}:${warningId}`,
+          )
+          .setLabel('Remove This Warning')
+          .setEmoji('🗑️')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(
+            `staffwarn:historypage:${userId}:${page}:back`,
+          )
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  });
+}
+
+async function handleHistoryRemoveOne(
+  interaction,
+  userId,
+  page,
+  warningId,
+) {
+  if (!(await assertHistoryEditor(interaction))) {
+    return;
+  }
+
+  await hideWarningHistoryRecord(
+    interaction.guild.id,
+    warningId,
+    interaction.user.id,
+  );
+
+  const member = await getHistoryTargetMember(
+    interaction.guild,
+    userId,
+  );
+
+  if (!member) {
+    await interaction.update({
+      content: 'Warning removed from history.',
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.update(
+    await buildWarningHistoryPayload(
+      interaction.guild,
+      member,
+      interaction.user.id,
+      Number(page) || 0,
+    ),
+  );
+}
+
+async function handleHistoryRemoveAllPrompt(
+  interaction,
+  userId,
+  page,
+) {
+  if (!(await assertHistoryEditor(interaction))) {
+    return;
+  }
+
+  await interaction.update({
+    content:
+      'Remove **all warning history** for this staff member?\n\n' +
+      '**Active warning roles and automatic removal schedules will continue; only their tracked history will be hidden.**',
+    embeds: [],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            `staffwarn:historyremoveallconfirm:${userId}:${page}`,
+          )
+          .setLabel('Remove All History')
+          .setEmoji('🗑️')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(
+            `staffwarn:historypage:${userId}:${page}:back`,
+          )
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  });
+}
+
+async function handleHistoryRemoveAllConfirm(
+  interaction,
+  userId,
+) {
+  if (!(await assertHistoryEditor(interaction))) {
+    return;
+  }
+
+  await hideAllStaffWarningHistory(
+    interaction.guild.id,
+    userId,
+    interaction.user.id,
+  );
+
+  const member = await getHistoryTargetMember(
+    interaction.guild,
+    userId,
+  );
+
+  if (!member) {
+    await interaction.update({
+      content: 'All warning history was removed.',
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.update(
+    await buildWarningHistoryPayload(
+      interaction.guild,
+      member,
+      interaction.user.id,
+      0,
+    ),
+  );
 }
 
 async function handleWarningInteraction(interaction) {
@@ -740,6 +1263,74 @@ async function handleWarningInteraction(interaction) {
       return true;
     }
 
+    if (
+      action === 'historynoop' &&
+      interaction.isButton()
+    ) {
+      await interaction.deferUpdate().catch(() => {});
+      return true;
+    }
+
+    if (
+      action === 'historypage' &&
+      interaction.isButton()
+    ) {
+      await handleHistoryPage(
+        interaction,
+        parts[2],
+        parts[3],
+      );
+      return true;
+    }
+
+    if (
+      action === 'historypick' &&
+      interaction.isStringSelectMenu()
+    ) {
+      await handleHistoryPick(
+        interaction,
+        parts[2],
+        parts[3],
+      );
+      return true;
+    }
+
+    if (
+      action === 'historyremoveone' &&
+      interaction.isButton()
+    ) {
+      await handleHistoryRemoveOne(
+        interaction,
+        parts[2],
+        parts[3],
+        parts[4],
+      );
+      return true;
+    }
+
+    if (
+      action === 'historyremoveall' &&
+      interaction.isButton()
+    ) {
+      await handleHistoryRemoveAllPrompt(
+        interaction,
+        parts[2],
+        parts[3],
+      );
+      return true;
+    }
+
+    if (
+      action === 'historyremoveallconfirm' &&
+      interaction.isButton()
+    ) {
+      await handleHistoryRemoveAllConfirm(
+        interaction,
+        parts[2],
+      );
+      return true;
+    }
+
     return true;
   } catch (error) {
     console.error('[STAFF WARNING INTERACTION ERROR]', error);
@@ -768,5 +1359,6 @@ module.exports = {
   buildRemovalFieldValue,
   refreshWarningCountdowns,
   markWarningAutomaticallyRemoved,
+  buildWarningHistoryPayload,
   handleWarningInteraction,
 };

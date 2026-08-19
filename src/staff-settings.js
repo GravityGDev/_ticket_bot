@@ -33,6 +33,9 @@ const {
   finishWarningRemoval,
 } = require('./staff-settings-store');
 const { getStaffMetricCount } = require('./staff-tracking-store');
+const {
+  markWarningAutomaticallyRemoved,
+} = require('./warn-system');
 
 const goalEvaluationTimers = new Map();
 
@@ -877,6 +880,18 @@ async function processDueWarningRemovals(client) {
         completedUserId: member.id,
         completedRoleId: role.id,
       });
+
+      // Finalize the original warning message after the automatic removal.
+      // This is best-effort: a missing/deleted Discord warning message must not
+      // turn a successful role removal into a failed scheduler job.
+      await markWarningAutomaticallyRemoved(client, schedule).catch(
+        (messageError) => {
+          console.error(
+            '[WARNING AUTO-REMOVAL MESSAGE FINALIZE ERROR]',
+            messageError,
+          );
+        },
+      );
 
       console.log(
         `[WARNING ROLE REMOVAL] ${role.name} removed/confirmed absent from ${member.user.tag}.`,
