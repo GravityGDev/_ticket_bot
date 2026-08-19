@@ -18,10 +18,14 @@ const WARNING_ROLE_IDS = Object.freeze([
   '961199596212744252',
 ]);
 
-const STAR_MANAGEMENT_ROLE_IDS = Object.freeze([
-  '955029841793650688',
-  '955030166797713408',
-]);
+const STAR_MANAGEMENT_ROLES = Object.freeze({
+  oneStar: '955029841793650688',
+  twoStar: '955030166797713408',
+});
+
+const STAR_MANAGEMENT_ROLE_IDS = Object.freeze(
+  Object.values(STAR_MANAGEMENT_ROLES),
+);
 
 const PAGE_SIZE = 10;
 
@@ -70,6 +74,18 @@ function hasAnyRole(member, roleIds) {
   return roleIds.some((roleId) => member.roles.cache.has(roleId));
 }
 
+function getStarLevel(member) {
+  if (member.roles.cache.has(STAR_MANAGEMENT_ROLES.twoStar)) return 2;
+  if (member.roles.cache.has(STAR_MANAGEMENT_ROLES.oneStar)) return 1;
+  return 0;
+}
+
+function getStarBadge(starLevel) {
+  if (starLevel >= 2) return '⭐⭐';
+  if (starLevel === 1) return '⭐';
+  return '';
+}
+
 function getRoleMentions(member, roleIds) {
   const present = roleIds.filter((roleId) => member.roles.cache.has(roleId));
   return present.length ? present.map((id) => `<@&${id}>`).join(' ') : 'None';
@@ -95,7 +111,8 @@ function enrichStaff(members, snapshot) {
     const claims = snapshot.claimCounts.get(member.id) || 0;
     const messages = snapshot.messageCounts.get(member.id) || 0;
     const hasWarning = hasAnyRole(member, WARNING_ROLE_IDS);
-    const hasStar = hasAnyRole(member, STAR_MANAGEMENT_ROLE_IDS);
+    const starLevel = getStarLevel(member);
+    const hasStar = starLevel > 0;
 
     return {
       member,
@@ -103,6 +120,7 @@ function enrichStaff(members, snapshot) {
       messages,
       hasWarning,
       hasStar,
+      starLevel,
       active: claims > 0 || messages > 0,
     };
   });
@@ -251,7 +269,7 @@ function buildStaffSelectRow(periodKey, filterKey, page, visibleRows) {
       .addOptions(
         visibleRows.map((row) => {
           const badges = [
-            row.hasStar ? '⭐' : null,
+            row.hasStar ? getStarBadge(row.starLevel) : null,
             row.hasWarning ? '⚠️' : null,
           ]
             .filter(Boolean)
@@ -289,7 +307,7 @@ function buildLeaderboardEmbed({
         .map((row, index) => {
           const rank = pageInfo.start + index + 1;
           const badges = [
-            row.hasStar ? '⭐' : null,
+            row.hasStar ? getStarBadge(row.starLevel) : null,
             row.hasWarning ? '⚠️' : null,
           ]
             .filter(Boolean)
@@ -305,7 +323,7 @@ function buildLeaderboardEmbed({
     : '*No staff match this filter for the selected period.*';
 
   const bestStarText = bestStar
-    ? `<@${bestStar.member.id}> — **${bestStar.claims}** claimed • **${bestStar.messages}** messages`
+    ? `${getStarBadge(bestStar.starLevel)} <@${bestStar.member.id}> — **${bestStar.claims}** claimed • **${bestStar.messages}** messages`
     : 'No active Star Management staff in this period.';
 
   const trackedCategories = TRACKED_CATEGORY_IDS.map((id) => {
@@ -351,7 +369,7 @@ function buildLeaderboardEmbed({
     )
     .setFooter({
       text:
-        '⭐ = Star Management • ⚠️ = Warning role • Activity tracking starts from this update',
+        '⭐ = Star Management • ⭐⭐ = Senior Star Management • ⚠️ = Warning role • Activity tracking starts from this update',
     })
     .setTimestamp();
 }
@@ -451,7 +469,12 @@ function buildDetailEmbed({
 }) {
   const member = row.member;
   const warningRoles = getRoleMentions(member, WARNING_ROLE_IDS);
-  const starRoles = getRoleMentions(member, STAR_MANAGEMENT_ROLE_IDS);
+  const starRoles =
+    row.starLevel === 2
+      ? `⭐⭐ <@&${STAR_MANAGEMENT_ROLES.twoStar}>`
+      : row.starLevel === 1
+        ? `⭐ <@&${STAR_MANAGEMENT_ROLES.oneStar}>`
+        : 'None';
 
   const claimTypeText = detail.claimTypes.length
     ? detail.claimTypes
@@ -496,7 +519,7 @@ function buildDetailEmbed({
     : 'No tracked channel messages in this period.';
 
   const statusBadges = [
-    row.hasStar ? '⭐ Star Management' : null,
+    row.hasStar ? `${getStarBadge(row.starLevel)} Star Management` : null,
     row.hasWarning ? '⚠️ Warning role present' : null,
     row.active ? '🟢 Active' : '⚫ No tracked activity',
   ]
@@ -809,6 +832,7 @@ async function handleStaffTrackingInteraction(interaction) {
 
 module.exports = {
   WARNING_ROLE_IDS,
+  STAR_MANAGEMENT_ROLES,
   STAR_MANAGEMENT_ROLE_IDS,
   sendStaffTrackingPanel,
   handleStaffTrackingInteraction,
