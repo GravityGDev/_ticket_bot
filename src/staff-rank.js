@@ -400,8 +400,8 @@ async function sendRankCard(
     !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
   ) {
     await interaction.reply({
-      content: `<@${targetId}> isn't Snay.io staff.`,
-      allowedMentions: { users: [targetId] },
+      content: `This user isn't Snay.io staff.`,
+      allowedMentions: { parse: [] },
     });
 
     setTimeout(() => {
