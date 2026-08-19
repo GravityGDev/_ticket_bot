@@ -909,6 +909,8 @@ function initialSubmissionState(typeKey) {
     reportedStaffId: null,
     unmuteDecision: null,
     unmuteDecisionBy: null,
+    closedById: null,
+    closedAt: null,
     claimHistory: [],
   };
 }
@@ -956,6 +958,8 @@ function getTicketData(channel) {
     reportedStaffId: fallbackState.reportedStaffId,
     unmuteDecision: fallbackState.unmuteDecision,
     unmuteDecisionBy: fallbackState.unmuteDecisionBy,
+    closedById: fallbackState.closedById,
+    closedAt: fallbackState.closedAt,
     claimedById: claimedMatch ? claimedMatch[1] : null,
     claimHistory: [],
   };
@@ -982,6 +986,8 @@ async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket dat
     reportedStaffId: next.reportedStaffId || null,
     unmuteDecision: next.unmuteDecision || null,
     unmuteDecisionBy: next.unmuteDecisionBy || null,
+    closedById: next.closedById || null,
+    closedAt: next.closedAt || null,
     updatedAt: new Date().toISOString(),
     updateReason: reason,
   });
@@ -1011,6 +1017,8 @@ async function getLiveTicketData(channel) {
       reportedStaffId: stored.reportedStaffId || base.reportedStaffId,
       unmuteDecision: stored.unmuteDecision || base.unmuteDecision,
       unmuteDecisionBy: stored.unmuteDecisionBy || base.unmuteDecisionBy,
+      closedById: stored.closedById || base.closedById,
+      closedAt: stored.closedAt || base.closedAt,
     };
   } catch (error) {
     console.error('[TICKET STATE READ ERROR]', error);
@@ -1349,6 +1357,8 @@ async function createTicket(interaction, typeKey) {
         creatorId: interaction.user.id,
         claimedById: null,
         claimHistory: [],
+        closedById: null,
+        closedAt: null,
         inGameIdStatus: state.inGameIdStatus,
         youtubeStatus: state.youtubeStatus,
         staffSelectionStatus: state.staffSelectionStatus,
@@ -1629,6 +1639,18 @@ async function closeTicket(interaction) {
       `[TICKET CLOSE] Creator ${data.creatorId} hidden from ticket #${ticketNumber}.`,
     );
 
+    const closedAt = new Date();
+
+    await updateTicketTopic(
+      interaction.channel,
+      data,
+      {
+        closedById: interaction.user.id,
+        closedAt: closedAt.toISOString(),
+      },
+      `Ticket closed by ${interaction.user.tag}`,
+    );
+
     // Send the controls BEFORE requesting the rename. This keeps close/reopen
     // instant even when Discord queues repeated channel-name changes.
     await interaction.channel.send(buildClosedTicketMessage(interaction.user.id));
@@ -1809,6 +1831,18 @@ async function reopenTicket(interaction) {
     }).catch(() => {});
   }
 
+  await updateTicketTopic(
+    interaction.channel,
+    data,
+    {
+      closedById: null,
+      closedAt: null,
+    },
+    `Ticket reopened by ${interaction.user.tag}`,
+  ).catch((error) => {
+    console.error('[TICKET REOPEN STATE CLEAR ERROR]', error);
+  });
+
   console.log(`[TICKET REOPEN] Ticket #${ticketNumber} reopened successfully.`);
 
   await interaction.editReply('✅ Ticket reopened.').catch(() => {});
@@ -1845,6 +1879,10 @@ function collectTranscriptMentionIds(messages) {
   };
 
   for (const message of messages) {
+    if (message.author?.id) {
+      users.add(String(message.author.id));
+    }
+
     scan(message.content);
 
     for (const embed of message.embeds || []) {
@@ -1867,28 +1905,120 @@ function collectTranscriptMentionIds(messages) {
   };
 }
 
+function normalizeTranscriptHexColor(
+  value,
+  fallback = '#f2f3f5',
+) {
+  const candidate = String(value || '').trim();
+
+  if (/^#[0-9a-f]{6}$/i.test(candidate)) {
+    return candidate.toLowerCase() === '#000000'
+      ? fallback
+      : candidate;
+  }
+
+  return fallback;
+}
+
+function transcriptHexToRgba(hex, alpha = 0.18) {
+  const normalized = normalizeTranscriptHexColor(
+    hex,
+    '#5865f2',
+  ).replace('#', '');
+
+  const red = Number.parseInt(normalized.slice(0, 2), 16);
+  const green = Number.parseInt(normalized.slice(2, 4), 16);
+  const blue = Number.parseInt(normalized.slice(4, 6), 16);
+
+  return `rgba(${red},${green},${blue},${alpha})`;
+}
+
+function getTranscriptRoleIcon(role) {
+  if (!role) {
+    return {
+      iconUrl: null,
+      unicodeEmoji: null,
+    };
+  }
+
+  let iconUrl = null;
+
+  try {
+    iconUrl = role.iconURL?.({
+      extension: 'webp',
+      size: 64,
+    }) || null;
+  } catch {
+    iconUrl = null;
+  }
+
+  return {
+    iconUrl,
+    unicodeEmoji: role.unicodeEmoji || null,
+  };
+}
+
+function getTranscriptMemberStyle(member) {
+  if (!member) {
+    return {
+      color: '#f2f3f5',
+      roleIconUrl: null,
+      roleUnicodeEmoji: null,
+    };
+  }
+
+  const roles = [...member.roles.cache.values()]
+    .filter((role) => role.id !== member.guild.id)
+    .sort((a, b) => b.position - a.position);
+
+  const iconRole = roles.find(
+    (role) => role.icon || role.unicodeEmoji,
+  );
+
+  const roleIcon = getTranscriptRoleIcon(iconRole);
+
+  return {
+    color: normalizeTranscriptHexColor(
+      member.displayHexColor,
+      '#f2f3f5',
+    ),
+    roleIconUrl: roleIcon.iconUrl,
+    roleUnicodeEmoji: roleIcon.unicodeEmoji,
+  };
+}
+
 async function buildTranscriptRenderContext(channel, messages) {
   const ids = collectTranscriptMentionIds(messages);
 
   const userNames = new Map();
+  const userStyles = new Map();
   const roleNames = new Map();
+  const roleStyles = new Map();
   const channelNames = new Map();
+  const messagesById = new Map(
+    messages.map((message) => [
+      String(message.id),
+      message,
+    ]),
+  );
 
   await Promise.all(
     [...ids.users].map(async (userId) => {
-      const cachedMember = channel.guild.members.cache.get(userId);
-      let member = cachedMember;
+      const cachedMember =
+        channel.guild.members.cache.get(userId);
 
-      if (!member) {
-        member = await channel.guild.members
+      const member =
+        cachedMember ||
+        (await channel.guild.members
           .fetch(userId)
-          .catch(() => null);
-      }
+          .catch(() => null));
 
       const user =
         member?.user ||
         channel.client.users.cache.get(userId) ||
-        (await channel.client.users.fetch(userId).catch(() => null));
+        (await channel.client.users
+          .fetch(userId)
+          .catch(() => null));
 
       const displayName =
         member?.displayName ||
@@ -1897,6 +2027,10 @@ async function buildTranscriptRenderContext(channel, messages) {
         `User ${userId}`;
 
       userNames.set(userId, displayName);
+      userStyles.set(
+        userId,
+        getTranscriptMemberStyle(member),
+      );
     }),
   );
 
@@ -1904,12 +2038,25 @@ async function buildTranscriptRenderContext(channel, messages) {
     [...ids.roles].map(async (roleId) => {
       const role =
         channel.guild.roles.cache.get(roleId) ||
-        (await channel.guild.roles.fetch(roleId).catch(() => null));
+        (await channel.guild.roles
+          .fetch(roleId)
+          .catch(() => null));
 
       roleNames.set(
         roleId,
         role?.name || `Role ${roleId}`,
       );
+
+      const roleIcon = getTranscriptRoleIcon(role);
+
+      roleStyles.set(roleId, {
+        color: normalizeTranscriptHexColor(
+          role?.hexColor,
+          '#c9cdfb',
+        ),
+        iconUrl: roleIcon.iconUrl,
+        unicodeEmoji: roleIcon.unicodeEmoji,
+      });
     }),
   );
 
@@ -1917,21 +2064,53 @@ async function buildTranscriptRenderContext(channel, messages) {
     [...ids.channels].map(async (channelId) => {
       const mentionedChannel =
         channel.guild.channels.cache.get(channelId) ||
-        (await channel.guild.channels.fetch(channelId).catch(() => null));
+        (await channel.guild.channels
+          .fetch(channelId)
+          .catch(() => null));
 
       channelNames.set(
         channelId,
-        mentionedChannel?.name || `channel-${channelId}`,
+        mentionedChannel?.name ||
+          `channel-${channelId}`,
       );
     }),
   );
 
   return {
     userNames,
+    userStyles,
     roleNames,
+    roleStyles,
     channelNames,
+    messagesById,
   };
 }
+
+function renderTranscriptRoleIcon(
+  {
+    roleIconUrl = null,
+    roleUnicodeEmoji = null,
+  } = {},
+  className = 'role-icon',
+) {
+  if (roleIconUrl) {
+    return (
+      `<img class="${escapeHtml(className)}" ` +
+      `src="${escapeHtml(roleIconUrl)}" ` +
+      `alt="Role icon" loading="lazy">`
+    );
+  }
+
+  if (roleUnicodeEmoji) {
+    return (
+      `<span class="${escapeHtml(className)} unicode-role-icon">` +
+      `${escapeHtml(roleUnicodeEmoji)}</span>`
+    );
+  }
+
+  return '';
+}
+
 
 function renderTranscriptCustomEmoji(animated, name, id) {
   const extension = animated ? 'gif' : 'webp';
@@ -2080,8 +2259,19 @@ function renderTranscriptLeaf(message, value, context) {
         user?.username ||
         `User ${userId}`;
 
+      const userStyle =
+        context?.userStyles?.get(userId) || {};
+
+      const userColor = normalizeTranscriptHexColor(
+        userStyle.color,
+        '#c9cdfb',
+      );
+
       output +=
         `<span class="mention user-mention" ` +
+        `style="color:${escapeHtml(userColor)};background:${escapeHtml(
+          transcriptHexToRgba(userColor, 0.18),
+        )}" ` +
         `title="User ID: ${escapeHtml(userId)}">` +
         `@${escapeHtml(name)}</span>`;
     } else if (match[5]) {
@@ -2095,10 +2285,29 @@ function renderTranscriptLeaf(message, value, context) {
         role?.name ||
         `Role ${roleId}`;
 
+      const roleStyle =
+        context?.roleStyles?.get(roleId) || {};
+
+      const roleColor = normalizeTranscriptHexColor(
+        roleStyle.color,
+        '#c9cdfb',
+      );
+
+      const roleIcon = renderTranscriptRoleIcon(
+        {
+          roleIconUrl: roleStyle.iconUrl,
+          roleUnicodeEmoji: roleStyle.unicodeEmoji,
+        },
+        'mention-role-icon',
+      );
+
       output +=
         `<span class="mention role-mention" ` +
+        `style="color:${escapeHtml(roleColor)};background:${escapeHtml(
+          transcriptHexToRgba(roleColor, 0.18),
+        )}" ` +
         `title="Role ID: ${escapeHtml(roleId)}">` +
-        `@${escapeHtml(name)}</span>`;
+        `${roleIcon}@${escapeHtml(name)}</span>`;
     } else if (match[6]) {
       const channelId = match[6];
       const mentionedChannel =
@@ -2807,6 +3016,16 @@ function getClosedByIdFromControlMessage(message) {
   return match ? match[1] : null;
 }
 
+function getClosedAtFromControlMessage(message) {
+  const timestamp =
+    Number(message?.createdTimestamp) ||
+    Number(message?.createdAt?.getTime?.());
+
+  if (!Number.isFinite(timestamp)) return null;
+
+  return new Date(timestamp).toISOString();
+}
+
 function normalizedClaimHistory(data) {
   const history = Array.isArray(data?.claimHistory)
     ? data.claimHistory
@@ -2871,6 +3090,7 @@ async function buildTranscriptAuditData(
   {
     transcriptCreatedByUser = null,
     closedById = null,
+    closedAt = null,
   } = {},
 ) {
   const claimHistory = normalizedClaimHistory(data);
@@ -2909,7 +3129,8 @@ async function buildTranscriptAuditData(
     finalClaim,
     currentClaimedById: data?.claimedById || finalClaim?.userId || null,
     claimHistory,
-    closedById: closedById || null,
+    closedById: closedById || data?.closedById || null,
+    closedAt: closedAt || data?.closedAt || null,
     transcriptCreatedById: transcriptCreatedByUser?.id || null,
     labels,
   };
@@ -2951,6 +3172,10 @@ function renderTranscriptAuditHtml(audit, data) {
     ? label(audit.closedById)
     : 'Unknown';
 
+  const closedAt = audit.closedAt
+    ? formatAuditDate(audit.closedAt)
+    : 'Time unavailable';
+
   const historyHtml = isClaimNotApplicable
     ? '<div class="claim-empty">Claiming is not used for this ticket type.</div>'
     : audit.claimHistory.length
@@ -2991,7 +3216,11 @@ function renderTranscriptAuditHtml(audit, data) {
       <div class="audit-item"><span>Claimed At</span><b>${escapeHtml(firstClaimedAt)}</b></div>
       <div class="audit-item"><span>Current / Final Claimer</span><b>${escapeHtml(currentClaimer)}</b></div>
       <div class="audit-item"><span>Transcript Created By</span><b>${escapeHtml(transcriptCreatedBy)}</b></div>
-      <div class="audit-item"><span>Ticket Closed By</span><b>${escapeHtml(closedBy)}</b></div>
+      <div class="audit-item">
+        <span>Ticket Closed By</span>
+        <b>${escapeHtml(closedBy)}</b>
+        <div class="audit-date">${escapeHtml(closedAt)}</div>
+      </div>
       <div class="audit-item"><span>Total Claims / Takeovers</span><b>${isClaimNotApplicable ? 'N/A' : audit.claimHistory.length}</b></div>
     </div>
 
@@ -3000,6 +3229,115 @@ function renderTranscriptAuditHtml(audit, data) {
       ${historyHtml}
     </div>
   </section>`;
+}
+
+function getTranscriptReplyPreviewText(message) {
+  const content = String(message?.content || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (content) {
+    return content.length > 220
+      ? `${content.slice(0, 219)}…`
+      : content;
+  }
+
+  if (message?.attachments?.size) {
+    const first = [...message.attachments.values()][0];
+    return first?.contentType?.startsWith('image/')
+      ? '📷 Image attachment'
+      : `📎 ${first?.name || 'Attachment'}`;
+  }
+
+  if (message?.stickers?.size) {
+    const first = [...message.stickers.values()][0];
+    return `🎟️ Sticker: ${first?.name || 'Sticker'}`;
+  }
+
+  if (message?.embeds?.length) {
+    const first = message.embeds[0];
+    return (
+      first.title ||
+      first.description ||
+      'Embedded message'
+    );
+  }
+
+  return 'Original message';
+}
+
+function renderTranscriptReplyPreview(
+  message,
+  renderContext,
+) {
+  const referenceId =
+    message.reference?.messageId ||
+    message.reference?.message_id ||
+    null;
+
+  if (!referenceId) return '';
+
+  const referenced =
+    renderContext?.messagesById?.get(
+      String(referenceId),
+    );
+
+  if (!referenced) {
+    return `
+      <div class="reply-preview reply-missing">
+        <span class="reply-connector"></span>
+        <span class="reply-unavailable">Original message unavailable</span>
+      </div>`;
+  }
+
+  const author = referenced.author;
+  const authorId = String(author?.id || '');
+  const displayName =
+    referenced.member?.displayName ||
+    renderContext?.userNames?.get(authorId) ||
+    author?.globalName ||
+    author?.username ||
+    'Unknown User';
+
+  const avatar =
+    author?.displayAvatarURL({
+      extension: 'png',
+      size: 64,
+    }) || '';
+
+  const style =
+    renderContext?.userStyles?.get(authorId) ||
+    getTranscriptMemberStyle(referenced.member);
+
+  const color = normalizeTranscriptHexColor(
+    style?.color,
+    '#f2f3f5',
+  );
+
+  const roleIcon = renderTranscriptRoleIcon(
+    style,
+    'reply-role-icon',
+  );
+
+  const previewText =
+    getTranscriptReplyPreviewText(referenced);
+
+  return `
+    <a class="reply-preview" href="#message-${escapeHtml(referenceId)}" title="Jump to replied message">
+      <span class="reply-connector"></span>
+      ${
+        avatar
+          ? `<img class="reply-avatar" src="${escapeHtml(avatar)}" alt="">`
+          : '<span class="reply-avatar reply-avatar-fallback"></span>'
+      }
+      <span class="reply-author" style="color:${escapeHtml(color)}">${escapeHtml(displayName)}</span>
+      ${roleIcon}
+      <span class="reply-text">${renderTranscriptInline(
+        referenced,
+        previewText,
+        renderContext,
+      )}</span>
+    </a>`;
 }
 
 function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
@@ -3031,12 +3369,34 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
       const edited = message.editedTimestamp ? '<span class="edited">(edited)</span>' : '';
       const botBadge = author?.bot ? '<span class="bot-badge">BOT</span>' : '';
 
+      const authorId = String(author?.id || '');
+      const memberStyle =
+        renderContext?.userStyles?.get(authorId) ||
+        getTranscriptMemberStyle(message.member);
+
+      const displayColor = normalizeTranscriptHexColor(
+        memberStyle?.color,
+        '#f2f3f5',
+      );
+
+      const roleIcon = renderTranscriptRoleIcon(
+        memberStyle,
+        'message-role-icon',
+      );
+
+      const replyPreview = renderTranscriptReplyPreview(
+        message,
+        renderContext,
+      );
+
       return `
-        <article class="message">
+        <article class="message" id="message-${escapeHtml(message.id)}">
           <img class="avatar" src="${escapeHtml(avatar)}" alt="">
           <div class="message-body">
+            ${replyPreview}
             <div class="message-meta">
-              <strong>${escapeHtml(displayName)}</strong>
+              <strong class="display-name" style="color:${escapeHtml(displayColor)}">${escapeHtml(displayName)}</strong>
+              ${roleIcon}
               ${botBadge}
               <span class="username">@${escapeHtml(username)}</span>
               <time>${escapeHtml(timestamp)}</time>
@@ -3076,6 +3436,7 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   .audit-item{background:#111214;border:1px solid #313338;border-radius:10px;padding:12px}
   .audit-item span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;margin-bottom:5px}
   .audit-item b{color:#fff;font-size:15px;overflow-wrap:anywhere}
+  .audit-date{margin-top:5px;color:var(--muted);font-size:13px;line-height:1.35;overflow-wrap:anywhere}
   .claim-history{display:grid;gap:8px}
   .claim-row{display:flex;gap:12px;align-items:flex-start;background:#111214;border:1px solid #313338;border-radius:10px;padding:11px 12px}
   .claim-index{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:#2b2d31;color:#fff;font-weight:800;flex:0 0 auto}
@@ -3089,8 +3450,22 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   .message:last-child{border-bottom:0}
   .avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#313338;flex:0 0 auto}
   .message-body{min-width:0;flex:1}
-  .message-meta{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
-  .message-meta strong{color:#f2f3f5}.username,time,.edited{color:var(--muted);font-size:12px}
+  .message-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .message-meta strong{color:#f2f3f5}.display-name{font-weight:700}.username,time,.edited{color:var(--muted);font-size:12px}
+  .message-role-icon,.reply-role-icon,.mention-role-icon{display:inline-block;width:18px;height:18px;object-fit:contain;vertical-align:-4px;flex:0 0 auto}
+  .reply-role-icon{width:16px;height:16px;vertical-align:-3px}
+  .mention-role-icon{width:16px;height:16px;margin-right:3px}
+  .unicode-role-icon{width:auto!important;height:auto!important;font-size:15px;line-height:1}
+  .reply-preview{position:relative;display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;min-height:24px;margin:0 0 5px -50px;padding-left:50px;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.25}
+  .reply-preview:hover .reply-text{text-decoration:underline;color:#dbdee1}
+  .reply-connector{position:absolute;left:20px;top:12px;width:25px;height:17px;border-left:2px solid #4e5058;border-top:2px solid #4e5058;border-radius:8px 0 0 0}
+  .reply-avatar{width:18px;height:18px;border-radius:50%;object-fit:cover;background:#313338;flex:0 0 auto}
+  .reply-avatar-fallback{display:inline-block}
+  .reply-author{font-weight:700;white-space:nowrap;max-width:170px;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+  .reply-text{color:#b5bac1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .reply-text .custom-emoji{width:18px;height:18px;vertical-align:-4px}
+  .reply-missing{color:#949ba4;font-style:italic}
+  .reply-unavailable{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .bot-badge{font-size:10px;font-weight:800;background:var(--accent);padding:1px 5px;border-radius:4px;color:white}
   .content{white-space:normal;overflow-wrap:anywhere;word-break:break-word;margin-top:3px}
   .md-line{min-height:1.45em;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
@@ -3111,7 +3486,7 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   .spoiler{display:inline;border-radius:3px;padding:0 3px;background:#1e1f22;color:#1e1f22;cursor:help;transition:.12s}
   .spoiler:hover,.spoiler:focus{background:#46484f;color:#dbdee1}
   .md-link{color:#00a8fc;text-decoration:none;overflow-wrap:anywhere}.md-link:hover{text-decoration:underline}.masked-link{font-weight:500}
-  .mention{display:inline-block;max-width:100%;padding:0 3px;border-radius:3px;background:rgba(88,101,242,.28);color:#c9cdfb;font-weight:600;vertical-align:baseline;overflow-wrap:anywhere}
+  .mention{display:inline-flex;align-items:center;max-width:100%;padding:0 3px;border-radius:3px;background:rgba(88,101,242,.28);color:#c9cdfb;font-weight:600;vertical-align:baseline;overflow-wrap:anywhere}
   .role-mention{background:rgba(88,101,242,.20)}.channel-mention{background:rgba(88,101,242,.18)}.everyone-mention{background:rgba(250,166,26,.20);color:#ffd69a}
   .discord-timestamp{display:inline-block;padding:0 3px;border-radius:3px;background:#2b2d31;color:#dbdee1}
   .custom-emoji{display:inline-block;width:1.45em;height:1.45em;object-fit:contain;vertical-align:-.34em;margin:0 .05em;max-width:none}
@@ -3129,7 +3504,7 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   .sticker-name{color:var(--muted)}
   .reactions{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.reaction{display:inline-flex;align-items:center;gap:4px;min-height:28px;padding:3px 8px;border:1px solid #3f4147;border-radius:8px;background:#2b2d31}.reaction .custom-emoji{width:20px;height:20px;vertical-align:middle}.unicode-reaction{font-size:18px;line-height:20px}.reaction-count{font-size:13px;color:#b5bac1}
   .footer{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
-  @media(max-width:640px){.shell{padding:16px 8px 40px}.message{padding:14px 10px;gap:10px}.avatar{width:36px;height:36px}.discord-embed{padding:10px}.embed-thumb{width:64px;height:64px}.attachment{padding:8px}}
+  @media(max-width:640px){.shell{padding:16px 8px 40px}.message{padding:14px 10px;gap:10px}.avatar{width:36px;height:36px}.reply-preview{margin-left:-46px;padding-left:46px}.reply-connector{left:17px;width:24px}.reply-author{max-width:110px}.discord-embed{padding:10px}.embed-thumb{width:64px;height:64px}.attachment{padding:8px}}
 </style>
 </head>
 <body>
@@ -3179,6 +3554,7 @@ async function buildTranscriptArtifact(
   {
     transcriptCreatedByUser = null,
     closedById = null,
+    closedAt = null,
   } = {},
 ) {
   const messages = await fetchAllChannelMessages(channel);
@@ -3192,6 +3568,7 @@ async function buildTranscriptArtifact(
       {
         transcriptCreatedByUser,
         closedById,
+        closedAt,
       },
     ),
     buildTranscriptRenderContext(
@@ -3243,6 +3620,7 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
     {
       transcriptCreatedByUser: deletedByUser,
       closedById: data.closedById || null,
+      closedAt: data.closedAt || null,
     },
   );
   const creator =
@@ -3350,6 +3728,12 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
         value: data.closedById
           ? `<@${data.closedById}>`
           : 'Unknown',
+      },
+      {
+        name: 'Ticket Closed At',
+        value: data.closedAt
+          ? `<t:${Math.floor(new Date(data.closedAt).getTime() / 1000)}:F>`
+          : 'Time unavailable',
       },
     )
     .setFooter({
@@ -3557,7 +3941,12 @@ async function sendTranscript(interaction) {
       data,
       {
         transcriptCreatedByUser: interaction.user,
-        closedById: getClosedByIdFromControlMessage(interaction.message),
+        closedById:
+          data.closedById ||
+          getClosedByIdFromControlMessage(interaction.message),
+        closedAt:
+          data.closedAt ||
+          getClosedAtFromControlMessage(interaction.message),
       },
     );
 
@@ -3633,12 +4022,19 @@ async function deleteTicket(interaction) {
   // Capture the original closer before the closed-ticket control embed is
   // replaced by the deletion countdown.
   const closedById =
+    data.closedById ||
     getClosedByIdFromControlMessage(interaction.message) ||
+    null;
+
+  const closedAt =
+    data.closedAt ||
+    getClosedAtFromControlMessage(interaction.message) ||
     null;
 
   const transcriptData = {
     ...data,
     closedById,
+    closedAt,
   };
 
   await interaction.deferUpdate();
