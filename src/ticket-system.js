@@ -23,6 +23,8 @@ const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
 const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
+const TRANSCRIPT_LOG_CHANNEL_ID =
+  process.env.TRANSCRIPT_LOG_CHANNEL_ID || '1538580589542777055';
 
 const TICKET_TYPES = {
   bug_report: {
@@ -1413,6 +1415,176 @@ function buildTranscriptHtml(channel, data, messages) {
 </html>`;
 }
 
+
+function getTranscriptParticipants(messages) {
+  const counts = new Map();
+
+  for (const message of messages) {
+    if (!message.author) continue;
+
+    const existing = counts.get(message.author.id) || {
+      id: message.author.id,
+      count: 0,
+      username: message.author.username || 'unknown',
+      bot: Boolean(message.author.bot),
+    };
+
+    existing.count += 1;
+    counts.set(message.author.id, existing);
+  }
+
+  return [...counts.values()].sort((a, b) => b.count - a.count);
+}
+
+async function buildTranscriptArtifact(channel, data) {
+  const messages = await fetchAllChannelMessages(channel);
+  const html = buildTranscriptHtml(channel, data, messages);
+  const safeType = TICKET_TYPES[data.typeKey]?.slug || 'ticket';
+  const safeChannelName = String(channel.name || `ticket-${data.number}`)
+    .replace(/[^a-zA-Z0-9_-]/g, '-')
+    .slice(0, 70);
+
+  return {
+    messages,
+    html,
+    filename: `transcript-${safeChannelName}.html`,
+    safeType,
+  };
+}
+
+async function sendTranscriptToLog(channel, data, deletedByUser) {
+  const guild = channel.guild;
+  const logChannel =
+    guild.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID) ||
+    (await guild.channels.fetch(TRANSCRIPT_LOG_CHANNEL_ID).catch(() => null));
+
+  if (
+    !logChannel ||
+    !logChannel.isTextBased() ||
+    typeof logChannel.send !== 'function'
+  ) {
+    throw new Error(
+      `Transcript log channel ${TRANSCRIPT_LOG_CHANNEL_ID} is missing or not sendable.`,
+    );
+  }
+
+  const artifact = await buildTranscriptArtifact(channel, data);
+  const creator =
+    guild.members.cache.get(data.creatorId) ||
+    (await guild.members.fetch(data.creatorId).catch(() => null));
+
+  const creatorUser = creator?.user || null;
+  const creatorName =
+    creator?.displayName ||
+    creatorUser?.globalName ||
+    creatorUser?.username ||
+    `User ${data.creatorId}`;
+  const creatorAvatar = creatorUser?.displayAvatarURL({ size: 128 }) || null;
+
+  const participants = getTranscriptParticipants(artifact.messages);
+  let participantText = participants
+    .slice(0, 12)
+    .map(
+      (participant) =>
+        `${participant.count} - <@${participant.id}> - ${participant.username}${participant.bot ? ' [BOT]' : ''}`,
+    )
+    .join('\n');
+
+  if (!participantText) participantText = 'No users found.';
+  if (participants.length > 12) {
+    participantText += `\n…and ${participants.length - 12} more.`;
+  }
+  if (participantText.length > 1024) {
+    participantText = `${participantText.slice(0, 1000)}\n…`;
+  }
+
+  const type = TICKET_TYPES[data.typeKey] || { label: data.typeKey || 'Unknown' };
+
+  const embed = new EmbedBuilder()
+    .setColor(0x23d160)
+    .setAuthor({
+      name: creatorName,
+      ...(creatorAvatar ? { iconURL: creatorAvatar } : {}),
+    })
+    .addFields(
+      {
+        name: 'Ticket Owner',
+        value: `<@${data.creatorId}>`,
+      },
+      {
+        name: 'Ticket Name',
+        value: channel.name,
+      },
+      {
+        name: 'Ticket Type',
+        value: type.label,
+        inline: true,
+      },
+      {
+        name: 'Ticket Number',
+        value: `#${data.number}`,
+        inline: true,
+      },
+      {
+        name: 'Panel Name',
+        value: 'Support Tickets',
+      },
+      {
+        name: 'Direct Transcript',
+        value: 'Use Button',
+      },
+      {
+        name: 'Users in transcript',
+        value: participantText,
+      },
+      {
+        name: 'Deleted By',
+        value: `<@${deletedByUser.id}>`,
+      },
+    )
+    .setFooter({
+      text: `Final transcript • ${artifact.messages.length} messages`,
+    })
+    .setTimestamp();
+
+  const logMessage = await logChannel.send({
+    files: [
+      new AttachmentBuilder(Buffer.from(artifact.html, 'utf8'), {
+        name: artifact.filename,
+      }),
+    ],
+    embeds: [embed],
+    allowedMentions: { parse: [] },
+  });
+
+  const uploadedTranscript = logMessage.attachments.first();
+
+  if (uploadedTranscript?.url) {
+    const directLinkRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel('Direct Link')
+        .setEmoji('📎')
+        .setStyle(ButtonStyle.Link)
+        .setURL(uploadedTranscript.url),
+    );
+
+    await logMessage.edit({
+      components: [directLinkRow],
+    });
+  }
+
+  console.log(
+    `[TICKET TRANSCRIPT LOG] Ticket #${data.number} logged to ${TRANSCRIPT_LOG_CHANNEL_ID} ` +
+      `with ${artifact.messages.length} messages.`,
+  );
+
+  return {
+    logMessage,
+    messageCount: artifact.messages.length,
+    filename: artifact.filename,
+  };
+}
+
 async function sendTranscript(interaction) {
   const data = getTicketData(interaction.channel);
   if (!data) {
@@ -1435,14 +1607,15 @@ async function sendTranscript(interaction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
-    const messages = await fetchAllChannelMessages(interaction.channel);
-    const html = buildTranscriptHtml(interaction.channel, data, messages);
-    const safeType = TICKET_TYPES[data.typeKey]?.slug || 'ticket';
-    const filename = `ticket-${data.number}_${safeType}-transcript.html`;
+    const artifact = await buildTranscriptArtifact(interaction.channel, data);
 
     await interaction.editReply({
-      content: `📑 Transcript ready — **${messages.length} messages** captured.`,
-      files: [new AttachmentBuilder(Buffer.from(html, 'utf8'), { name: filename })],
+      content: `📑 Transcript ready — **${artifact.messages.length} messages** captured.`,
+      files: [
+        new AttachmentBuilder(Buffer.from(artifact.html, 'utf8'), {
+          name: artifact.filename,
+        }),
+      ],
     });
   } catch (error) {
     console.error('[TICKET TRANSCRIPT ERROR]', error);
@@ -1497,6 +1670,43 @@ async function deleteTicket(interaction) {
   await delay(1000);
   const channelId = interaction.channel.id;
 
+  // Generate and archive a FINAL transcript before deleting the channel.
+  // If this fails, do not destroy the ticket — losing the channel without its
+  // transcript would defeat the purpose of the audit log.
+  try {
+    countdownEmbed
+      .setTitle('📑 Archiving transcript')
+      .setDescription('Creating the final transcript and sending it to the ticket logs…');
+
+    await interaction.message.edit({
+      embeds: [countdownEmbed],
+      components: [],
+    }).catch(() => {});
+
+    await sendTranscriptToLog(interaction.channel, data, interaction.user);
+  } catch (error) {
+    console.error('[TICKET DELETE TRANSCRIPT LOG ERROR]', error);
+
+    const restoreMessage = buildClosedTicketMessage(interaction.user.id);
+    restoreMessage.embeds[0]
+      .setColor(0xed4245)
+      .setDescription(
+        '❌ **Ticket deletion cancelled**\nI could not save the final transcript to the transcript log channel.',
+      );
+
+    await interaction.message.edit(restoreMessage).catch(() => {});
+
+    await interaction.followUp({
+      content:
+        `I did **not** delete the ticket because I could not archive the transcript in <#${TRANSCRIPT_LOG_CHANNEL_ID}>. ` +
+        'Check that I can **View Channel**, **Send Messages**, **Attach Files**, and **Embed Links** there.',
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    }).catch(() => {});
+
+    return;
+  }
+
   try {
     await interaction.channel.delete(`Closed ticket deleted by ${interaction.user.tag}`);
     await deleteTicketState(channelId).catch((error) => {
@@ -1505,8 +1715,11 @@ async function deleteTicket(interaction) {
   } catch (error) {
     console.error('[TICKET DELETE ERROR]', error);
     await interaction.followUp({
-      content: 'I could not delete this ticket. Check my **Manage Channels** permission.',
+      content:
+        `The transcript was archived in <#${TRANSCRIPT_LOG_CHANNEL_ID}>, but I could not delete this ticket. ` +
+        'Check my **Manage Channels** permission.',
       flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
     }).catch(() => {});
   }
 }
