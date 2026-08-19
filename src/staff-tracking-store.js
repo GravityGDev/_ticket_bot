@@ -1,13 +1,14 @@
 const { PermissionFlagsBits } = require('discord.js');
 const { getMongoDb } = require('./database');
+const {
+  DEFAULT_TRACKED_CATEGORY_IDS,
+  getStaffTrackingSettings,
+} = require('./staff-settings-store');
 
 const CLAIM_COLLECTION = 'staff_ticket_claims';
 const ACTIVITY_COLLECTION = 'staff_activity_messages';
 
-const TRACKED_CATEGORY_IDS = Object.freeze([
-  '1194039775787745531',
-  '1292633562390069281',
-]);
+const TRACKED_CATEGORY_IDS = DEFAULT_TRACKED_CATEGORY_IDS;
 
 let indexesPromise = null;
 
@@ -114,7 +115,17 @@ async function recordStaffActivityMessage(message) {
   if (message.author.bot) return false;
 
   const categoryId = String(message.channel.parentId || '');
-  if (!TRACKED_CATEGORY_IDS.includes(categoryId)) return false;
+  const channelId = String(message.channel.id);
+  const settings = await getStaffTrackingSettings(message.guild.id);
+
+  // Blacklist always wins. Whitelist can add channels outside the tracked
+  // categories. Otherwise the parent category must be enabled.
+  if (settings.blacklistedChannelIds.includes(channelId)) return false;
+
+  const isExplicitlyWhitelisted = settings.whitelistedChannelIds.includes(channelId);
+  const isInsideTrackedCategory = settings.trackedCategoryIds.includes(categoryId);
+
+  if (!isExplicitlyWhitelisted && !isInsideTrackedCategory) return false;
 
   const member =
     message.member ||
@@ -320,6 +331,35 @@ async function getStaffDetail(guildId, staffId, periodKey) {
   };
 }
 
+async function getStaffMetricCount(guildId, staffId, metric, periodKey = 'lifetime') {
+  await initializeStaffTracking();
+
+  const filter = {
+    guildId: String(guildId),
+    staffId: String(staffId),
+  };
+
+  if (periodKey !== 'lifetime') {
+    const start = getPeriodStart(periodKey);
+    if (metric === 'tickets') filter.claimedAt = { $gte: start };
+    if (metric === 'messages') filter.createdAt = { $gte: start };
+  }
+
+  if (metric === 'tickets') {
+    return (await claimsCollection()).countDocuments(filter);
+  }
+
+  if (metric === 'messages') {
+    return (await activityCollection()).countDocuments(filter);
+  }
+
+  throw new Error(`Unsupported staff goal metric: ${metric}`);
+}
+
+async function getCurrentTrackingRules(guildId) {
+  return getStaffTrackingSettings(guildId);
+}
+
 module.exports = {
   TRACKED_CATEGORY_IDS,
   getPeriodStart,
@@ -328,4 +368,6 @@ module.exports = {
   recordStaffActivityMessage,
   getStaffSnapshot,
   getStaffDetail,
+  getStaffMetricCount,
+  getCurrentTrackingRules,
 };

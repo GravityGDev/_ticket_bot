@@ -8,10 +8,15 @@ const {
   StringSelectMenuBuilder,
 } = require('discord.js');
 const {
-  TRACKED_CATEGORY_IDS,
   getStaffSnapshot,
   getStaffDetail,
+  getCurrentTrackingRules,
 } = require('./staff-tracking-store');
+const {
+  OWNER_USER_ID,
+  canManageStaffSettings,
+  handleStaffSettingsInteraction,
+} = require('./staff-settings');
 
 const WARNING_ROLE_IDS = Object.freeze([
   '961199921841713162',
@@ -306,6 +311,7 @@ function buildLeaderboardEmbed({
   allRows,
   filteredRows,
   pageInfo,
+  trackingRules,
 }) {
   const period = PERIODS[periodKey];
   const filter = FILTERS[filterKey];
@@ -335,10 +341,10 @@ function buildLeaderboardEmbed({
     ? `${getStarBadge(bestStar.starLevel)} <@${bestStar.member.id}> — **${bestStar.claims}** claimed • **${bestStar.messages}** messages`
     : 'No active Star Management staff in this period.';
 
-  const trackedCategories = TRACKED_CATEGORY_IDS.map((id) => {
+  const trackedCategories = trackingRules.trackedCategoryIds.map((id) => {
     const category = guild.channels.cache.get(id);
     return category ? `**${category.name}** \`${id}\`` : `\`${id}\``;
-  }).join('\n');
+  }).join('\n') || 'None';
 
   return new EmbedBuilder()
     .setColor(0x5865f2)
@@ -381,10 +387,13 @@ function buildLeaderboardEmbed({
 async function buildLeaderboardPayload(guild, state = {}) {
   const periodKey = cleanPeriod(state.periodKey);
   const filterKey = cleanFilter(state.filterKey);
+  const viewerId = state.viewerId ? String(state.viewerId) : null;
 
-  const [members, snapshot] = await Promise.all([
+  const [members, snapshot, trackingRules, viewerCanManageSettings] = await Promise.all([
     getCurrentStaffMembers(guild),
     getStaffSnapshot(guild.id, periodKey),
+    getCurrentTrackingRules(guild.id),
+    viewerId ? canManageStaffSettings(guild.id, viewerId) : Promise.resolve(false),
   ]);
 
   const allRows = sortLeaderboard(enrichStaff(members, snapshot));
@@ -414,6 +423,18 @@ async function buildLeaderboardPayload(guild, state = {}) {
     buildFilterRow(periodKey, filterKey, pageInfo.page),
   );
 
+  if (viewerCanManageSettings) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('staffsettings:home')
+          .setLabel('Admin Settings')
+          .setEmoji('⚙️')
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+
   return {
     embeds: [
       buildLeaderboardEmbed({
@@ -423,6 +444,7 @@ async function buildLeaderboardPayload(guild, state = {}) {
         allRows,
         filteredRows,
         pageInfo,
+        trackingRules,
       }),
     ],
     components,
@@ -470,6 +492,7 @@ function buildDetailEmbed({
   detail,
   periodKey,
   filterKey,
+  trackingRules,
 }) {
   const member = row.member;
   const warningRoles = getRoleMentions(member, WARNING_ROLE_IDS);
@@ -500,7 +523,7 @@ function buildDetailEmbed({
         .join('\n')
     : 'No recent claims in this period.';
 
-  const categoryText = TRACKED_CATEGORY_IDS.map((categoryId) => {
+  const categoryText = trackingRules.trackedCategoryIds.map((categoryId) => {
     const count =
       detail.categoryRows.find(
         (rowData) => String(rowData._id) === String(categoryId),
@@ -594,15 +617,17 @@ async function buildDetailPayload(
     periodKey,
     filterKey,
     memberId,
+    viewerId = null,
   },
 ) {
   periodKey = cleanPeriod(periodKey);
   filterKey = cleanFilter(filterKey);
 
-  const [members, snapshot, detail] = await Promise.all([
+  const [members, snapshot, detail, trackingRules] = await Promise.all([
     getCurrentStaffMembers(guild),
     getStaffSnapshot(guild.id, periodKey),
     getStaffDetail(guild.id, memberId, periodKey),
+    getCurrentTrackingRules(guild.id),
   ]);
 
   const allRows = sortLeaderboard(enrichStaff(members, snapshot));
@@ -616,6 +641,7 @@ async function buildDetailPayload(
       periodKey,
       filterKey,
       page: 0,
+      viewerId,
     });
   }
 
@@ -664,17 +690,23 @@ async function buildDetailPayload(
         detail,
         periodKey,
         filterKey,
+        trackingRules,
       }),
     ],
     components,
   };
 }
 
-function isAdmin(interaction) {
-  return Boolean(
-    interaction.memberPermissions?.has(
-      PermissionFlagsBits.Administrator,
-    ),
+async function canViewStaffPanel(interaction) {
+  if (
+    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+  ) {
+    return true;
+  }
+
+  return canManageStaffSettings(
+    interaction.guild.id,
+    interaction.user.id,
   );
 }
 
@@ -687,9 +719,9 @@ async function sendStaffTrackingPanel(interaction) {
     return;
   }
 
-  if (!isAdmin(interaction)) {
+  if (!(await canViewStaffPanel(interaction))) {
     await interaction.reply({
-      content: 'You need **Administrator** permission to view staff tracking.',
+      content: 'You need **Administrator** permission or Staff Settings access to view this panel.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -704,6 +736,7 @@ async function sendStaffTrackingPanel(interaction) {
       periodKey: 'weekly',
       filterKey: 'all',
       page: 0,
+      viewerId: interaction.user.id,
     });
 
     await interaction.editReply(payload);
@@ -720,6 +753,14 @@ async function sendStaffTrackingPanel(interaction) {
 
 async function handleStaffTrackingInteraction(interaction) {
   const customId = interaction.customId;
+
+  if (customId?.startsWith('staffsettings:')) {
+    return handleStaffSettingsInteraction(
+      interaction,
+      buildLeaderboardPayload,
+    );
+  }
+
   if (
     !customId ||
     !customId.startsWith('staffstats:')
@@ -731,9 +772,9 @@ async function handleStaffTrackingInteraction(interaction) {
     return true;
   }
 
-  if (!isAdmin(interaction)) {
+  if (!(await canViewStaffPanel(interaction))) {
     await interaction.reply({
-      content: 'You need **Administrator** permission to use this panel.',
+      content: 'You need **Administrator** permission or Staff Settings access to use this panel.',
       flags: MessageFlags.Ephemeral,
     }).catch(() => {});
     return true;
@@ -756,6 +797,7 @@ async function handleStaffTrackingInteraction(interaction) {
         periodKey,
         filterKey,
         page: Number(rawPage) || 0,
+        viewerId: interaction.user.id,
       });
       await interaction.editReply(payload);
       return true;
@@ -767,6 +809,7 @@ async function handleStaffTrackingInteraction(interaction) {
         periodKey,
         filterKey,
         page: Number(rawPage) || 0,
+        viewerId: interaction.user.id,
       });
       await interaction.editReply(payload);
       return true;
@@ -778,6 +821,7 @@ async function handleStaffTrackingInteraction(interaction) {
         periodKey: interaction.values[0],
         filterKey,
         page: 0,
+        viewerId: interaction.user.id,
       });
       await interaction.editReply(payload);
       return true;
@@ -789,6 +833,7 @@ async function handleStaffTrackingInteraction(interaction) {
         periodKey,
         filterKey: interaction.values[0],
         page: 0,
+        viewerId: interaction.user.id,
       });
       await interaction.editReply(payload);
       return true;
@@ -800,6 +845,7 @@ async function handleStaffTrackingInteraction(interaction) {
         periodKey,
         filterKey,
         memberId: interaction.values[0],
+        viewerId: interaction.user.id,
       });
       await interaction.editReply(payload);
       return true;
@@ -811,6 +857,7 @@ async function handleStaffTrackingInteraction(interaction) {
         periodKey,
         filterKey,
         memberId,
+        viewerId: interaction.user.id,
       });
       await interaction.editReply(payload);
       return true;

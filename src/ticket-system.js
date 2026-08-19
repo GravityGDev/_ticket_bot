@@ -19,6 +19,7 @@ const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-stor
 const { getTicketState, setTicketState, deleteTicketState } = require('./ticket-store');
 const { getNextTicketNumber } = require('./ticket-counter-store');
 const { recordTicketClaim } = require('./staff-tracking-store');
+const { evaluateStaffGoalsForMember } = require('./staff-settings');
 
 const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
@@ -2412,6 +2413,13 @@ async function claimTicket(interaction) {
     }).catch((statsError) => {
       // A stats failure must never undo a successful ticket claim.
       console.error('[STAFF TRACKING CLAIM ERROR]', statsError);
+    });
+
+    await evaluateStaffGoalsForMember(
+      interaction.guild,
+      interaction.user.id,
+    ).catch((goalError) => {
+      console.error('[STAFF GOAL CLAIM EVALUATION ERROR]', goalError);
     });
   } catch (error) {
     console.error('[TICKET CLAIM STATE ERROR]', error);

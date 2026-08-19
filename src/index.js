@@ -27,6 +27,11 @@ const {
   recordStaffActivityMessage,
 } = require('./staff-tracking-store');
 const { handleStaffTrackingInteraction } = require('./staff-tracking');
+const {
+  queueStaffGoalEvaluation,
+  evaluateAllStaffGoals,
+  processDueWarningRemovals,
+} = require('./staff-settings');
 
 const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID'];
 for (const key of requiredEnv) {
@@ -200,9 +205,15 @@ client.on(Events.MessageCreate, (message) => {
 });
 
 client.on(Events.MessageCreate, (message) => {
-  recordStaffActivityMessage(message).catch((error) => {
-    console.error('[STAFF ACTIVITY TRACKER ERROR]', error);
-  });
+  recordStaffActivityMessage(message)
+    .then((recorded) => {
+      if (recorded) {
+        queueStaffGoalEvaluation(message.guild, message.author.id);
+      }
+    })
+    .catch((error) => {
+      console.error('[STAFF ACTIVITY TRACKER ERROR]', error);
+    });
 });
 
 client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
@@ -247,6 +258,25 @@ client.once(Events.ClientReady, () => {
   initializeStaffTracking().catch((error) => {
     console.error('[STAFF TRACKING INITIALIZE ERROR]', error);
   });
+});
+
+client.once(Events.ClientReady, (readyClient) => {
+  for (const guild of readyClient.guilds.cache.values()) {
+    evaluateAllStaffGoals(guild).catch((error) => {
+      console.error('[STAFF GOAL STARTUP EVALUATION ERROR]', error);
+    });
+  }
+
+  const runWarningRemovalCheck = () => {
+    processDueWarningRemovals(readyClient).catch((error) => {
+      console.error('[WARNING REMOVAL SCHEDULER ERROR]', error);
+    });
+  };
+
+  // Process overdue jobs on startup, then check once per minute.
+  runWarningRemovalCheck();
+  const timer = setInterval(runWarningRemovalCheck, 60_000);
+  timer.unref?.();
 });
 
 // Slash commands, ticket buttons, and ticket select menus.
