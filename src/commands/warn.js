@@ -271,19 +271,6 @@ async function downloadEvidenceFiles(attachments) {
   return files;
 }
 
-function buildEvidenceEmbeds(files) {
-  return files.map((file, index) => {
-    const embed = new EmbedBuilder()
-      .setColor(0x2b2d31)
-      .setImage(`attachment://${file.name}`);
-
-    if (index === 0) {
-      embed.setDescription('**Evidence:**');
-    }
-
-    return embed;
-  });
-}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -555,14 +542,13 @@ module.exports = {
 
       // Send only the embed; there is no separate ping/message above it.
       // Mentions inside the embed are displayed without generating notifications.
-      const evidenceEmbeds = buildEvidenceEmbeds(evidenceFiles);
-
+      // Send the warning embed by itself first.
+      //
+      // Evidence is sent as the next grouped bot message. This prevents Discord
+      // from showing the same image once as a raw attachment above the warning
+      // embed and again inside an Evidence embed.
       const warningMessage = await interaction.channel.send({
-        embeds: [embed, ...evidenceEmbeds],
-        files: evidenceFiles.map((file) => ({
-          attachment: file.attachment,
-          name: file.name,
-        })),
+        embeds: [embed],
         components: [
           buildWarningActionRow(String(schedule._id)),
         ],
@@ -571,15 +557,30 @@ module.exports = {
         },
       });
 
-      const storedEvidence = [...warningMessage.attachments.values()]
+      const evidenceMessage = await interaction.channel.send({
+        content: '**Evidence:**',
+        files: evidenceFiles.map((file) => ({
+          attachment: file.attachment,
+          name: file.name,
+        })),
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      const storedEvidence = [...evidenceMessage.attachments.values()]
         .map((attachment) => ({
           url: attachment.url,
           name: attachment.name,
           contentType: attachment.contentType,
           size: attachment.size,
+          messageId: evidenceMessage.id,
+          channelId: interaction.channel.id,
         }));
 
-      // Persist the exact Discord warning message and evidence in MongoDB.
+      // Persist the main warning message plus the evidence attachment URLs.
+      // Revoke / Extend / automatic removal continue editing only the main
+      // warning embed, so the evidence message underneath stays untouched.
       await attachWarningMessage(
         interaction.guild.id,
         String(schedule._id),
