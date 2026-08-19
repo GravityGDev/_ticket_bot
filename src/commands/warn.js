@@ -7,9 +7,6 @@ const {
 const {
   createWarningRemovalSchedule,
 } = require('../staff-settings-store');
-const {
-  parseLondonLocalDateTime,
-} = require('../staff-settings');
 
 const WARNING_ROLES = Object.freeze({
   warning1: '961199921841713162',
@@ -28,24 +25,160 @@ const REMOVE_DURATIONS = Object.freeze({
   '30d': 30 * 24 * 60 * 60 * 1000,
 });
 
-function getRemovalDate(duration, customDate) {
-  if (duration === 'custom') {
-    if (!customDate) {
-      throw new Error(
-        'You selected **Custom date/time**, so you must fill in `custom-date`.',
-      );
+const MONTHS = Object.freeze([
+  ['January', 1],
+  ['February', 2],
+  ['March', 3],
+  ['April', 4],
+  ['May', 5],
+  ['June', 6],
+  ['July', 7],
+  ['August', 8],
+  ['September', 9],
+  ['October', 10],
+  ['November', 11],
+  ['December', 12],
+]);
+
+function buildYearChoices() {
+  // Discord allows at most 25 fixed choices. This gives a selectable year
+  // dropdown from 2026 through 2050 inclusive.
+  return Array.from({ length: 25 }, (_, index) => {
+    const year = 2026 + index;
+    return {
+      name: String(year),
+      value: year,
+    };
+  });
+}
+
+function buildHourChoices() {
+  return Array.from({ length: 13 }, (_, index) => {
+    const hour = index + 1;
+    const label = `${String(hour).padStart(2, '0')}:00`;
+
+    return {
+      name: label,
+      value: hour,
+    };
+  });
+}
+
+function daysInMonth(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function makeLondonLocalDate(year, month, day, hour, minute) {
+  const maxDay = daysInMonth(year, month);
+
+  if (day > maxDay) {
+    throw new Error(
+      `${MONTHS[month - 1]?.[0] || 'That month'} ${year} only has ${maxDay} days.`,
+    );
+  }
+
+  // Convert a Europe/London wall-clock time into UTC without another package.
+  // We test both standard-time and BST candidates and keep whichever formats
+  // back to the requested London local components.
+  const requested = {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+  };
+
+  const formatParts = (date) => {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date);
+
+    const values = Object.fromEntries(
+      parts
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, part.value]),
+    );
+
+    return {
+      year: Number(values.year),
+      month: Number(values.month),
+      day: Number(values.day),
+      hour: Number(values.hour),
+      minute: Number(values.minute),
+    };
+  };
+
+  const matches = (parts) =>
+    parts.year === requested.year &&
+    parts.month === requested.month &&
+    parts.day === requested.day &&
+    parts.hour === requested.hour &&
+    parts.minute === requested.minute;
+
+  // Candidate assuming GMT.
+  const gmtCandidate = new Date(
+    Date.UTC(year, month - 1, day, hour, minute, 0, 0),
+  );
+
+  // Candidate assuming BST (+01:00), so UTC is one hour earlier.
+  const bstCandidate = new Date(
+    Date.UTC(year, month - 1, day, hour - 1, minute, 0, 0),
+  );
+
+  if (matches(formatParts(gmtCandidate))) return gmtCandidate;
+  if (matches(formatParts(bstCandidate))) return bstCandidate;
+
+  throw new Error(
+    'That UK date/time does not exist because of the daylight-saving clock change. Choose another time.',
+  );
+}
+
+function getRemovalDate(interaction, duration) {
+  if (duration !== 'custom') {
+    const milliseconds = REMOVE_DURATIONS[duration];
+
+    if (!milliseconds) {
+      throw new Error('Invalid warning removal duration.');
     }
 
-    return parseLondonLocalDateTime(customDate);
+    return new Date(Date.now() + milliseconds);
   }
 
-  const milliseconds = REMOVE_DURATIONS[duration];
+  const year = interaction.options.getInteger('year');
+  const month = interaction.options.getInteger('month');
+  const day = interaction.options.getInteger('day');
+  const hour = interaction.options.getInteger('hour');
+  const minute = interaction.options.getInteger('minute');
 
-  if (!milliseconds) {
-    throw new Error('Invalid warning removal duration.');
+  const missing = [
+    ['year', year],
+    ['month', month],
+    ['day', day],
+    ['hour', hour],
+    ['minute', minute],
+  ]
+    .filter(([, value]) => value === null)
+    .map(([name]) => name);
+
+  if (missing.length) {
+    throw new Error(
+      `Custom date/time requires: ${missing.map((name) => `\`${name}\``).join(', ')}.`,
+    );
   }
 
-  return new Date(Date.now() + milliseconds);
+  return makeLondonLocalDate(
+    year,
+    month,
+    day,
+    hour,
+    minute,
+  );
 }
 
 module.exports = {
@@ -100,12 +233,44 @@ module.exports = {
           { name: 'Custom date/time', value: 'custom' },
         ),
     )
-    .addStringOption((option) =>
+    .addIntegerOption((option) =>
       option
-        .setName('custom-date')
-        .setDescription('Only for Custom: UK time, e.g. 2026-09-01 18:30.')
+        .setName('year')
+        .setDescription('Custom only: select the year.')
         .setRequired(false)
-        .setMaxLength(80),
+        .addChoices(...buildYearChoices()),
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('month')
+        .setDescription('Custom only: select the month.')
+        .setRequired(false)
+        .addChoices(
+          ...MONTHS.map(([name, value]) => ({ name, value })),
+        ),
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('day')
+        .setDescription('Custom only: day of the month (1-31).')
+        .setRequired(false)
+        .setMinValue(1)
+        .setMaxValue(31),
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('hour')
+        .setDescription('Custom only: select hour 01:00 through 13:00.')
+        .setRequired(false)
+        .addChoices(...buildHourChoices()),
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('minute')
+        .setDescription('Custom only: minute (0-59).')
+        .setRequired(false)
+        .setMinValue(0)
+        .setMaxValue(59),
     ),
 
   async execute(interaction) {
@@ -138,7 +303,6 @@ module.exports = {
       const reason = interaction.options.getString('reason', true).trim();
       const roleId = interaction.options.getString('warning-role', true);
       const duration = interaction.options.getString('remove-in', true);
-      const customDate = interaction.options.getString('custom-date');
 
       const member = await interaction.guild.members
         .fetch(targetUser.id)
@@ -179,10 +343,10 @@ module.exports = {
         );
       }
 
-      const executeAt = getRemovalDate(duration, customDate);
+      const executeAt = getRemovalDate(interaction, duration);
 
       if (executeAt.getTime() <= Date.now()) {
-        throw new Error('The warning removal date must be in the future.');
+        throw new Error('The warning removal date/time must be in the future.');
       }
 
       if (!member.roles.cache.has(role.id)) {
@@ -228,7 +392,6 @@ module.exports = {
           },
           {
             name: 'Automatic Removal',
-            // Discord's relative timestamp updates live in the client.
             value: `<t:${unix}:F>\n**Removes <t:${unix}:R>**`,
           },
         )
@@ -237,19 +400,23 @@ module.exports = {
         })
         .setTimestamp();
 
-      // Send as a completely new channel message rather than using the slash
-      // command response as the visible warning.
+      // Prevent duplicate allowed_mentions when an admin warns themselves.
+      const mentionUsers = [
+        ...new Set([
+          member.id,
+          interaction.user.id,
+        ]),
+      ];
+
       await interaction.channel.send({
         content: `<@${member.id}>`,
         embeds: [embed],
         allowedMentions: {
-          users: [member.id, interaction.user.id],
+          users: mentionUsers,
           roles: [],
         },
       });
 
-      // Remove the temporary slash-command acknowledgement so only the clean
-      // new warning message remains.
       await interaction.deleteReply().catch(() => {});
     } catch (error) {
       console.error('[WARN COMMAND ERROR]', error);
