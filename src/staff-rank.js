@@ -355,7 +355,6 @@ async function renderRankCard(guild, member, periodKey) {
 async function sendRankCard(
   interaction,
   periodKey = 'lifetime',
-  targetUser = null,
 ) {
   if (!interaction.inGuild()) {
     await interaction.reply({
@@ -380,7 +379,17 @@ async function sendRankCard(
     return;
   }
 
-  const targetId = targetUser?.id || interaction.user.id;
+  // Read the selected target directly from the slash-command interaction.
+  // This avoids any argument-order/version mismatch between command files and
+  // the rank-card helper.
+  const selectedUser = interaction.options?.getUser('staff') || null;
+  const targetId = selectedUser?.id || interaction.user.id;
+
+  console.log(
+    `[RANK] Requested by ${interaction.user.id}; target=${targetId}; ` +
+      `period=${periodKey}`,
+  );
+
   const member = await interaction.guild.members
     .fetch(targetId)
     .catch(() => null);
@@ -391,9 +400,14 @@ async function sendRankCard(
     !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
   ) {
     await interaction.reply({
-      content: 'That user is not a tracked staff member with **View Audit Log** permission.',
-      flags: MessageFlags.Ephemeral,
+      content: `<@${targetId}> isn't Snay.io staff.`,
+      allowedMentions: { users: [targetId] },
     });
+
+    setTimeout(() => {
+      interaction.deleteReply().catch(() => {});
+    }, 3000);
+
     return;
   }
 
@@ -404,6 +418,11 @@ async function sendRankCard(
       interaction.guild,
       member,
       periodKey,
+    );
+
+    console.log(
+      `[RANK] Generated card for ${member.user.tag} (${member.id}) ` +
+        `requested by ${interaction.user.tag} (${interaction.user.id}).`,
     );
 
     await interaction.editReply({
