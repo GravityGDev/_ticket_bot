@@ -22,6 +22,11 @@ const {
   handleReportStaffChannelDelete,
 } = require('./report-staff-tracker');
 const { applySavedBotStatus } = require('./bot-status');
+const {
+  initializeStaffTracking,
+  recordStaffActivityMessage,
+} = require('./staff-tracking-store');
+const { handleStaffTrackingInteraction } = require('./staff-tracking');
 
 const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID'];
 for (const key of requiredEnv) {
@@ -194,6 +199,12 @@ client.on(Events.MessageCreate, (message) => {
   });
 });
 
+client.on(Events.MessageCreate, (message) => {
+  recordStaffActivityMessage(message).catch((error) => {
+    console.error('[STAFF ACTIVITY TRACKER ERROR]', error);
+  });
+});
+
 client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
   trackReportStaffMessageUpdate(oldMessage, newMessage).catch((error) => {
     console.error('[REPORT STAFF MESSAGE UPDATE TRACKER ERROR]', error);
@@ -232,6 +243,12 @@ client.once(Events.ClientReady, (readyClient) => {
   });
 });
 
+client.once(Events.ClientReady, () => {
+  initializeStaffTracking().catch((error) => {
+    console.error('[STAFF TRACKING INITIALIZE ERROR]', error);
+  });
+});
+
 // Slash commands, ticket buttons, and ticket select menus.
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -244,6 +261,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       await command.execute(interaction, client);
+      return;
+    }
+
+    if (await handleStaffTrackingInteraction(interaction)) {
       return;
     }
 

@@ -18,6 +18,7 @@ const {
 const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-store');
 const { getTicketState, setTicketState, deleteTicketState } = require('./ticket-store');
 const { getNextTicketNumber } = require('./ticket-counter-store');
+const { recordTicketClaim } = require('./staff-tracking-store');
 
 const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
@@ -2397,6 +2398,21 @@ async function claimTicket(interaction) {
       { claimedById: interaction.user.id },
       `Ticket claimed by ${interaction.user.tag}`,
     );
+
+    // Keep a permanent historical claim record. This remains even after the
+    // Discord ticket is closed/deleted, so staff performance stats are not
+    // lost with the ticket channel.
+    await recordTicketClaim({
+      guildId: interaction.guild.id,
+      staffId: interaction.user.id,
+      ticketNumber: data.number,
+      typeKey: data.typeKey,
+      channelId: interaction.channel.id,
+      claimedAt: new Date(),
+    }).catch((statsError) => {
+      // A stats failure must never undo a successful ticket claim.
+      console.error('[STAFF TRACKING CLAIM ERROR]', statsError);
+    });
   } catch (error) {
     console.error('[TICKET CLAIM STATE ERROR]', error);
     await interaction.reply({
