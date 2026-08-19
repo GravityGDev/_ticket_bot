@@ -27,6 +27,12 @@ const TRANSCRIPT_LOG_CHANNEL_ID =
   process.env.TRANSCRIPT_LOG_CHANNEL_ID || '1538580589542777055';
 
 const TICKET_TYPES = {
+  general_inquiry: {
+    label: 'General Inquiry',
+    slug: 'general-inquiry',
+    emoji: '💬',
+    requiresInGameId: false,
+  },
   bug_report: {
     label: 'Bug report',
     slug: 'bug-report',
@@ -38,6 +44,12 @@ const TICKET_TYPES = {
     slug: 'cheating-report',
     emoji: '🚨',
     requiresInGameId: false,
+  },
+  claim_reward: {
+    label: 'Claim reward',
+    slug: 'claim-reward',
+    emoji: '🎁',
+    requiresInGameId: true,
   },
   booster_claim: {
     label: 'Booster claim',
@@ -198,6 +210,11 @@ function buildYouTubeSubscriberMenu(creatorId) {
 
 function getTypeInstructions(typeKey) {
   switch (typeKey) {
+    case 'general_inquiry':
+      return [
+        '**General Inquiry**',
+        'Please tell us what you need help with and include any relevant details.',
+      ].join('\n');
     case 'bug_report':
       return [
         '**Please describe the bug in as much detail as possible.**',
@@ -209,6 +226,12 @@ function getTypeInstructions(typeKey) {
         '**Please provide details about the cheating report.**',
         'Include the player username/ID, what you saw, when it happened, and the server/mode if known.',
         '**Proof is required where possible** — attach screenshots or video evidence.',
+      ].join('\n');
+    case 'claim_reward':
+      return [
+        '**Claim reward**',
+        'Before you can type in this ticket, press **Submit In-game ID** below and enter your in-game user ID.',
+        'Once submitted, you can explain which reward you are trying to claim and staff can help you.',
       ].join('\n');
     case 'booster_claim':
       return [
