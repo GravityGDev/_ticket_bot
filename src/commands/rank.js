@@ -32,7 +32,6 @@ module.exports = {
     await sendRankCard(
       interaction,
       interaction.options.getString('period') || 'lifetime',
-      interaction.options.getUser('staff'),
     );
   },
 };
