@@ -174,9 +174,11 @@ function getActivityScore(row, pointSettings) {
   );
 }
 
-function getBestStarStaff(allRows, pointSettings) {
-  const activeStars = allRows
-    .filter((row) => row.hasStar && row.active)
+function getBestActiveStaff(allRows, pointSettings) {
+  // Consider EVERY active staff member, not just ⭐ / ⭐⭐ management.
+  // Star roles are displayed as badges only and do not affect eligibility.
+  const activeStaff = allRows
+    .filter((row) => row.active)
     .map((row) => ({
       ...row,
       activityScore: getActivityScore(row, pointSettings),
@@ -197,7 +199,7 @@ function getBestStarStaff(allRows, pointSettings) {
       );
     });
 
-  return activeStars[0] || null;
+  return activeStaff[0] || null;
 }
 
 function formatTicketType(typeKey) {
@@ -344,7 +346,7 @@ function buildLeaderboardEmbed({
 }) {
   const period = PERIODS[periodKey];
   const filter = FILTERS[filterKey];
-  const bestStar = getBestStarStaff(allRows, pointSettings);
+  const bestActive = getBestActiveStaff(allRows, pointSettings);
 
   const rankingText = pageInfo.rows.length
     ? pageInfo.rows
@@ -366,11 +368,11 @@ function buildLeaderboardEmbed({
         .join('\n\n')
     : '*No staff match this filter for the selected period.*';
 
-  const bestStarText = bestStar
-    ? `${getStarBadge(bestStar.starLevel)} <@${bestStar.member.id}> — ` +
-      `**${bestStar.claims}** claimed • **${bestStar.messages}** messages • ` +
-      `**${bestStar.activityScore.toLocaleString()} activity points**`
-    : 'No active Star Management staff in this period.';
+  const bestActiveText = bestActive
+    ? `${bestActive.hasStar ? `${getStarBadge(bestActive.starLevel)} ` : ''}<@${bestActive.member.id}> — ` +
+      `**${bestActive.claims}** claimed • **${bestActive.messages}** messages • ` +
+      `**${bestActive.activityScore.toLocaleString()} activity points**`
+    : 'No active staff in this period.';
 
   const trackedCategories = trackingRules.trackedCategoryIds.map((id) => {
     const category = guild.channels.cache.get(id);
@@ -396,8 +398,8 @@ function buildLeaderboardEmbed({
         inline: true,
       },
       {
-        name: '⭐ Best Active Star Staff',
-        value: bestStarText,
+        name: '🏆 Best Active Staff',
+        value: bestActiveText,
       },
       {
         name: `🏆 Leaderboard • Page ${pageInfo.page + 1}/${pageInfo.pageCount}`,
