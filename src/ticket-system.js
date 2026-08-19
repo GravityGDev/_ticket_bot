@@ -1865,20 +1865,13 @@ function collectTranscriptMentionIds(messages) {
   const scan = (value) => {
     const content = String(value || '');
 
-    for (const match of content.matchAll(/<@!?(\d{16,22})>/g)) {
-      users.add(match[1]);
-    }
-
-    for (const match of content.matchAll(/<@&(\d{16,22})>/g)) {
-      roles.add(match[1]);
-    }
-
-    for (const match of content.matchAll(/<#(\d{16,22})>/g)) {
-      channels.add(match[1]);
-    }
+    for (const match of content.matchAll(/<@!?(\d{16,22})>/g)) users.add(match[1]);
+    for (const match of content.matchAll(/<@&(\d{16,22})>/g)) roles.add(match[1]);
+    for (const match of content.matchAll(/<#(\d{16,22})>/g)) channels.add(match[1]);
   };
 
   for (const message of messages) {
+    if (message.author?.id) users.add(String(message.author.id));
     scan(message.content);
 
     for (const embed of message.embeds || []) {
@@ -1894,43 +1887,260 @@ function collectTranscriptMentionIds(messages) {
     }
   }
 
+  return { users, roles, channels };
+}
+
+function transcriptNumberToHex(value, fallback = '#f2f3f5') {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+
+  return `#${Math.min(number, 0xffffff).toString(16).padStart(6, '0')}`;
+}
+
+function normalizeTranscriptHexColor(value, fallback = '#f2f3f5') {
+  const candidate = String(value || '').trim();
+
+  if (/^#[0-9a-f]{6}$/i.test(candidate)) {
+    return candidate.toLowerCase() === '#000000' ? fallback : candidate;
+  }
+
+  return fallback;
+}
+
+function transcriptHexToRgba(hex, alpha = 0.18) {
+  const value = normalizeTranscriptHexColor(hex, '#5865f2').replace('#', '');
+  const r = Number.parseInt(value.slice(0, 2), 16);
+  const g = Number.parseInt(value.slice(2, 4), 16);
+  const b = Number.parseInt(value.slice(4, 6), 16);
+
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function getTranscriptRoleColors(role) {
+  const colors = role?.colors || null;
+
   return {
-    users,
-    roles,
-    channels,
+    primary: colors?.primaryColor
+      ? transcriptNumberToHex(colors.primaryColor)
+      : normalizeTranscriptHexColor(role?.hexColor, '#f2f3f5'),
+    secondary: colors?.secondaryColor
+      ? transcriptNumberToHex(colors.secondaryColor)
+      : null,
+    tertiary: colors?.tertiaryColor
+      ? transcriptNumberToHex(colors.tertiaryColor)
+      : null,
   };
 }
 
+function getTranscriptRoleIcon(role) {
+  if (!role) return { iconUrl: null, unicodeEmoji: null };
+
+  let iconUrl = null;
+
+  try {
+    iconUrl = role.iconURL?.({ extension: 'webp', size: 64 }) || null;
+  } catch {
+    iconUrl = null;
+  }
+
+  return {
+    iconUrl,
+    unicodeEmoji: role.unicodeEmoji || null,
+  };
+}
+
+function getTranscriptMemberStyle(member) {
+  if (!member) {
+    return {
+      colors: { primary: '#f2f3f5', secondary: null, tertiary: null },
+      roleIconUrl: null,
+      roleUnicodeEmoji: null,
+    };
+  }
+
+  // These are the exact roles discord.js exposes for member colour and icon.
+  const colorRole = member.roles?.color || null;
+  const iconRole = member.roles?.icon || null;
+
+  const colors = colorRole
+    ? getTranscriptRoleColors(colorRole)
+    : {
+        primary: normalizeTranscriptHexColor(member.displayHexColor, '#f2f3f5'),
+        secondary: null,
+        tertiary: null,
+      };
+
+  const icon = getTranscriptRoleIcon(iconRole);
+
+  return {
+    colors,
+    roleIconUrl: icon.iconUrl,
+    roleUnicodeEmoji: icon.unicodeEmoji,
+  };
+}
+
+function getTranscriptNameStyle(style) {
+  const colors = style?.colors || {};
+  const primary = normalizeTranscriptHexColor(colors.primary, '#f2f3f5');
+  const list = [primary, colors.secondary, colors.tertiary].filter(Boolean);
+
+  if (list.length >= 2) {
+    return (
+      `background-image:linear-gradient(90deg,${list.join(',')});` +
+      'background-clip:text;-webkit-background-clip:text;' +
+      'color:transparent;-webkit-text-fill-color:transparent;'
+    );
+  }
+
+  return `color:${primary};`;
+}
+
+function getTranscriptMentionStyle(style) {
+  const primary = normalizeTranscriptHexColor(
+    style?.colors?.primary,
+    '#c9cdfb',
+  );
+
+  return `color:${primary};background:${transcriptHexToRgba(primary, 0.18)};`;
+}
+
+function transcriptMimeFromUrl(url) {
+  const pathname = String(url || '').split('?')[0].toLowerCase();
+
+  if (pathname.endsWith('.png')) return 'image/png';
+  if (pathname.endsWith('.jpg') || pathname.endsWith('.jpeg')) return 'image/jpeg';
+  if (pathname.endsWith('.gif')) return 'image/gif';
+  if (pathname.endsWith('.webp')) return 'image/webp';
+  if (pathname.endsWith('.avif')) return 'image/avif';
+
+  return 'application/octet-stream';
+}
+
+async function downloadTranscriptAsset(url, maxBytes = 20 * 1024 * 1024) {
+  const source = String(url || '').trim();
+  if (!source) return null;
+
+  try {
+    const response = await fetch(source, {
+      redirect: 'follow',
+      headers: { 'User-Agent': 'Snay-Ticket-Transcript/1.0' },
+    });
+
+    if (!response.ok) return null;
+
+    const declaredLength = Number(response.headers.get('content-length'));
+
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      return null;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    if (!buffer.length || buffer.length > maxBytes) return null;
+
+    const contentType =
+      String(
+        response.headers.get('content-type') ||
+          transcriptMimeFromUrl(source),
+      ).split(';')[0].trim() || 'application/octet-stream';
+
+    return `data:${contentType};base64,${buffer.toString('base64')}`;
+  } catch (error) {
+    console.error(
+      '[TRANSCRIPT ASSET DOWNLOAD ERROR]',
+      source,
+      error?.message || error,
+    );
+    return null;
+  }
+}
+
+async function mapTranscriptWithConcurrency(items, concurrency, worker) {
+  const list = [...items];
+  const results = new Array(list.length);
+  let cursor = 0;
+
+  async function run() {
+    while (true) {
+      const index = cursor++;
+      if (index >= list.length) return;
+      results[index] = await worker(list[index], index);
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(Math.max(1, concurrency), list.length || 1) },
+      () => run(),
+    ),
+  );
+
+  return results;
+}
+
+function transcriptAssetSource(context, url) {
+  const source = String(url || '');
+  return context?.assetDataUrls?.get(source) || source;
+}
+
 async function buildTranscriptRenderContext(channel, messages) {
-  const ids = collectTranscriptMentionIds(messages);
+  await channel.guild.roles.fetch().catch((error) => {
+    console.error('[TRANSCRIPT ROLE FETCH ERROR]', error);
+  });
+
+  const messagesById = new Map(
+    messages.map((message) => [String(message.id), message]),
+  );
+
+  const replyMessages = new Map();
+
+  await mapTranscriptWithConcurrency(
+    messages.filter((message) => message.reference?.messageId),
+    5,
+    async (message) => {
+      const referenceId = String(message.reference.messageId);
+
+      let referenced = messagesById.get(referenceId) || null;
+
+      if (!referenced && typeof message.fetchReference === 'function') {
+        referenced = await message.fetchReference().catch(() => null);
+      }
+
+      if (referenced) {
+        replyMessages.set(String(message.id), referenced);
+      }
+    },
+  );
+
+  const relevantMessages = [...messages, ...replyMessages.values()];
+  const ids = collectTranscriptMentionIds(relevantMessages);
 
   const userNames = new Map();
+  const userStyles = new Map();
   const roleNames = new Map();
+  const roleStyles = new Map();
   const channelNames = new Map();
 
   await Promise.all(
     [...ids.users].map(async (userId) => {
-      const cachedMember = channel.guild.members.cache.get(userId);
-      let member = cachedMember;
-
-      if (!member) {
-        member = await channel.guild.members
-          .fetch(userId)
-          .catch(() => null);
-      }
+      const member =
+        channel.guild.members.cache.get(userId) ||
+        (await channel.guild.members.fetch(userId).catch(() => null));
 
       const user =
         member?.user ||
         channel.client.users.cache.get(userId) ||
         (await channel.client.users.fetch(userId).catch(() => null));
 
-      const displayName =
+      userNames.set(
+        userId,
         member?.displayName ||
-        user?.globalName ||
-        user?.username ||
-        `User ${userId}`;
+          user?.globalName ||
+          user?.username ||
+          `User ${userId}`,
+      );
 
-      userNames.set(userId, displayName);
+      userStyles.set(userId, getTranscriptMemberStyle(member));
     }),
   );
 
@@ -1940,10 +2150,15 @@ async function buildTranscriptRenderContext(channel, messages) {
         channel.guild.roles.cache.get(roleId) ||
         (await channel.guild.roles.fetch(roleId).catch(() => null));
 
-      roleNames.set(
-        roleId,
-        role?.name || `Role ${roleId}`,
-      );
+      roleNames.set(roleId, role?.name || `Role ${roleId}`);
+
+      const icon = getTranscriptRoleIcon(role);
+
+      roleStyles.set(roleId, {
+        colors: getTranscriptRoleColors(role),
+        roleIconUrl: icon.iconUrl,
+        roleUnicodeEmoji: icon.unicodeEmoji,
+      });
     }),
   );
 
@@ -1960,22 +2175,140 @@ async function buildTranscriptRenderContext(channel, messages) {
     }),
   );
 
+  const assetUrls = new Set();
+
+  const addMessageAssets = (message) => {
+    const avatar = message.author?.displayAvatarURL?.({
+      extension: 'png',
+      size: 128,
+    });
+
+    if (avatar) assetUrls.add(avatar);
+
+    for (const attachment of message.attachments?.values?.() || []) {
+      if (isTranscriptImageAttachment(attachment)) {
+        if (attachment.url) assetUrls.add(attachment.url);
+        if (attachment.proxyURL) assetUrls.add(attachment.proxyURL);
+      }
+    }
+
+    for (const embed of message.embeds || []) {
+      if (embed.image?.url) assetUrls.add(embed.image.url);
+      if (embed.thumbnail?.url) assetUrls.add(embed.thumbnail.url);
+    }
+
+    for (const sticker of message.stickers?.values?.() || []) {
+      if (sticker.url) assetUrls.add(sticker.url);
+    }
+
+    const scanEmoji = (value) => {
+      for (
+        const match of String(value || '').matchAll(
+          /<(a?):([A-Za-z0-9_]{2,32}):(\d{16,22})>/g,
+        )
+      ) {
+        const extension = match[1] === 'a' ? 'gif' : 'webp';
+
+        assetUrls.add(
+          `https://cdn.discordapp.com/emojis/${match[3]}.${extension}?size=64&quality=lossless`,
+        );
+      }
+    };
+
+    scanEmoji(message.content);
+
+    for (const embed of message.embeds || []) {
+      scanEmoji(embed.title);
+      scanEmoji(embed.description);
+      scanEmoji(embed.footer?.text);
+      scanEmoji(embed.author?.name);
+
+      for (const field of embed.fields || []) {
+        scanEmoji(field.name);
+        scanEmoji(field.value);
+      }
+    }
+  };
+
+  for (const message of relevantMessages) addMessageAssets(message);
+
+  for (const style of userStyles.values()) {
+    if (style.roleIconUrl) assetUrls.add(style.roleIconUrl);
+  }
+
+  for (const style of roleStyles.values()) {
+    if (style.roleIconUrl) assetUrls.add(style.roleIconUrl);
+  }
+
+  const assetDataUrls = new Map();
+
+  const downloads = await mapTranscriptWithConcurrency(
+    [...assetUrls],
+    5,
+    async (url) => [url, await downloadTranscriptAsset(url)],
+  );
+
+  for (const [url, dataUrl] of downloads) {
+    if (dataUrl) assetDataUrls.set(url, dataUrl);
+  }
+
   return {
     userNames,
+    userStyles,
     roleNames,
+    roleStyles,
     channelNames,
+    messagesById,
+    replyMessages,
+    assetDataUrls,
   };
 }
 
-function renderTranscriptCustomEmoji(animated, name, id) {
+function renderTranscriptRoleIcon(
+  context,
+  {
+    roleIconUrl = null,
+    roleUnicodeEmoji = null,
+  } = {},
+  className = 'role-icon',
+) {
+  if (roleIconUrl) {
+    const src = transcriptAssetSource(context, roleIconUrl);
+
+    return (
+      `<img class="${escapeHtml(className)}" ` +
+      `src="${escapeHtml(src)}" alt="Role icon" loading="lazy">`
+    );
+  }
+
+  if (roleUnicodeEmoji) {
+    return (
+      `<span class="${escapeHtml(className)} unicode-role-icon">` +
+      `${escapeHtml(roleUnicodeEmoji)}</span>`
+    );
+  }
+
+  return '';
+}
+
+
+function renderTranscriptCustomEmoji(
+  animated,
+  name,
+  id,
+  context = null,
+) {
   const extension = animated ? 'gif' : 'webp';
+
   const url =
     `https://cdn.discordapp.com/emojis/${id}.${extension}` +
     '?size=64&quality=lossless';
 
+  const src = transcriptAssetSource(context, url);
+
   return (
     `<img class="custom-emoji" ` +
-    `src="${escapeHtml(url)}" ` +
+    `src="${escapeHtml(src)}" ` +
     `alt=":${escapeHtml(name)}:" ` +
     `title=":${escapeHtml(name)}:" ` +
     `loading="lazy">`
@@ -2099,6 +2432,7 @@ function renderTranscriptLeaf(message, value, context) {
         match[1] === 'a',
         match[2],
         match[3],
+        context,
       );
     } else if (match[4]) {
       const userId = match[4];
@@ -2114,8 +2448,11 @@ function renderTranscriptLeaf(message, value, context) {
         user?.username ||
         `User ${userId}`;
 
+      const userStyle = context?.userStyles?.get(userId) || {};
+
       output +=
         `<span class="mention user-mention" ` +
+        `style="${escapeHtml(getTranscriptMentionStyle(userStyle))}" ` +
         `title="User ID: ${escapeHtml(userId)}">` +
         `@${escapeHtml(name)}</span>`;
     } else if (match[5]) {
@@ -2129,10 +2466,18 @@ function renderTranscriptLeaf(message, value, context) {
         role?.name ||
         `Role ${roleId}`;
 
+      const roleStyle = context?.roleStyles?.get(roleId) || {};
+      const roleIcon = renderTranscriptRoleIcon(
+        context,
+        roleStyle,
+        'mention-role-icon',
+      );
+
       output +=
         `<span class="mention role-mention" ` +
+        `style="${escapeHtml(getTranscriptMentionStyle(roleStyle))}" ` +
         `title="Role ID: ${escapeHtml(roleId)}">` +
-        `@${escapeHtml(name)}</span>`;
+        `${roleIcon}@${escapeHtml(name)}</span>`;
     } else if (match[6]) {
       const channelId = match[6];
       const mentionedChannel =
@@ -2661,23 +3006,21 @@ function renderTranscriptEmbeds(message, context) {
       : '';
 
     const thumbnail = embed.thumbnail?.url
-      ? `<a class="embed-thumb-link" href="${escapeHtml(
-          embed.thumbnail.url,
-        )}" target="_blank" rel="noreferrer">
-          <img class="embed-thumb" src="${escapeHtml(
-            embed.thumbnail.url,
-          )}" alt="Embed thumbnail" loading="lazy">
-        </a>`
+      ? (() => {
+          const src = transcriptAssetSource(context, embed.thumbnail.url);
+          return `<a class="embed-thumb-link" href="${escapeHtml(src)}" target="_blank" rel="noreferrer">
+            <img class="embed-thumb" src="${escapeHtml(src)}" alt="Embed thumbnail" loading="lazy">
+          </a>`;
+        })()
       : '';
 
     const image = embed.image?.url
-      ? `<a class="embed-image-link" href="${escapeHtml(
-          embed.image.url,
-        )}" target="_blank" rel="noreferrer">
-          <img class="embed-image" src="${escapeHtml(
-            embed.image.url,
-          )}" alt="Embed image" loading="lazy">
-        </a>`
+      ? (() => {
+          const src = transcriptAssetSource(context, embed.image.url);
+          return `<a class="embed-image-link" href="${escapeHtml(src)}" target="_blank" rel="noreferrer">
+            <img class="embed-image" src="${escapeHtml(src)}" alt="Embed image" loading="lazy">
+          </a>`;
+        })()
       : '';
 
     const footer = embed.footer?.text
@@ -2717,26 +3060,25 @@ function isTranscriptImageAttachment(attachment) {
   );
 }
 
-function renderTranscriptAttachments(message) {
+function renderTranscriptAttachments(message, context) {
   if (!message.attachments?.size) return '';
 
   return [...message.attachments.values()]
     .map((attachment) => {
-      const name = escapeHtml(
-        attachment.name || 'attachment',
-      );
-      const url = escapeHtml(attachment.url);
-      const isImage =
-        isTranscriptImageAttachment(attachment);
+      const name = escapeHtml(attachment.name || 'attachment');
+      const originalUrl = attachment.url || attachment.proxyURL || '';
+      const renderedUrl = transcriptAssetSource(context, originalUrl);
+      const safeRenderedUrl = escapeHtml(renderedUrl);
+      const isImage = isTranscriptImageAttachment(attachment);
 
       if (isImage) {
         return `
           <div class="attachment image-attachment">
-            <a class="attachment-name" href="${url}" target="_blank" rel="noreferrer">${name}</a>
-            <a class="attachment-image-link" href="${url}" target="_blank" rel="noreferrer">
+            <a class="attachment-name" href="${safeRenderedUrl}" target="_blank" rel="noreferrer">${name}</a>
+            <a class="attachment-image-link" href="${safeRenderedUrl}" target="_blank" rel="noreferrer">
               <img
                 class="attachment-image"
-                src="${url}"
+                src="${safeRenderedUrl}"
                 alt="${name}"
                 loading="lazy"
               >
@@ -2746,13 +3088,13 @@ function renderTranscriptAttachments(message) {
 
       return `
         <div class="attachment file-attachment">
-          <a href="${url}" target="_blank" rel="noreferrer">${name}</a>
+          <a href="${escapeHtml(originalUrl)}" target="_blank" rel="noreferrer">${name}</a>
         </div>`;
     })
     .join('');
 }
 
-function renderTranscriptStickers(message) {
+function renderTranscriptStickers(message, context) {
   if (!message.stickers?.size) return '';
 
   return `
@@ -2762,11 +3104,15 @@ function renderTranscriptStickers(message) {
           const name = escapeHtml(
             sticker.name || 'Sticker',
           );
-          const url = escapeHtml(sticker.url || '');
+          const originalUrl = sticker.url || '';
 
-          if (!url) {
+          if (!originalUrl) {
             return `<span class="sticker-name">${name}</span>`;
           }
+
+          const url = escapeHtml(
+            transcriptAssetSource(context, originalUrl),
+          );
 
           return `
             <a class="sticker-link" href="${url}" target="_blank" rel="noreferrer" title="${name}">
@@ -2777,7 +3123,7 @@ function renderTranscriptStickers(message) {
     </div>`;
 }
 
-function renderReactionEmoji(reaction) {
+function renderReactionEmoji(reaction, context) {
   const emoji = reaction.emoji;
 
   if (emoji?.id) {
@@ -2785,6 +3131,7 @@ function renderReactionEmoji(reaction) {
       Boolean(emoji.animated),
       emoji.name || 'emoji',
       emoji.id,
+      context,
     );
   }
 
@@ -2793,7 +3140,7 @@ function renderReactionEmoji(reaction) {
   )}</span>`;
 }
 
-function renderTranscriptReactions(message) {
+function renderTranscriptReactions(message, context) {
   const reactions = message.reactions?.cache;
 
   if (!reactions?.size) return '';
@@ -2804,7 +3151,7 @@ function renderTranscriptReactions(message) {
         .map(
           (reaction) => `
             <span class="reaction">
-              ${renderReactionEmoji(reaction)}
+              ${renderReactionEmoji(reaction, context)}
               <span class="reaction-count">${Number(
                 reaction.count,
               ) || 0}</span>
@@ -3056,6 +3403,115 @@ function renderTranscriptAuditHtml(audit, data) {
   </section>`;
 }
 
+function getTranscriptReplyPreviewText(message) {
+  const content = String(message?.content || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (content) {
+    return content.length > 220
+      ? `${content.slice(0, 219)}…`
+      : content;
+  }
+
+  if (message?.attachments?.size) {
+    const first = [...message.attachments.values()][0];
+
+    return isTranscriptImageAttachment(first)
+      ? '📷 Image attachment'
+      : `📎 ${first?.name || 'Attachment'}`;
+  }
+
+  if (message?.stickers?.size) {
+    const first = [...message.stickers.values()][0];
+    return `🎟️ Sticker: ${first?.name || 'Sticker'}`;
+  }
+
+  if (message?.embeds?.length) {
+    const first = message.embeds[0];
+    return first.title || first.description || 'Embedded message';
+  }
+
+  return 'Original message';
+}
+
+function renderTranscriptReplyPreview(message, context) {
+  const referenceId = message.reference?.messageId || null;
+  if (!referenceId) return '';
+
+  const referenced =
+    context?.replyMessages?.get(String(message.id)) ||
+    context?.messagesById?.get(String(referenceId)) ||
+    null;
+
+  if (!referenced) {
+    return `
+      <div class="reply-preview reply-missing">
+        <span class="reply-connector"></span>
+        <span class="reply-unavailable">Original message unavailable</span>
+      </div>`;
+  }
+
+  const author = referenced.author;
+  const authorId = String(author?.id || '');
+
+  const displayName =
+    referenced.member?.displayName ||
+    context?.userNames?.get(authorId) ||
+    author?.globalName ||
+    author?.username ||
+    'Unknown User';
+
+  const rawAvatar =
+    author?.displayAvatarURL?.({
+      extension: 'png',
+      size: 64,
+    }) || '';
+
+  const avatar = transcriptAssetSource(context, rawAvatar);
+
+  const style =
+    context?.userStyles?.get(authorId) ||
+    getTranscriptMemberStyle(referenced.member);
+
+  const roleIcon = renderTranscriptRoleIcon(
+    context,
+    style,
+    'reply-role-icon',
+  );
+
+  const previewText = getTranscriptReplyPreviewText(referenced);
+
+  const jumpTarget = context?.messagesById?.has(String(referenceId))
+    ? `#message-${referenceId}`
+    : null;
+
+  const openTag = jumpTarget
+    ? `<a class="reply-preview" href="${escapeHtml(jumpTarget)}" title="Jump to replied message">`
+    : '<div class="reply-preview">';
+
+  const closeTag = jumpTarget ? '</a>' : '</div>';
+
+  return `
+    ${openTag}
+      <span class="reply-connector"></span>
+      ${
+        avatar
+          ? `<img class="reply-avatar" src="${escapeHtml(avatar)}" alt="">`
+          : '<span class="reply-avatar reply-avatar-fallback"></span>'
+      }
+      <span class="reply-author" style="${escapeHtml(
+        getTranscriptNameStyle(style),
+      )}">${escapeHtml(displayName)}</span>
+      ${roleIcon}
+      <span class="reply-text">${renderTranscriptInline(
+        referenced,
+        previewText,
+        context,
+      )}</span>
+    ${closeTag}`;
+}
+
 function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   const type = TICKET_TYPES[data.typeKey] || { label: data.typeKey };
   const generatedAt = new Date();
@@ -3076,7 +3532,14 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
         author?.username ||
         'Unknown User';
       const username = author?.username || 'unknown';
-      const avatar = author?.displayAvatarURL({ extension: 'png', size: 128 }) || '';
+      const rawAvatar =
+        author?.displayAvatarURL({
+          extension: 'png',
+          size: 128,
+        }) || '';
+
+      const avatar = transcriptAssetSource(renderContext, rawAvatar);
+
       const timestamp = new Date(message.createdTimestamp).toLocaleString('en-GB', {
         dateStyle: 'medium',
         timeStyle: 'medium',
@@ -3085,12 +3548,33 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
       const edited = message.editedTimestamp ? '<span class="edited">(edited)</span>' : '';
       const botBadge = author?.bot ? '<span class="bot-badge">BOT</span>' : '';
 
+      const authorId = String(author?.id || '');
+
+      const memberStyle =
+        renderContext?.userStyles?.get(authorId) ||
+        getTranscriptMemberStyle(message.member);
+
+      const roleIcon = renderTranscriptRoleIcon(
+        renderContext,
+        memberStyle,
+        'message-role-icon',
+      );
+
+      const replyPreview = renderTranscriptReplyPreview(
+        message,
+        renderContext,
+      );
+
       return `
-        <article class="message">
+        <article class="message" id="message-${escapeHtml(message.id)}">
           <img class="avatar" src="${escapeHtml(avatar)}" alt="">
           <div class="message-body">
+            ${replyPreview}
             <div class="message-meta">
-              <strong>${escapeHtml(displayName)}</strong>
+              <strong class="display-name" style="${escapeHtml(
+                getTranscriptNameStyle(memberStyle),
+              )}">${escapeHtml(displayName)}</strong>
+              ${roleIcon}
               ${botBadge}
               <span class="username">@${escapeHtml(username)}</span>
               <time>${escapeHtml(timestamp)}</time>
@@ -3098,9 +3582,9 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
             </div>
             ${content ? `<div class="content">${content}</div>` : ''}
             ${renderTranscriptEmbeds(message, renderContext)}
-            ${renderTranscriptAttachments(message)}
-            ${renderTranscriptStickers(message)}
-            ${renderTranscriptReactions(message)}
+            ${renderTranscriptAttachments(message, renderContext)}
+            ${renderTranscriptStickers(message, renderContext)}
+            ${renderTranscriptReactions(message, renderContext)}
           </div>
         </article>`;
     })
@@ -3144,8 +3628,18 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   .message:last-child{border-bottom:0}
   .avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#313338;flex:0 0 auto}
   .message-body{min-width:0;flex:1}
-  .message-meta{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
-  .message-meta strong{color:#f2f3f5}.username,time,.edited{color:var(--muted);font-size:12px}
+  .message-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .message-meta strong{color:#f2f3f5}.display-name{font-weight:750;display:inline-block}.username,time,.edited{color:var(--muted);font-size:12px}
+  .message-role-icon,.reply-role-icon,.mention-role-icon{display:inline-block;width:18px;height:18px;object-fit:contain;vertical-align:middle;flex:0 0 auto}
+  .reply-role-icon,.mention-role-icon{width:16px;height:16px}.mention-role-icon{margin-right:3px}
+  .unicode-role-icon{width:auto!important;height:auto!important;font-size:15px;line-height:1}
+  .reply-preview{position:relative;display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;min-height:25px;margin:0 0 6px -50px;padding-left:50px;color:var(--muted);text-decoration:none;font-size:13px;line-height:1.3}
+  a.reply-preview:hover .reply-text{text-decoration:underline;color:#dbdee1}
+  .reply-connector{position:absolute;left:20px;top:13px;width:25px;height:17px;border-left:2px solid #4e5058;border-top:2px solid #4e5058;border-radius:8px 0 0 0}
+  .reply-avatar{width:18px;height:18px;border-radius:50%;object-fit:cover;background:#313338;flex:0 0 auto}
+  .reply-avatar-fallback{display:inline-block}.reply-author{font-weight:700;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+  .reply-text{color:#b5bac1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.reply-text .custom-emoji{width:18px;height:18px;vertical-align:-4px}
+  .reply-missing{font-style:italic;color:#949ba4}.reply-unavailable{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .bot-badge{font-size:10px;font-weight:800;background:var(--accent);padding:1px 5px;border-radius:4px;color:white}
   .content{white-space:normal;overflow-wrap:anywhere;word-break:break-word;margin-top:3px}
   .md-line{min-height:1.45em;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
@@ -3166,7 +3660,7 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   .spoiler{display:inline;border-radius:3px;padding:0 3px;background:#1e1f22;color:#1e1f22;cursor:help;transition:.12s}
   .spoiler:hover,.spoiler:focus{background:#46484f;color:#dbdee1}
   .md-link{color:#00a8fc;text-decoration:none;overflow-wrap:anywhere}.md-link:hover{text-decoration:underline}.masked-link{font-weight:500}
-  .mention{display:inline-block;max-width:100%;padding:0 3px;border-radius:3px;background:rgba(88,101,242,.28);color:#c9cdfb;font-weight:600;vertical-align:baseline;overflow-wrap:anywhere}
+  .mention{display:inline-flex;align-items:center;max-width:100%;padding:0 3px;border-radius:3px;background:rgba(88,101,242,.28);color:#c9cdfb;font-weight:600;vertical-align:baseline;overflow-wrap:anywhere}
   .role-mention{background:rgba(88,101,242,.20)}.channel-mention{background:rgba(88,101,242,.18)}.everyone-mention{background:rgba(250,166,26,.20);color:#ffd69a}
   .discord-timestamp{display:inline-block;padding:0 3px;border-radius:3px;background:#2b2d31;color:#dbdee1}
   .custom-emoji{display:inline-block;width:1.45em;height:1.45em;object-fit:contain;vertical-align:-.34em;margin:0 .05em;max-width:none}
@@ -3184,7 +3678,7 @@ function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   .sticker-name{color:var(--muted)}
   .reactions{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.reaction{display:inline-flex;align-items:center;gap:4px;min-height:28px;padding:3px 8px;border:1px solid #3f4147;border-radius:8px;background:#2b2d31}.reaction .custom-emoji{width:20px;height:20px;vertical-align:middle}.unicode-reaction{font-size:18px;line-height:20px}.reaction-count{font-size:13px;color:#b5bac1}
   .footer{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
-  @media(max-width:640px){.shell{padding:16px 8px 40px}.message{padding:14px 10px;gap:10px}.avatar{width:36px;height:36px}.discord-embed{padding:10px}.embed-thumb{width:64px;height:64px}.attachment{padding:8px}}
+  @media(max-width:640px){.shell{padding:16px 8px 40px}.message{padding:14px 10px;gap:10px}.avatar{width:36px;height:36px}.reply-preview{margin-left:-46px;padding-left:46px}.reply-connector{left:17px;width:24px}.reply-author{max-width:115px}.discord-embed{padding:10px}.embed-thumb{width:64px;height:64px}.attachment{padding:8px}}
 </style>
 </head>
 <body>
