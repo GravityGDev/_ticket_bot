@@ -22,7 +22,12 @@ for (const key of requiredEnv) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    // Needed so Report Staff can load the complete staff list and filter it
+    // by the View Audit Log permission.
+    GatewayIntentBits.GuildMembers,
+  ],
 });
 
 client.commands = new Collection();

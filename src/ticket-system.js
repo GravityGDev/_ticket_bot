@@ -23,6 +23,8 @@ const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
 const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
+const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
+const REPORT_STAFF_PAGE_SIZE = 25;
 const TRANSCRIPT_LOG_CHANNEL_ID =
   process.env.TRANSCRIPT_LOG_CHANNEL_ID || '1538580589542777055';
 
@@ -44,6 +46,13 @@ const TICKET_TYPES = {
     slug: 'cheating-report',
     emoji: '🚨',
     requiresInGameId: false,
+  },
+  report_staff: {
+    label: 'Report Staff',
+    slug: 'report-staff',
+    emoji: '🛠️',
+    requiresInGameId: false,
+    requiresStaffSelection: true,
   },
   claim_reward: {
     label: 'Claim reward',
@@ -98,13 +107,20 @@ const YOUTUBE_RANGES = {
 // Prevent two button presses at the same moment from receiving the same ticket number.
 const ticketCreationQueues = new Map();
 
-function getTicketButtons() {
-  return new ActionRowBuilder().addComponents(
+function getTicketButtons(typeKey = null) {
+  const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('ticket_close')
       .setLabel('Close')
       .setEmoji('🔒')
       .setStyle(ButtonStyle.Secondary),
+  );
+
+  // Staff reports are intentionally restricted to Close only. They do not
+  // expose Claim/Role because only administrators should handle these tickets.
+  if (typeKey === 'report_staff') return row;
+
+  row.addComponents(
     new ButtonBuilder()
       .setCustomId('ticket_claim')
       .setLabel('Claim')
@@ -116,6 +132,8 @@ function getTicketButtons() {
       .setEmoji('🏷️')
       .setStyle(ButtonStyle.Success),
   );
+
+  return row;
 }
 
 function getClosedTicketButtons() {
@@ -227,6 +245,13 @@ function getTypeInstructions(typeKey) {
         'Include the player username/ID, what you saw, when it happened, and the server/mode if known.',
         '**Proof is required where possible** — attach screenshots or video evidence.',
       ].join('\n');
+    case 'report_staff':
+      return [
+        '**Report Staff**',
+        'Before you can type, select the staff member you are reporting from the menu below.',
+        'After selecting them, provide clear information and evidence to support your report.',
+        'Only server administrators and you can view this ticket.',
+      ].join('\n');
     case 'claim_reward':
       return [
         '**Claim reward**',
@@ -271,7 +296,135 @@ function getTypeInstructions(typeKey) {
   }
 }
 
-function buildTicketWelcome(ticketNumber, creator, typeKey) {
+
+async function getReportableStaffMembers(guild, creatorId) {
+  // Fetch the complete member list so the selector is not limited to whoever
+  // happens to be cached after a restart.
+  try {
+    await guild.members.fetch();
+  } catch (error) {
+    console.error('[REPORT STAFF MEMBER FETCH ERROR]', error);
+  }
+
+  return [...guild.members.cache.values()]
+    .filter(
+      (member) =>
+        !member.user.bot &&
+        member.id !== creatorId &&
+        member.permissions.has(PermissionFlagsBits.ViewAuditLog),
+    )
+    .sort((a, b) =>
+      (a.displayName || a.user.username).localeCompare(
+        b.displayName || b.user.username,
+        undefined,
+        { sensitivity: 'base' },
+      ),
+    );
+}
+
+function buildReportStaffSelector(creatorId, staffMembers, page = 0) {
+  const pageCount = Math.max(
+    1,
+    Math.ceil(staffMembers.length / REPORT_STAFF_PAGE_SIZE),
+  );
+  const safePage = Math.min(Math.max(Number(page) || 0, 0), pageCount - 1);
+  const start = safePage * REPORT_STAFF_PAGE_SIZE;
+  const pageMembers = staffMembers.slice(
+    start,
+    start + REPORT_STAFF_PAGE_SIZE,
+  );
+
+  const rows = [];
+
+  if (pageMembers.length) {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`ticket_report_staff_select:${creatorId}:${safePage}`)
+      .setPlaceholder(
+        pageCount > 1
+          ? `Select staff member • Page ${safePage + 1}/${pageCount}`
+          : 'Select the staff member you are reporting',
+      )
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        pageMembers.map((member) => ({
+          label: (member.displayName || member.user.username).slice(0, 100),
+          description: `@${member.user.username}`.slice(0, 100),
+          value: member.id,
+        })),
+      );
+
+    rows.push(new ActionRowBuilder().addComponents(menu));
+  }
+
+  if (pageCount > 1) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            `ticket_report_staff_page:${creatorId}:${Math.max(safePage - 1, 0)}`,
+          )
+          .setLabel('Previous')
+          .setEmoji('◀️')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(safePage <= 0),
+        new ButtonBuilder()
+          .setCustomId(
+            `ticket_report_staff_page:${creatorId}:${Math.min(safePage + 1, pageCount - 1)}`,
+          )
+          .setLabel('Next')
+          .setEmoji('▶️')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(safePage >= pageCount - 1),
+      ),
+    );
+  }
+
+  return rows;
+}
+
+function buildReportStaffPermissionOverwrites(guild, creatorId, botId) {
+  const baseMemberPermissions =
+    PermissionFlagsBits.ViewChannel |
+    PermissionFlagsBits.ReadMessageHistory |
+    PermissionFlagsBits.AttachFiles |
+    PermissionFlagsBits.EmbedLinks;
+
+  return [
+    {
+      id: guild.roles.everyone.id,
+      type: 0,
+      deny: PermissionFlagsBits.ViewChannel,
+    },
+    {
+      id: creatorId,
+      type: 1,
+      allow: baseMemberPermissions,
+      deny: PermissionFlagsBits.SendMessages,
+    },
+    {
+      id: botId,
+      type: 1,
+      allow:
+        baseMemberPermissions |
+        PermissionFlagsBits.SendMessages |
+        PermissionFlagsBits.ManageChannels |
+        PermissionFlagsBits.ManageMessages |
+        PermissionFlagsBits.PinMessages,
+    },
+  ];
+}
+
+function getBottomPositionForCategory(category) {
+  const positions = [
+    category.rawPosition,
+    ...category.children.cache.map((channel) => channel.rawPosition),
+  ];
+
+  return Math.max(...positions) + 1;
+}
+
+function buildTicketWelcome(ticketNumber, creator, typeKey, options = {}) {
   const type = TICKET_TYPES[typeKey] || { label: 'Support', emoji: '🎫' };
   const embed = new EmbedBuilder()
     .setColor(0x00d166)
@@ -282,7 +435,7 @@ function buildTicketWelcome(ticketNumber, creator, typeKey) {
       iconURL: creator.displayAvatarURL(),
     });
 
-  const components = [getTicketButtons()];
+  const components = [getTicketButtons(typeKey)];
 
   if (TICKET_TYPES[typeKey]?.requiresInGameId) {
     components.push(
@@ -298,6 +451,16 @@ function buildTicketWelcome(ticketNumber, creator, typeKey) {
 
   if (typeKey === 'youtuber_submission') {
     components.push(buildYouTubeSubscriberMenu(creator.id));
+  }
+
+  if (typeKey === 'report_staff') {
+    components.push(
+      ...buildReportStaffSelector(
+        creator.id,
+        options.reportStaffMembers || [],
+        0,
+      ),
+    );
   }
 
   return {
@@ -588,6 +751,8 @@ function initialSubmissionState(typeKey) {
   return {
     inGameIdStatus: TICKET_TYPES[typeKey]?.requiresInGameId ? 'pending' : 'na',
     youtubeStatus: typeKey === 'youtuber_submission' ? 'pending' : 'na',
+    staffSelectionStatus: typeKey === 'report_staff' ? 'pending' : 'na',
+    reportedStaffId: null,
   };
 }
 
@@ -630,6 +795,8 @@ function getTicketData(channel) {
     creatorId: creatorMatch[1],
     inGameIdStatus: igMatch?.[1]?.toLowerCase() || fallbackState.inGameIdStatus,
     youtubeStatus: ytMatch?.[1]?.toLowerCase() || fallbackState.youtubeStatus,
+    staffSelectionStatus: fallbackState.staffSelectionStatus,
+    reportedStaffId: fallbackState.reportedStaffId,
     claimedById: claimedMatch ? claimedMatch[1] : null,
   };
 }
@@ -648,6 +815,8 @@ async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket dat
     claimedById: next.claimedById || null,
     inGameIdStatus: next.inGameIdStatus,
     youtubeStatus: next.youtubeStatus,
+    staffSelectionStatus: next.staffSelectionStatus,
+    reportedStaffId: next.reportedStaffId || null,
     updatedAt: new Date().toISOString(),
     updateReason: reason,
   });
@@ -668,6 +837,9 @@ async function getLiveTicketData(channel) {
       claimedById: stored.claimedById ?? base.claimedById,
       inGameIdStatus: stored.inGameIdStatus || base.inGameIdStatus,
       youtubeStatus: stored.youtubeStatus || base.youtubeStatus,
+      staffSelectionStatus:
+        stored.staffSelectionStatus || base.staffSelectionStatus,
+      reportedStaffId: stored.reportedStaffId || base.reportedStaffId,
     };
   } catch (error) {
     console.error('[TICKET STATE READ ERROR]', error);
@@ -765,6 +937,13 @@ function buildTicketPermissionOverwrites(guild, category, creatorId, botId, crea
 }
 
 function shouldCreatorBeUnlocked(data) {
+  if (
+    TICKET_TYPES[data.typeKey]?.requiresStaffSelection &&
+    data.staffSelectionStatus !== 'done'
+  ) {
+    return false;
+  }
+
   if (!TICKET_TYPES[data.typeKey]?.requiresInGameId) return true;
   if (data.inGameIdStatus !== 'done') return false;
   if (data.typeKey === 'youtuber_submission' && data.youtubeStatus !== 'done') return false;
@@ -802,21 +981,31 @@ async function createTicket(interaction, typeKey) {
     return;
   }
 
-  const config = await getGuildConfig(guild);
-  if (!config) {
-    await interaction.editReply({
-      content: 'The ticket system has not been configured yet. A staff member needs to run `/ticket-panel` first.',
-      components: [],
-    });
-    return;
+  const isReportStaff = typeKey === 'report_staff';
+  let configuredCategoryId = REPORT_STAFF_CATEGORY_ID;
+
+  if (!isReportStaff) {
+    const config = await getGuildConfig(guild);
+    if (!config) {
+      await interaction.editReply({
+        content: 'The ticket system has not been configured yet. A staff member needs to run `/ticket-panel` first.',
+        components: [],
+      });
+      return;
+    }
+    configuredCategoryId = config.categoryId;
   }
 
   await runTicketCreationQueued(guild.id, async () => {
-    const category = await guild.channels.fetch(config.categoryId).catch(() => null);
+    const category = await guild.channels
+      .fetch(configuredCategoryId)
+      .catch(() => null);
 
     if (!category || category.type !== ChannelType.GuildCategory) {
       await interaction.editReply({
-        content: 'The configured ticket category no longer exists. Staff need to run `/ticket-panel reconfigure:true`.',
+        content: isReportStaff
+          ? `The private **Report Staff** category (${REPORT_STAFF_CATEGORY_ID}) could not be found in this server.`
+          : 'The configured ticket category no longer exists. Staff need to run `/ticket-panel reconfigure:true`.',
         components: [],
       });
       return;
@@ -829,6 +1018,24 @@ async function createTicket(interaction, typeKey) {
         components: [],
       });
       return;
+    }
+
+    let reportStaffMembers = [];
+    if (isReportStaff) {
+      reportStaffMembers = await getReportableStaffMembers(
+        guild,
+        interaction.user.id,
+      );
+
+      if (!reportStaffMembers.length) {
+        await interaction.editReply({
+          content:
+            'I could not find any staff members with **View Audit Log** permission. ' +
+            'Make sure **Server Members Intent** is enabled for the bot and that your staff roles have **View Audit Log**.',
+          components: [],
+        });
+        return;
+      }
     }
 
     let ticketNumber;
@@ -847,13 +1054,19 @@ async function createTicket(interaction, typeKey) {
     }
     const state = initialSubmissionState(typeKey);
     const creatorCanSend = shouldCreatorBeUnlocked({ typeKey, ...state });
-    const permissionOverwrites = buildTicketPermissionOverwrites(
-      guild,
-      category,
-      interaction.user.id,
-      botMember.id,
-      creatorCanSend,
-    );
+    const permissionOverwrites = isReportStaff
+      ? buildReportStaffPermissionOverwrites(
+          guild,
+          interaction.user.id,
+          botMember.id,
+        )
+      : buildTicketPermissionOverwrites(
+          guild,
+          category,
+          interaction.user.id,
+          botMember.id,
+          creatorCanSend,
+        );
 
     let channel;
     try {
@@ -861,6 +1074,9 @@ async function createTicket(interaction, typeKey) {
         name: `${TICKET_NAME_PREFIX}${ticketNumber}_${TICKET_TYPES[typeKey].slug}`,
         type: ChannelType.GuildText,
         parent: category.id,
+        ...(isReportStaff
+          ? { position: getBottomPositionForCategory(category) }
+          : {}),
         topic: makeTicketTopic(ticketNumber, typeKey, interaction.user.id, null, state),
         permissionOverwrites,
         reason: `Ticket #${ticketNumber} (${TICKET_TYPES[typeKey].label}) created by ${interaction.user.tag}`,
@@ -883,6 +1099,8 @@ async function createTicket(interaction, typeKey) {
         claimedById: null,
         inGameIdStatus: state.inGameIdStatus,
         youtubeStatus: state.youtubeStatus,
+        staffSelectionStatus: state.staffSelectionStatus,
+        reportedStaffId: state.reportedStaffId,
         updatedAt: new Date().toISOString(),
         updateReason: 'Ticket created',
       });
@@ -891,7 +1109,11 @@ async function createTicket(interaction, typeKey) {
     }
 
     try {
-      await channel.send(buildTicketWelcome(ticketNumber, interaction.user, typeKey));
+      await channel.send(
+        buildTicketWelcome(ticketNumber, interaction.user, typeKey, {
+          reportStaffMembers,
+        }),
+      );
     } catch (error) {
       console.error('[TICKET WELCOME ERROR]', error);
     }
@@ -2498,6 +2720,164 @@ async function giveSelectedRole(interaction) {
   });
 }
 
+
+async function changeReportStaffPage(interaction) {
+  const [, creatorId, rawPage] = interaction.customId.split(':');
+  const data = await getLiveTicketData(interaction.channel);
+
+  if (
+    !data ||
+    data.typeKey !== 'report_staff' ||
+    data.creatorId !== creatorId
+  ) {
+    await interaction.reply({
+      content: 'This staff-report menu is no longer valid.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.user.id !== creatorId) {
+    await interaction.reply({
+      content: 'Only the ticket creator can choose the staff member being reported.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.staffSelectionStatus === 'done') {
+    await interaction.reply({
+      content: 'The staff member for this report has already been selected.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const staffMembers = await getReportableStaffMembers(
+    interaction.guild,
+    creatorId,
+  );
+
+  if (!staffMembers.length) {
+    await interaction.reply({
+      content: 'No eligible staff members could be loaded.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.update({
+    components: [
+      getTicketButtons('report_staff'),
+      ...buildReportStaffSelector(
+        creatorId,
+        staffMembers,
+        Number(rawPage) || 0,
+      ),
+    ],
+  });
+}
+
+async function selectReportedStaff(interaction) {
+  const [, creatorId] = interaction.customId.split(':');
+  const data = await getLiveTicketData(interaction.channel);
+
+  if (
+    !data ||
+    data.typeKey !== 'report_staff' ||
+    data.creatorId !== creatorId
+  ) {
+    await interaction.reply({
+      content: 'This staff-report selector is no longer valid.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.user.id !== creatorId) {
+    await interaction.reply({
+      content: 'Only the ticket creator can choose the staff member being reported.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (data.staffSelectionStatus === 'done') {
+    await interaction.reply({
+      content: 'The staff member for this report has already been selected.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const selectedStaffId = interaction.values[0];
+  const selectedStaff = await interaction.guild.members
+    .fetch(selectedStaffId)
+    .catch(() => null);
+
+  if (
+    !selectedStaff ||
+    selectedStaff.user.bot ||
+    !selectedStaff.permissions.has(PermissionFlagsBits.ViewAuditLog)
+  ) {
+    await interaction.reply({
+      content:
+        'That member is no longer eligible for the staff-report list. Please choose another staff member.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  try {
+    const next = await updateTicketTopic(
+      interaction.channel,
+      data,
+      {
+        staffSelectionStatus: 'done',
+        reportedStaffId: selectedStaff.id,
+      },
+      `Reported staff selected by ${interaction.user.tag}`,
+    );
+
+    await setCreatorTyping(
+      interaction.channel,
+      creatorId,
+      shouldCreatorBeUnlocked(next),
+      `Staff report target selected by ${interaction.user.tag}`,
+    );
+  } catch (error) {
+    console.error('[REPORT STAFF SELECTION ERROR]', error);
+    await interaction.reply({
+      content: 'I could not save your staff selection. Please try again.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.update({
+    components: [getTicketButtons('report_staff')],
+  });
+
+  const selectedName =
+    selectedStaff.displayName || selectedStaff.user.username;
+
+  const evidenceEmbed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('🛠️ Staff report details required')
+    .setDescription(
+      `You selected **${selectedName}**.\n\n` +
+        'You can now type in this ticket. Please explain exactly what happened and provide evidence to support the report. ' +
+        'Useful evidence can include screenshots, video, message links, dates/times, and any other relevant context.\n\n' +
+        '**Do not alert or contact the reported staff member through this ticket. This report is visible only to you and server administrators.**',
+    );
+
+  await interaction.channel.send({
+    content: `<@${creatorId}>`,
+    embeds: [evidenceEmbed],
+    allowedMentions: { users: [creatorId] },
+  });
+}
+
 async function handleTicketInteraction(interaction) {
   if (interaction.isButton()) {
     if (interaction.customId === 'ticket_create') {
@@ -2511,6 +2891,9 @@ async function handleTicketInteraction(interaction) {
     if (interaction.customId === 'ticket_claim') return claimTicket(interaction);
     if (interaction.customId === 'ticket_role') return openRoleMenu(interaction);
     if (interaction.customId.startsWith('ticket_role_page:')) return changeRolePage(interaction);
+    if (interaction.customId.startsWith('ticket_report_staff_page:')) {
+      return changeReportStaffPage(interaction);
+    }
     if (interaction.customId.startsWith('ticket_ingame_id:')) return openInGameIdModal(interaction);
   }
 
@@ -2534,6 +2917,9 @@ async function handleTicketInteraction(interaction) {
     }
     if (interaction.customId.startsWith('ticket_role_select:')) {
       return giveSelectedRole(interaction);
+    }
+    if (interaction.customId.startsWith('ticket_report_staff_select:')) {
+      return selectReportedStaff(interaction);
     }
     if (interaction.customId.startsWith('ticket_youtube_range:')) {
       return openYouTubeLinkModal(interaction);

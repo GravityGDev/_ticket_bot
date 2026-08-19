@@ -13,6 +13,8 @@ function normalizeState(value) {
     claimedById: value.claimedById ? String(value.claimedById) : null,
     inGameIdStatus: value.inGameIdStatus || null,
     youtubeStatus: value.youtubeStatus || null,
+    staffSelectionStatus: value.staffSelectionStatus || null,
+    reportedStaffId: value.reportedStaffId ? String(value.reportedStaffId) : null,
     updatedAt: value.updatedAt || null,
     updateReason: value.updateReason || null,
   };
