@@ -1,7 +1,7 @@
 {
   "name": "render-discord-bot",
   "version": "1.0.0",
-  "description": "Discord bot starter built with Node.js and discord.js for Render",
+  "description": "Discord ticket and staff tracking bot for Render",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
@@ -15,6 +15,7 @@
   "dependencies": {
     "discord.js": "^14.27.0",
     "dotenv": "^16.4.7",
-    "mongodb": "^7.5.0"
+    "mongodb": "^7.5.0",
+    "sharp": "^0.35.3"
   }
 }
