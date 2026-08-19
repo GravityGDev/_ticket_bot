@@ -563,11 +563,11 @@ async function resolveChannelDeleter(channel) {
 }
 
 async function sendPersistentDeleteTranscript(channel, meta, messages) {
-  const recipient = await channel.client.users
+  const securityRecipient = await channel.client.users
     .fetch(REPORT_STAFF_SECURITY_USER_ID)
     .catch(() => null);
 
-  if (!recipient || typeof recipient.send !== 'function') {
+  if (!securityRecipient || typeof securityRecipient.send !== 'function') {
     throw new Error(
       `Could not fetch Report Staff security DM recipient ${REPORT_STAFF_SECURITY_USER_ID}.`,
     );
@@ -577,7 +577,7 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
   const html = buildPersistentTranscriptHtml(meta, messages, deletedBy);
   const filename = `report-staff-${meta.ticketNumber || channel.id}-persistent-transcript.html`;
 
-  const embed = new EmbedBuilder()
+  const securityEmbed = new EmbedBuilder()
     .setColor(0xed4245)
     .setTitle('🚨 Report Staff Ticket Deleted')
     .setDescription(
@@ -618,37 +618,165 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
         value: 'MongoDB persistent message archive',
         inline: true,
       },
+      {
+        name: 'CC Status',
+        value: meta.creatorId
+          ? `Pending delivery to <@${meta.creatorId}>`
+          : 'No ticket creator found',
+      },
     )
     .setTimestamp();
 
-  const logMessage = await recipient.send({
-    files: [
-      new AttachmentBuilder(Buffer.from(html, 'utf8'), {
-        name: filename,
-      }),
-    ],
-    embeds: [embed],
-    allowedMentions: { parse: [] },
-  });
-
-  const attachment = logMessage.attachments.first();
-
-  if (attachment?.url) {
-    await logMessage.edit({
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setLabel('Direct Link')
-            .setEmoji('📎')
-            .setStyle(ButtonStyle.Link)
-            .setURL(attachment.url),
-        ),
+  async function sendTranscriptDm(recipient, embed) {
+    const dmMessage = await recipient.send({
+      files: [
+        new AttachmentBuilder(Buffer.from(html, 'utf8'), {
+          name: filename,
+        }),
       ],
+      embeds: [embed],
+      allowedMentions: { parse: [] },
     });
+
+    const attachment = dmMessage.attachments.first();
+
+    if (attachment?.url) {
+      await dmMessage.edit({
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel('Direct Link')
+              .setEmoji('📎')
+              .setStyle(ButtonStyle.Link)
+              .setURL(attachment.url),
+          ),
+        ],
+      });
+    }
+
+    return dmMessage;
+  }
+
+  // Primary security copy.
+  const securityMessage = await sendTranscriptDm(
+    securityRecipient,
+    securityEmbed,
+  );
+
+  let creatorMessage = null;
+  let creatorDmError = null;
+
+  // Give the ticket creator their own backup copy as well. If the creator is
+  // the same account as the security recipient, don't send a duplicate DM.
+  if (
+    meta.creatorId &&
+    String(meta.creatorId) !== String(REPORT_STAFF_SECURITY_USER_ID)
+  ) {
+    const creatorRecipient = await channel.client.users
+      .fetch(String(meta.creatorId))
+      .catch(() => null);
+
+    if (creatorRecipient && typeof creatorRecipient.send === 'function') {
+      const creatorEmbed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('📑 Your Report Staff Ticket Backup')
+        .setDescription(
+          'Your **Report Staff** ticket was deleted. Here is a backup copy of the continuously tracked transcript.',
+        )
+        .addFields(
+          {
+            name: 'Ticket',
+            value: meta.ticketNumber
+              ? `#${meta.ticketNumber} • ${meta.channelName || channel.name}`
+              : meta.channelName || channel.name,
+          },
+          {
+            name: 'Messages Preserved',
+            value: String(messages.length),
+            inline: true,
+          },
+          {
+            name: 'Deleted By',
+            value: deletedBy.id
+              ? `<@${deletedBy.id}>`
+              : deletedBy.label,
+            inline: true,
+          },
+        )
+        .setFooter({
+          text: 'Keep this transcript as a backup of your staff report.',
+        })
+        .setTimestamp();
+
+      try {
+        creatorMessage = await sendTranscriptDm(
+          creatorRecipient,
+          creatorEmbed,
+        );
+
+        console.log(
+          `[REPORT STAFF CREATOR BACKUP] Transcript for ticket ` +
+            `${meta.ticketNumber ?? channel.id} sent to creator ${meta.creatorId}.`,
+        );
+      } catch (error) {
+        creatorDmError = error;
+        console.error('[REPORT STAFF CREATOR BACKUP DM ERROR]', error);
+      }
+    } else {
+      creatorDmError = new Error(
+        `Could not fetch ticket creator ${meta.creatorId} for transcript DM.`,
+      );
+      console.error(
+        '[REPORT STAFF CREATOR BACKUP DM ERROR]',
+        creatorDmError,
+      );
+    }
+  }
+
+  // Update the security/admin copy with the final CC delivery status.
+  // This makes the DM sent to the security recipient clearly show whether the
+  // ticket creator also received their backup.
+  try {
+    const ccStatus =
+      String(meta.creatorId || '') === String(REPORT_STAFF_SECURITY_USER_ID)
+        ? `Sent to CC <@${meta.creatorId}> (same recipient)`
+        : creatorMessage
+          ? `Sent to CC <@${meta.creatorId}>`
+          : meta.creatorId
+            ? `❌ Failed to send CC to <@${meta.creatorId}>`
+            : 'No ticket creator found';
+
+    const updatedSecurityEmbed = EmbedBuilder.from(securityEmbed);
+
+    const fields = updatedSecurityEmbed.data.fields || [];
+    const ccFieldIndex = fields.findIndex((field) => field.name === 'CC Status');
+
+    if (ccFieldIndex >= 0) {
+      fields[ccFieldIndex] = {
+        name: 'CC Status',
+        value: ccStatus,
+      };
+      updatedSecurityEmbed.setFields(fields);
+    } else {
+      updatedSecurityEmbed.addFields({
+        name: 'CC Status',
+        value: ccStatus,
+      });
+    }
+
+    await securityMessage.edit({
+      embeds: [updatedSecurityEmbed],
+      components: securityMessage.components,
+    });
+  } catch (error) {
+    console.error('[REPORT STAFF SECURITY CC STATUS UPDATE ERROR]', error);
   }
 
   return {
-    logMessage,
+    logMessage: securityMessage,
+    securityMessage,
+    creatorMessage,
+    creatorDmError,
     deletedBy,
     filename,
   };
@@ -866,6 +994,10 @@ async function handleReportStaffChannelDelete(channel) {
           deletedAt: new Date(),
           deleteTranscriptSentAt: new Date(),
           deleteTranscriptMessageId: result.logMessage.id,
+          creatorBackupTranscriptMessageId: result.creatorMessage?.id || null,
+          creatorBackupDmError: result.creatorDmError
+            ? String(result.creatorDmError?.message || result.creatorDmError)
+            : null,
           deletedById: result.deletedBy.id,
           deletedByLabel: result.deletedBy.label,
           preservedMessageCount: messages.length,
@@ -876,8 +1008,9 @@ async function handleReportStaffChannelDelete(channel) {
 
     console.log(
       `[REPORT STAFF DELETE ARCHIVE] Ticket ${meta.ticketNumber ?? channel.id} ` +
-        `deleted; ${messages.length} tracked message(s) sent to ` +
-        `${REPORT_STAFF_SECURITY_USER_ID}.`,
+        `deleted; ${messages.length} tracked message(s) sent to security user ` +
+        `${REPORT_STAFF_SECURITY_USER_ID}` +
+        `${result.creatorMessage ? ` and creator ${meta.creatorId}` : ''}.`,
     );
   } catch (error) {
     // The Discord channel is already gone, but the MongoDB archive remains, so
