@@ -1823,68 +1823,961 @@ function escapeHtml(value) {
     .replace(/'/g, '&#039;');
 }
 
-function formatTranscriptContent(message) {
-  let content = message.content || '';
+function collectTranscriptMentionIds(messages) {
+  const users = new Set();
+  const roles = new Set();
+  const channels = new Set();
 
-  for (const user of message.mentions.users.values()) {
-    const member = message.guild?.members.cache.get(user.id);
-    const name = member?.displayName || user.globalName || user.username;
-    content = content
-      .replaceAll(`<@${user.id}>`, `@${name}`)
-      .replaceAll(`<@!${user.id}>`, `@${name}`);
+  const scan = (value) => {
+    const content = String(value || '');
+
+    for (const match of content.matchAll(/<@!?(\d{16,22})>/g)) {
+      users.add(match[1]);
+    }
+
+    for (const match of content.matchAll(/<@&(\d{16,22})>/g)) {
+      roles.add(match[1]);
+    }
+
+    for (const match of content.matchAll(/<#(\d{16,22})>/g)) {
+      channels.add(match[1]);
+    }
+  };
+
+  for (const message of messages) {
+    scan(message.content);
+
+    for (const embed of message.embeds || []) {
+      scan(embed.title);
+      scan(embed.description);
+      scan(embed.footer?.text);
+      scan(embed.author?.name);
+
+      for (const field of embed.fields || []) {
+        scan(field.name);
+        scan(field.value);
+      }
+    }
   }
 
-  for (const role of message.mentions.roles.values()) {
-    content = content.replaceAll(`<@&${role.id}>`, `@${role.name}`);
-  }
-
-  for (const channel of message.mentions.channels.values()) {
-    content = content.replaceAll(`<#${channel.id}>`, `#${channel.name || channel.id}`);
-  }
-
-  return escapeHtml(content);
+  return {
+    users,
+    roles,
+    channels,
+  };
 }
 
-function renderTranscriptEmbeds(message) {
+async function buildTranscriptRenderContext(channel, messages) {
+  const ids = collectTranscriptMentionIds(messages);
+
+  const userNames = new Map();
+  const roleNames = new Map();
+  const channelNames = new Map();
+
+  await Promise.all(
+    [...ids.users].map(async (userId) => {
+      const cachedMember = channel.guild.members.cache.get(userId);
+      let member = cachedMember;
+
+      if (!member) {
+        member = await channel.guild.members
+          .fetch(userId)
+          .catch(() => null);
+      }
+
+      const user =
+        member?.user ||
+        channel.client.users.cache.get(userId) ||
+        (await channel.client.users.fetch(userId).catch(() => null));
+
+      const displayName =
+        member?.displayName ||
+        user?.globalName ||
+        user?.username ||
+        `User ${userId}`;
+
+      userNames.set(userId, displayName);
+    }),
+  );
+
+  await Promise.all(
+    [...ids.roles].map(async (roleId) => {
+      const role =
+        channel.guild.roles.cache.get(roleId) ||
+        (await channel.guild.roles.fetch(roleId).catch(() => null));
+
+      roleNames.set(
+        roleId,
+        role?.name || `Role ${roleId}`,
+      );
+    }),
+  );
+
+  await Promise.all(
+    [...ids.channels].map(async (channelId) => {
+      const mentionedChannel =
+        channel.guild.channels.cache.get(channelId) ||
+        (await channel.guild.channels.fetch(channelId).catch(() => null));
+
+      channelNames.set(
+        channelId,
+        mentionedChannel?.name || `channel-${channelId}`,
+      );
+    }),
+  );
+
+  return {
+    userNames,
+    roleNames,
+    channelNames,
+  };
+}
+
+function renderTranscriptCustomEmoji(animated, name, id) {
+  const extension = animated ? 'gif' : 'webp';
+  const url =
+    `https://cdn.discordapp.com/emojis/${id}.${extension}` +
+    '?size=64&quality=lossless';
+
+  return (
+    `<img class="custom-emoji" ` +
+    `src="${escapeHtml(url)}" ` +
+    `alt=":${escapeHtml(name)}:" ` +
+    `title=":${escapeHtml(name)}:" ` +
+    `loading="lazy">`
+  );
+}
+
+function renderTranscriptTimestamp(unixSeconds, style = 'f') {
+  const milliseconds = Number(unixSeconds) * 1000;
+  const date = new Date(milliseconds);
+
+  if (Number.isNaN(date.getTime())) {
+    return escapeHtml(`<t:${unixSeconds}:${style}>`);
+  }
+
+  let formatted;
+
+  if (style === 'R') {
+    formatted = date.toLocaleString('en-GB', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  } else if (style === 't') {
+    formatted = date.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } else if (style === 'T') {
+    formatted = date.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  } else if (style === 'd') {
+    formatted = date.toLocaleDateString('en-GB');
+  } else {
+    formatted = date.toLocaleString('en-GB', {
+      dateStyle: style === 'D' ? 'long' : 'medium',
+      timeStyle:
+        style === 'D'
+          ? undefined
+          : 'short',
+    });
+  }
+
+  return `<span class="discord-timestamp">${escapeHtml(formatted)}</span>`;
+}
+
+function normalizeTranscriptUrl(value) {
+  const raw = String(value || '').trim();
+
+  try {
+    const candidate = /^www\./i.test(raw)
+      ? `https://${raw}`
+      : raw;
+
+    const parsed = new URL(candidate);
+
+    if (
+      parsed.protocol !== 'http:' &&
+      parsed.protocol !== 'https:'
+    ) {
+      return null;
+    }
+
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function renderTranscriptLink(
+  url,
+  labelHtml = null,
+  {
+    masked = false,
+  } = {},
+) {
+  const safeUrl = normalizeTranscriptUrl(url);
+
+  if (!safeUrl) {
+    return labelHtml || escapeHtml(url);
+  }
+
+  const visible =
+    labelHtml ||
+    escapeHtml(
+      /^www\./i.test(String(url))
+        ? String(url)
+        : safeUrl,
+    );
+
+  return (
+    `<a class="md-link${masked ? ' masked-link' : ''}" ` +
+    `href="${escapeHtml(safeUrl)}" ` +
+    `target="_blank" rel="noopener noreferrer">${visible}</a>`
+  );
+}
+
+function renderTranscriptLeaf(message, value, context) {
+  const content = String(value || '');
+
+  if (!content) return '';
+
+  // Discord-specific tokens + normal URLs. Markdown itself is parsed by
+  // renderTranscriptInline before reaching this leaf renderer.
+  const tokenRegex =
+    /<(a?):([A-Za-z0-9_]{2,32}):(\d{16,22})>|<@!?(\d{16,22})>|<@&(\d{16,22})>|<#(\d{16,22})>|<t:(\d{1,12})(?::([tTdDfFR]))?>|<(https?:\/\/[^>\s]+)>|@(everyone|here)|https?:\/\/[^\s<]+|www\.[^\s<]+/gi;
+
+  let output = '';
+  let lastIndex = 0;
+
+  for (const match of content.matchAll(tokenRegex)) {
+    output += escapeHtml(
+      content.slice(lastIndex, match.index),
+    );
+
+    const full = match[0];
+
+    if (match[3]) {
+      output += renderTranscriptCustomEmoji(
+        match[1] === 'a',
+        match[2],
+        match[3],
+      );
+    } else if (match[4]) {
+      const userId = match[4];
+      const user =
+        message.mentions?.users?.get(userId);
+      const member =
+        message.guild?.members?.cache?.get(userId);
+
+      const name =
+        context?.userNames?.get(userId) ||
+        member?.displayName ||
+        user?.globalName ||
+        user?.username ||
+        `User ${userId}`;
+
+      output +=
+        `<span class="mention user-mention" ` +
+        `title="User ID: ${escapeHtml(userId)}">` +
+        `@${escapeHtml(name)}</span>`;
+    } else if (match[5]) {
+      const roleId = match[5];
+      const role =
+        message.mentions?.roles?.get(roleId) ||
+        message.guild?.roles?.cache?.get(roleId);
+
+      const name =
+        context?.roleNames?.get(roleId) ||
+        role?.name ||
+        `Role ${roleId}`;
+
+      output +=
+        `<span class="mention role-mention" ` +
+        `title="Role ID: ${escapeHtml(roleId)}">` +
+        `@${escapeHtml(name)}</span>`;
+    } else if (match[6]) {
+      const channelId = match[6];
+      const mentionedChannel =
+        message.mentions?.channels?.get(channelId) ||
+        message.guild?.channels?.cache?.get(channelId);
+
+      const name =
+        context?.channelNames?.get(channelId) ||
+        mentionedChannel?.name ||
+        `channel-${channelId}`;
+
+      output +=
+        `<span class="mention channel-mention" ` +
+        `title="Channel ID: ${escapeHtml(channelId)}">` +
+        `#${escapeHtml(name)}</span>`;
+    } else if (match[7]) {
+      output += renderTranscriptTimestamp(
+        match[7],
+        match[8] || 'f',
+      );
+    } else if (match[9]) {
+      output += renderTranscriptLink(
+        match[9],
+        escapeHtml(match[9]),
+      );
+    } else if (match[10]) {
+      output +=
+        `<span class="mention everyone-mention">` +
+        `@${escapeHtml(match[10])}</span>`;
+    } else {
+      // Trim punctuation Discord would normally leave outside a bare link.
+      let urlText = full;
+      let trailing = '';
+
+      while (
+        /[.,!?;:]$/.test(urlText)
+      ) {
+        trailing =
+          urlText.slice(-1) +
+          trailing;
+        urlText = urlText.slice(0, -1);
+      }
+
+      output +=
+        renderTranscriptLink(urlText) +
+        escapeHtml(trailing);
+    }
+
+    lastIndex = match.index + full.length;
+  }
+
+  output += escapeHtml(content.slice(lastIndex));
+
+  return output;
+}
+
+function findNextTranscriptInlineToken(content) {
+  const patterns = [
+    {
+      type: 'escape',
+      regex: /\\([\\`*_{}\[\]()#+\-.!|>~])/,
+    },
+    {
+      type: 'code',
+      regex: /`([^`\n]+)`/,
+    },
+    {
+      type: 'maskedLink',
+      regex: /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/i,
+    },
+    {
+      type: 'boldItalic',
+      regex: /\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/,
+    },
+    {
+      type: 'underlineItalic',
+      regex: /___(?=\S)([\s\S]*?\S)___/,
+    },
+    {
+      type: 'bold',
+      regex: /\*\*(?=\S)([\s\S]*?\S)\*\*/,
+    },
+    {
+      type: 'underline',
+      regex: /__(?=\S)([\s\S]*?\S)__/,
+    },
+    {
+      type: 'strike',
+      regex: /~~(?=\S)([\s\S]*?\S)~~/,
+    },
+    {
+      type: 'spoiler',
+      regex: /\|\|(?=\S)([\s\S]*?\S)\|\|/,
+    },
+    {
+      type: 'italicStar',
+      regex: /\*(?!\*)(?=\S)([^*\n]*?\S)\*/,
+    },
+    {
+      type: 'italicUnderscore',
+      regex: /(^|[^\w])_(?!_)(?=\S)([^_\n]*?\S)_(?!\w)/,
+    },
+  ];
+
+  let best = null;
+
+  for (let priority = 0; priority < patterns.length; priority += 1) {
+    const definition = patterns[priority];
+    const match = definition.regex.exec(content);
+
+    if (!match) continue;
+
+    if (
+      !best ||
+      match.index < best.match.index ||
+      (
+        match.index === best.match.index &&
+        priority < best.priority
+      )
+    ) {
+      best = {
+        ...definition,
+        match,
+        priority,
+      };
+    }
+  }
+
+  return best;
+}
+
+function renderTranscriptInline(
+  message,
+  value,
+  context,
+  depth = 0,
+) {
+  const content = String(value || '');
+
+  if (!content) return '';
+
+  // Prevent pathological nested markdown from causing excessive recursion.
+  if (depth >= 10) {
+    return renderTranscriptLeaf(
+      message,
+      content,
+      context,
+    );
+  }
+
+  let output = '';
+  let remaining = content;
+
+  while (remaining) {
+    const token = findNextTranscriptInlineToken(remaining);
+
+    if (!token) {
+      output += renderTranscriptLeaf(
+        message,
+        remaining,
+        context,
+      );
+      break;
+    }
+
+    output += renderTranscriptLeaf(
+      message,
+      remaining.slice(0, token.match.index),
+      context,
+    );
+
+    const match = token.match;
+
+    if (token.type === 'escape') {
+      output += escapeHtml(match[1]);
+    } else if (token.type === 'code') {
+      output +=
+        `<code class="inline-code">${escapeHtml(match[1])}</code>`;
+    } else if (token.type === 'maskedLink') {
+      output += renderTranscriptLink(
+        match[2],
+        renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        ),
+        { masked: true },
+      );
+    } else if (token.type === 'boldItalic') {
+      output +=
+        `<strong><em>${renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        )}</em></strong>`;
+    } else if (token.type === 'underlineItalic') {
+      output +=
+        `<u><em>${renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        )}</em></u>`;
+    } else if (token.type === 'bold') {
+      output +=
+        `<strong>${renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        )}</strong>`;
+    } else if (token.type === 'underline') {
+      output +=
+        `<u>${renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        )}</u>`;
+    } else if (token.type === 'strike') {
+      output +=
+        `<s>${renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        )}</s>`;
+    } else if (token.type === 'spoiler') {
+      output +=
+        `<span class="spoiler" title="Discord spoiler">${renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        )}</span>`;
+    } else if (token.type === 'italicStar') {
+      output +=
+        `<em>${renderTranscriptInline(
+          message,
+          match[1],
+          context,
+          depth + 1,
+        )}</em>`;
+    } else if (token.type === 'italicUnderscore') {
+      // This regex includes the character immediately before the underscore so
+      // underscores inside normal words do not accidentally become italics.
+      output +=
+        renderTranscriptLeaf(
+          message,
+          match[1],
+          context,
+        ) +
+        `<em>${renderTranscriptInline(
+          message,
+          match[2],
+          context,
+          depth + 1,
+        )}</em>`;
+    }
+
+    remaining = remaining.slice(
+      match.index + match[0].length,
+    );
+  }
+
+  return output;
+}
+
+function renderTranscriptMarkdownLines(
+  message,
+  value,
+  context,
+) {
+  const lines = String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n');
+
+  const output = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+
+    if (!line.length) {
+      output.push('<div class="md-spacer"></div>');
+      continue;
+    }
+
+    // Discord multi-line block quote: >>> quote text
+    if (/^>>>\s?/.test(line)) {
+      const firstLine = line.replace(/^>>>\s?/, '');
+      const rest = [
+        firstLine,
+        ...lines.slice(index + 1),
+      ].join('\n');
+
+      output.push(
+        `<blockquote class="md-quote multi-quote">${renderTranscriptMarkdownLines(
+          message,
+          rest,
+          context,
+        )}</blockquote>`,
+      );
+      break;
+    }
+
+    // Consecutive single-line quotes.
+    if (/^>\s?/.test(line)) {
+      const quoteLines = [];
+
+      while (
+        index < lines.length &&
+        /^>\s?/.test(lines[index])
+      ) {
+        quoteLines.push(
+          lines[index].replace(/^>\s?/, ''),
+        );
+        index += 1;
+      }
+
+      index -= 1;
+
+      output.push(
+        `<blockquote class="md-quote">${quoteLines
+          .map(
+            (quoteLine) =>
+              `<div class="md-line">${renderTranscriptInline(
+                message,
+                quoteLine,
+                context,
+              )}</div>`,
+          )
+          .join('')}</blockquote>`,
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+
+    if (heading) {
+      const level = heading[1].length;
+
+      output.push(
+        `<h${level + 2} class="md-heading md-h${level}">${renderTranscriptInline(
+          message,
+          heading[2],
+          context,
+        )}</h${level + 2}>`,
+      );
+      continue;
+    }
+
+    const subtext = line.match(/^-#\s+(.+)$/);
+
+    if (subtext) {
+      output.push(
+        `<div class="md-subtext">${renderTranscriptInline(
+          message,
+          subtext[1],
+          context,
+        )}</div>`,
+      );
+      continue;
+    }
+
+    const unordered = line.match(/^(\s*)[-+*]\s+(.+)$/);
+
+    if (unordered) {
+      const depth = Math.min(
+        4,
+        Math.floor(unordered[1].length / 2),
+      );
+
+      output.push(
+        `<div class="md-list-item" style="--list-depth:${depth}">` +
+        `<span class="md-list-marker">•</span>` +
+        `<span>${renderTranscriptInline(
+          message,
+          unordered[2],
+          context,
+        )}</span></div>`,
+      );
+      continue;
+    }
+
+    const ordered = line.match(/^(\s*)(\d+)[.)]\s+(.+)$/);
+
+    if (ordered) {
+      const depth = Math.min(
+        4,
+        Math.floor(ordered[1].length / 2),
+      );
+
+      output.push(
+        `<div class="md-list-item" style="--list-depth:${depth}">` +
+        `<span class="md-list-marker">${escapeHtml(
+          ordered[2],
+        )}.</span>` +
+        `<span>${renderTranscriptInline(
+          message,
+          ordered[3],
+          context,
+        )}</span></div>`,
+      );
+      continue;
+    }
+
+    output.push(
+      `<div class="md-line">${renderTranscriptInline(
+        message,
+        line,
+        context,
+      )}</div>`,
+    );
+  }
+
+  return output.join('');
+}
+
+function renderTranscriptMarkdown(message, value, context) {
+  const content = String(value || '')
+    .replace(/\r\n?/g, '\n');
+
+  if (!content) return '';
+
+  // Fenced code blocks are processed before normal Discord markdown. Nothing
+  // inside a code block should be interpreted as mentions, emoji, links, etc.
+  const fenceRegex =
+    /```([A-Za-z0-9_+#.-]*)[ \t]*\n?([\s\S]*?)```/g;
+
+  let output = '';
+  let lastIndex = 0;
+
+  for (const match of content.matchAll(fenceRegex)) {
+    output += renderTranscriptMarkdownLines(
+      message,
+      content.slice(lastIndex, match.index),
+      context,
+    );
+
+    const language = String(match[1] || '').trim();
+    const code = match[2] || '';
+
+    output +=
+      `<div class="code-block-wrap">` +
+      (
+        language
+          ? `<div class="code-language">${escapeHtml(language)}</div>`
+          : ''
+      ) +
+      `<pre class="code-block"><code>${escapeHtml(code)}</code></pre>` +
+      `</div>`;
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  output += renderTranscriptMarkdownLines(
+    message,
+    content.slice(lastIndex),
+    context,
+  );
+
+  return output;
+}
+
+function renderTranscriptRichText(message, value, context) {
+  return renderTranscriptInline(
+    message,
+    value,
+    context,
+  );
+}
+
+function formatTranscriptContent(message, context) {
+  return renderTranscriptMarkdown(
+    message,
+    message.content || '',
+    context,
+  );
+}
+
+
+function renderTranscriptEmbeds(message, context) {
   if (!message.embeds?.length) return '';
 
   return message.embeds.map((embed) => {
-    const title = embed.title ? `<div class="embed-title">${escapeHtml(embed.title)}</div>` : '';
-    const description = embed.description
-      ? `<div class="embed-description">${escapeHtml(embed.description)}</div>`
+    const author = embed.author?.name
+      ? `<div class="embed-author">${renderTranscriptRichText(
+          message,
+          embed.author.name,
+          context,
+        )}</div>`
       : '';
+
+    const title = embed.title
+      ? `<div class="embed-title">${renderTranscriptRichText(
+          message,
+          embed.title,
+          context,
+        )}</div>`
+      : '';
+
+    const description = embed.description
+      ? `<div class="embed-description">${renderTranscriptMarkdown(
+          message,
+          embed.description,
+          context,
+        )}</div>`
+      : '';
+
     const fields = embed.fields?.length
       ? `<div class="embed-fields">${embed.fields.map((field) => `
           <div class="embed-field">
-            <div class="embed-field-name">${escapeHtml(field.name)}</div>
-            <div>${escapeHtml(field.value)}</div>
+            <div class="embed-field-name">${renderTranscriptRichText(
+              message,
+              field.name,
+              context,
+            )}</div>
+            <div class="embed-field-value">${renderTranscriptMarkdown(
+              message,
+              field.value,
+              context,
+            )}</div>
           </div>`).join('')}</div>`
       : '';
+
     const thumbnail = embed.thumbnail?.url
-      ? `<img class="embed-thumb" src="${escapeHtml(embed.thumbnail.url)}" alt="">`
-      : '';
-    const image = embed.image?.url
-      ? `<img class="embed-image" src="${escapeHtml(embed.image.url)}" alt="">`
+      ? `<a class="embed-thumb-link" href="${escapeHtml(
+          embed.thumbnail.url,
+        )}" target="_blank" rel="noreferrer">
+          <img class="embed-thumb" src="${escapeHtml(
+            embed.thumbnail.url,
+          )}" alt="Embed thumbnail" loading="lazy">
+        </a>`
       : '';
 
-    return `<div class="discord-embed">${thumbnail}<div>${title}${description}${fields}${image}</div></div>`;
+    const image = embed.image?.url
+      ? `<a class="embed-image-link" href="${escapeHtml(
+          embed.image.url,
+        )}" target="_blank" rel="noreferrer">
+          <img class="embed-image" src="${escapeHtml(
+            embed.image.url,
+          )}" alt="Embed image" loading="lazy">
+        </a>`
+      : '';
+
+    const footer = embed.footer?.text
+      ? `<div class="embed-footer">${renderTranscriptRichText(
+          message,
+          embed.footer.text,
+          context,
+        )}</div>`
+      : '';
+
+    return `
+      <div class="discord-embed">
+        ${thumbnail}
+        <div class="embed-main">
+          ${author}
+          ${title}
+          ${description}
+          ${fields}
+          ${image}
+          ${footer}
+        </div>
+      </div>`;
   }).join('');
+}
+
+function isTranscriptImageAttachment(attachment) {
+  const contentType = String(
+    attachment.contentType || '',
+  ).toLowerCase();
+
+  if (contentType.startsWith('image/')) {
+    return true;
+  }
+
+  return /\.(png|jpe?g|gif|webp|avif)$/i.test(
+    String(attachment.name || ''),
+  );
 }
 
 function renderTranscriptAttachments(message) {
   if (!message.attachments?.size) return '';
 
-  return [...message.attachments.values()].map((attachment) => {
-    const name = escapeHtml(attachment.name || 'attachment');
-    const url = escapeHtml(attachment.url);
-    const isImage = attachment.contentType?.startsWith('image/');
+  return [...message.attachments.values()]
+    .map((attachment) => {
+      const name = escapeHtml(
+        attachment.name || 'attachment',
+      );
+      const url = escapeHtml(attachment.url);
+      const isImage =
+        isTranscriptImageAttachment(attachment);
 
-    return `
-      <div class="attachment">
-        <a href="${url}" target="_blank" rel="noreferrer">${name}</a>
-        ${isImage ? `<img src="${url}" alt="${name}" loading="lazy">` : ''}
-      </div>`;
-  }).join('');
+      if (isImage) {
+        return `
+          <div class="attachment image-attachment">
+            <a class="attachment-name" href="${url}" target="_blank" rel="noreferrer">${name}</a>
+            <a class="attachment-image-link" href="${url}" target="_blank" rel="noreferrer">
+              <img
+                class="attachment-image"
+                src="${url}"
+                alt="${name}"
+                loading="lazy"
+              >
+            </a>
+          </div>`;
+      }
+
+      return `
+        <div class="attachment file-attachment">
+          <a href="${url}" target="_blank" rel="noreferrer">${name}</a>
+        </div>`;
+    })
+    .join('');
+}
+
+function renderTranscriptStickers(message) {
+  if (!message.stickers?.size) return '';
+
+  return `
+    <div class="stickers">
+      ${[...message.stickers.values()]
+        .map((sticker) => {
+          const name = escapeHtml(
+            sticker.name || 'Sticker',
+          );
+          const url = escapeHtml(sticker.url || '');
+
+          if (!url) {
+            return `<span class="sticker-name">${name}</span>`;
+          }
+
+          return `
+            <a class="sticker-link" href="${url}" target="_blank" rel="noreferrer" title="${name}">
+              <img class="sticker-image" src="${url}" alt="${name}" loading="lazy">
+            </a>`;
+        })
+        .join('')}
+    </div>`;
+}
+
+function renderReactionEmoji(reaction) {
+  const emoji = reaction.emoji;
+
+  if (emoji?.id) {
+    return renderTranscriptCustomEmoji(
+      Boolean(emoji.animated),
+      emoji.name || 'emoji',
+      emoji.id,
+    );
+  }
+
+  return `<span class="unicode-reaction">${escapeHtml(
+    emoji?.name || '❔',
+  )}</span>`;
+}
+
+function renderTranscriptReactions(message) {
+  const reactions = message.reactions?.cache;
+
+  if (!reactions?.size) return '';
+
+  return `
+    <div class="reactions">
+      ${[...reactions.values()]
+        .map(
+          (reaction) => `
+            <span class="reaction">
+              ${renderReactionEmoji(reaction)}
+              <span class="reaction-count">${Number(
+                reaction.count,
+              ) || 0}</span>
+            </span>`,
+        )
+        .join('')}
+    </div>`;
 }
 
 async function fetchAllChannelMessages(channel) {
@@ -2109,7 +3002,7 @@ function renderTranscriptAuditHtml(audit, data) {
   </section>`;
 }
 
-function buildTranscriptHtml(channel, data, messages, audit) {
+function buildTranscriptHtml(channel, data, messages, audit, renderContext) {
   const type = TICKET_TYPES[data.typeKey] || { label: data.typeKey };
   const generatedAt = new Date();
   const participantIds = new Set(
@@ -2134,7 +3027,7 @@ function buildTranscriptHtml(channel, data, messages, audit) {
         dateStyle: 'medium',
         timeStyle: 'medium',
       });
-      const content = formatTranscriptContent(message);
+      const content = formatTranscriptContent(message, renderContext);
       const edited = message.editedTimestamp ? '<span class="edited">(edited)</span>' : '';
       const botBadge = author?.bot ? '<span class="bot-badge">BOT</span>' : '';
 
@@ -2150,8 +3043,10 @@ function buildTranscriptHtml(channel, data, messages, audit) {
               ${edited}
             </div>
             ${content ? `<div class="content">${content}</div>` : ''}
-            ${renderTranscriptEmbeds(message)}
+            ${renderTranscriptEmbeds(message, renderContext)}
             ${renderTranscriptAttachments(message)}
+            ${renderTranscriptStickers(message)}
+            ${renderTranscriptReactions(message)}
           </div>
         </article>`;
     })
@@ -2166,7 +3061,7 @@ function buildTranscriptHtml(channel, data, messages, audit) {
 <style>
   :root{color-scheme:dark;--bg:#111214;--panel:#1e1f22;--panel2:#2b2d31;--text:#dbdee1;--muted:#949ba4;--accent:#5865f2;--green:#23a55a;--border:#3f4147}
   *{box-sizing:border-box}
-  body{margin:0;background:linear-gradient(180deg,#0b0c0e,#16171a);color:var(--text);font:15px/1.45 Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  body{margin:0;background:linear-gradient(180deg,#0b0c0e,#16171a);color:var(--text);font:15px/1.45 Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif}
   .shell{max-width:1100px;margin:0 auto;padding:32px 18px 60px}
   .hero{background:linear-gradient(135deg,#24262b,#191a1e);border:1px solid var(--border);border-radius:18px;padding:24px;box-shadow:0 18px 50px rgba(0,0,0,.3)}
   .hero h1{margin:0 0 8px;font-size:28px}
@@ -2197,16 +3092,44 @@ function buildTranscriptHtml(channel, data, messages, audit) {
   .message-meta{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
   .message-meta strong{color:#f2f3f5}.username,time,.edited{color:var(--muted);font-size:12px}
   .bot-badge{font-size:10px;font-weight:800;background:var(--accent);padding:1px 5px;border-radius:4px;color:white}
-  .content{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:3px}
-  .discord-embed{position:relative;display:flex;max-width:650px;margin-top:9px;padding:12px 14px;border-left:4px solid var(--accent);border-radius:4px;background:#2b2d31}
-  .embed-title{font-weight:700;color:white;margin-bottom:5px}.embed-description{white-space:pre-wrap}
-  .embed-fields{display:grid;gap:8px;margin-top:8px}.embed-field-name{font-weight:700;color:white}
-  .embed-thumb{width:72px;height:72px;object-fit:cover;border-radius:8px;margin-right:12px}
-  .embed-image{display:block;max-width:100%;max-height:380px;border-radius:8px;margin-top:10px}
-  .attachment{max-width:680px;margin-top:10px;padding:10px;border:1px solid #404249;border-radius:10px;background:#232428}
-  .attachment a{color:#00a8fc;text-decoration:none;font-weight:600}
-  .attachment img{display:block;max-width:100%;max-height:480px;margin-top:8px;border-radius:8px}
+  .content{white-space:normal;overflow-wrap:anywhere;word-break:break-word;margin-top:3px}
+  .md-line{min-height:1.45em;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+  .md-spacer{height:.72em}
+  .md-heading{color:#f2f3f5;margin:.45em 0 .2em;line-height:1.25;overflow-wrap:anywhere}
+  .md-h1{font-size:1.45em}.md-h2{font-size:1.25em}.md-h3{font-size:1.08em}
+  .md-subtext{color:var(--muted);font-size:.86em;margin:.12em 0;white-space:pre-wrap}
+  .md-quote{display:block;margin:.3em 0;padding:2px 0 2px 12px;border-left:4px solid #4e5058;color:#dbdee1}
+  .md-quote .md-quote{margin-left:8px}.multi-quote{white-space:normal}
+  .md-list-item{display:flex;align-items:flex-start;gap:8px;padding-left:calc(var(--list-depth,0) * 18px);min-height:1.45em}
+  .md-list-marker{min-width:18px;text-align:right;color:#dbdee1;flex:0 0 auto}
+  strong{font-weight:800;color:#f2f3f5}em{font-style:italic}u{text-decoration:underline;text-underline-offset:2px}s{text-decoration:line-through}
+  .inline-code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:.92em;background:#111214;color:#dbdee1;border-radius:4px;padding:2px 4px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .code-block-wrap{position:relative;margin:6px 0 8px;width:min(100%,900px)}
+  .code-language{position:absolute;right:9px;top:7px;color:#949ba4;font:10px/1.2 "SFMono-Regular",Consolas,monospace;text-transform:uppercase;letter-spacing:.06em}
+  .code-block{margin:0;padding:12px 14px;background:#111214;border:1px solid #3f4147;border-radius:6px;overflow:auto;max-width:100%;white-space:pre;tab-size:2}
+  .code-block code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:13px;color:#dbdee1}
+  .spoiler{display:inline;border-radius:3px;padding:0 3px;background:#1e1f22;color:#1e1f22;cursor:help;transition:.12s}
+  .spoiler:hover,.spoiler:focus{background:#46484f;color:#dbdee1}
+  .md-link{color:#00a8fc;text-decoration:none;overflow-wrap:anywhere}.md-link:hover{text-decoration:underline}.masked-link{font-weight:500}
+  .mention{display:inline-block;max-width:100%;padding:0 3px;border-radius:3px;background:rgba(88,101,242,.28);color:#c9cdfb;font-weight:600;vertical-align:baseline;overflow-wrap:anywhere}
+  .role-mention{background:rgba(88,101,242,.20)}.channel-mention{background:rgba(88,101,242,.18)}.everyone-mention{background:rgba(250,166,26,.20);color:#ffd69a}
+  .discord-timestamp{display:inline-block;padding:0 3px;border-radius:3px;background:#2b2d31;color:#dbdee1}
+  .custom-emoji{display:inline-block;width:1.45em;height:1.45em;object-fit:contain;vertical-align:-.34em;margin:0 .05em;max-width:none}
+  .discord-embed{position:relative;display:flex;width:min(100%,760px);margin-top:9px;padding:12px 14px;border-left:4px solid var(--accent);border-radius:4px;background:#2b2d31;overflow:visible}
+  .embed-main{min-width:0;max-width:100%;flex:1}.embed-author{font-size:13px;font-weight:600;color:#f2f3f5;margin-bottom:6px}
+  .embed-title{font-weight:700;color:white;margin-bottom:5px;overflow-wrap:anywhere}.embed-description{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+  .embed-fields{display:grid;gap:8px;margin-top:8px}.embed-field{min-width:0}.embed-field-name{font-weight:700;color:white;overflow-wrap:anywhere}.embed-field-value{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+  .embed-thumb-link{display:block;flex:0 0 auto;margin-right:12px}.embed-thumb{display:block;width:80px;height:80px;object-fit:contain;border-radius:8px}
+  .embed-image-link{display:block;width:100%;margin-top:10px}.embed-image{display:block;width:auto;height:auto;max-width:100%;max-height:none;border-radius:8px;object-fit:contain}
+  .embed-footer{margin-top:10px;color:var(--muted);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .attachment{width:min(100%,900px);margin-top:10px;padding:10px;border:1px solid #404249;border-radius:10px;background:#232428;overflow:visible}
+  .attachment a{color:#00a8fc;text-decoration:none;font-weight:600;overflow-wrap:anywhere}
+  .attachment-image-link{display:block;width:100%;margin-top:8px}.attachment-image{display:block;width:auto;height:auto;max-width:100%;max-height:none;border-radius:8px;object-fit:contain}
+  .stickers{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.sticker-link{display:block}.sticker-image{display:block;width:auto;height:auto;max-width:180px;max-height:180px;object-fit:contain}
+  .sticker-name{color:var(--muted)}
+  .reactions{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.reaction{display:inline-flex;align-items:center;gap:4px;min-height:28px;padding:3px 8px;border:1px solid #3f4147;border-radius:8px;background:#2b2d31}.reaction .custom-emoji{width:20px;height:20px;vertical-align:middle}.unicode-reaction{font-size:18px;line-height:20px}.reaction-count{font-size:13px;color:#b5bac1}
   .footer{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
+  @media(max-width:640px){.shell{padding:16px 8px 40px}.message{padding:14px 10px;gap:10px}.avatar{width:36px;height:36px}.discord-embed{padding:10px}.embed-thumb{width:64px;height:64px}.attachment{padding:8px}}
 </style>
 </head>
 <body>
@@ -2259,15 +3182,31 @@ async function buildTranscriptArtifact(
   } = {},
 ) {
   const messages = await fetchAllChannelMessages(channel);
-  const audit = await buildTranscriptAuditData(
+  const [
+    audit,
+    renderContext,
+  ] = await Promise.all([
+    buildTranscriptAuditData(
+      channel,
+      data,
+      {
+        transcriptCreatedByUser,
+        closedById,
+      },
+    ),
+    buildTranscriptRenderContext(
+      channel,
+      messages,
+    ),
+  ]);
+
+  const html = buildTranscriptHtml(
     channel,
     data,
-    {
-      transcriptCreatedByUser,
-      closedById,
-    },
+    messages,
+    audit,
+    renderContext,
   );
-  const html = buildTranscriptHtml(channel, data, messages, audit);
   const safeType = TICKET_TYPES[data.typeKey]?.slug || 'ticket';
   const safeChannelName = String(channel.name || `ticket-${data.number}`)
     .replace(/[^a-zA-Z0-9_-]/g, '-')
