@@ -47,18 +47,23 @@ const PERIODS = Object.freeze({
 const FILTERS = Object.freeze({
   all: {
     label: 'All Staff',
+    description: 'Everyone with View Audit Log permission',
   },
   star: {
     label: 'Star Management',
+    description: 'Only staff with ⭐ or ⭐⭐ management roles',
   },
   warnings: {
     label: 'Warning Roles',
+    description: 'Only staff who currently have a warning role',
   },
   clean: {
     label: 'No Warning Roles',
+    description: 'Only staff with no current warning roles',
   },
   active_star: {
     label: 'Active Star Staff',
+    description: '⭐/⭐⭐ staff with claims or tracked activity this period',
   },
 });
 
@@ -217,12 +222,13 @@ function buildFilterRow(periodKey, filterKey, page) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`staffstats:filter:${periodKey}:${page}`)
-      .setPlaceholder(`Filter: ${FILTERS[filterKey].label}`)
+      .setPlaceholder(`Filter staff: ${FILTERS[filterKey].label}`)
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(
         Object.entries(FILTERS).map(([value, filter]) => ({
           label: filter.label,
+          description: filter.description,
           value,
           default: value === filterKey,
         })),
@@ -231,25 +237,28 @@ function buildFilterRow(periodKey, filterKey, page) {
 }
 
 function buildPageButtons(periodKey, filterKey, page, pageCount) {
+  // Keep the previous/next custom IDs unique even when both buttons are
+  // disabled on a single-page filtered result. Discord can reject a component
+  // update when two buttons in the same message have the exact same customId.
+  const previousPage = Math.max(page - 1, 0);
+  const nextPage = Math.min(page + 1, pageCount - 1);
+
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(
-        `staffstats:page:${periodKey}:${filterKey}:${Math.max(page - 1, 0)}`,
+        `staffstats:page:${periodKey}:${filterKey}:${previousPage}:prev`,
       )
       .setEmoji('⬅️')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 0),
     new ButtonBuilder()
-      .setCustomId('staffstats:noop')
+      .setCustomId(`staffstats:noop:${periodKey}:${filterKey}:${page}`)
       .setLabel(`Page ${page + 1}/${pageCount}`)
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(true),
     new ButtonBuilder()
       .setCustomId(
-        `staffstats:page:${periodKey}:${filterKey}:${Math.min(
-          page + 1,
-          pageCount - 1,
-        )}`,
+        `staffstats:page:${periodKey}:${filterKey}:${nextPage}:next`,
       )
       .setEmoji('➡️')
       .setStyle(ButtonStyle.Secondary)
@@ -333,11 +342,6 @@ function buildLeaderboardEmbed({
 
   return new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle('📊 Staff Performance Dashboard')
-    .setDescription(
-      `Staff are detected automatically by the **View Audit Log** permission.\n` +
-        `Leaderboard order: **tickets claimed first**, then message activity.`,
-    )
     .addFields(
       {
         name: 'Period',
@@ -735,7 +739,7 @@ async function handleStaffTrackingInteraction(interaction) {
     return true;
   }
 
-  if (customId === 'staffstats:noop') {
+  if (customId.startsWith('staffstats:noop:')) {
     await interaction.deferUpdate().catch(() => {});
     return true;
   }
