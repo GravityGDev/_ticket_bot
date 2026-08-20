@@ -310,9 +310,9 @@ async function renderRankCard(guild, member, periodKey) {
   const starMarkup =
     starLevel === 2
       ? `
-        <polygon points="106,570 117,596 145,598 123,616 131,644 106,628 81,644 89,616 67,598 95,596"
+        <polygon points="95,570 106,596 134,598 112,616 120,644 95,628 70,644 78,616 56,598 84,596"
                  fill="#f8c94d"/>
-        <polygon points="166,570 177,596 205,598 183,616 191,644 166,628 141,644 149,616 127,598 155,596"
+        <polygon points="185,570 196,596 224,598 202,616 210,644 185,628 160,644 168,616 146,598 174,596"
                  fill="#f8c94d"/>`
       : starLevel === 1
         ? `
@@ -539,12 +539,12 @@ async function renderRankCard(guild, member, periodKey) {
     <!-- Left status column -->
     ${starMarkup}
 
-    <line x1="210" y1="571"
-          x2="210" y2="648"
+    <line x1="242" y1="571"
+          x2="242" y2="648"
           stroke="#617084"
           stroke-opacity=".55"/>
 
-    <text x="220" y="622"
+    <text x="262" y="622"
           font-family="Arial, Helvetica, sans-serif"
           font-size="30"
           font-weight="800"
@@ -557,12 +557,12 @@ async function renderRankCard(guild, member, periodKey) {
 
     ${warningMarkup}
 
-    <line x1="210" y1="670"
-          x2="210" y2="738"
+    <line x1="242" y1="670"
+          x2="242" y2="738"
           stroke="#617084"
           stroke-opacity=".55"/>
 
-    <text x="220" y="716"
+    <text x="262" y="716"
           font-family="Arial, Helvetica, sans-serif"
           font-size="30"
           font-weight="800"
