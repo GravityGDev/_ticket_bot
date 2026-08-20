@@ -1617,6 +1617,14 @@ function assertTicketRuntimeHelpers() {
       typeof getLiveTicketData,
     setTicketStaffTyping:
       typeof setTicketStaffTyping,
+    showRoleMenu:
+      typeof showRoleMenu,
+    getRoleContext:
+      typeof getRoleContext,
+    canActorManageMember:
+      typeof canActorManageMember,
+    getAssignableTicketRoles:
+      typeof getAssignableTicketRoles,
   };
 
   const missing =
@@ -8309,106 +8317,725 @@ async function acceptTicketHandover(
 }
 
 
-async function openRoleMenu(interaction) {
-  const data = getTicketData(interaction.channel);
-  if (!data) {
-    await interaction.reply({
-      content: 'This button can only be used inside a ticket channel.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
+function canActorManageMember(
+  guild,
+  actor,
+  target,
+) {
+  if (
+    !guild ||
+    !actor ||
+    !target ||
+    actor.id ===
+      target.id ||
+    target.id ===
+      guild.ownerId
+  ) {
+    return false;
   }
 
-  await showRoleMenu(interaction, data.creatorId, 0, false);
+  if (
+    !actor.permissions.has(
+      PermissionFlagsBits.ManageRoles,
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    actor.id ===
+      guild.ownerId
+  ) {
+    return true;
+  }
+
+  return (
+    actor.roles.highest
+      .comparePositionTo(
+        target.roles.highest,
+      ) >
+    0
+  );
 }
 
-async function changeRolePage(interaction) {
-  const [, creatorId, pageString] = interaction.customId.split(':');
-  const data = getTicketData(interaction.channel);
+async function getRoleContext(
+  interaction,
+  creatorId,
+) {
+  const guild =
+    interaction.guild;
 
-  if (!data || data.creatorId !== creatorId) {
-    await interaction.reply({
-      content: 'This role menu is no longer valid for this ticket.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
+  if (!guild) {
+    return {
+      guild:
+        null,
+      actor:
+        null,
+      creator:
+        null,
+      botMember:
+        null,
+    };
   }
 
-  await showRoleMenu(interaction, creatorId, Number(pageString) || 0, true);
+  const actor =
+    interaction.member ||
+    guild.members.cache.get(
+      interaction.user.id,
+    ) ||
+    (await guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null));
+
+  const creator =
+    guild.members.cache.get(
+      String(
+        creatorId,
+      ),
+    ) ||
+    (await guild.members
+      .fetch(
+        String(
+          creatorId,
+        ),
+      )
+      .catch(() => null));
+
+  const botMember =
+    guild.members.me ||
+    (await guild.members
+      .fetchMe()
+      .catch(() => null));
+
+  return {
+    guild,
+    actor,
+    creator,
+    botMember,
+  };
 }
 
-async function giveSelectedRole(interaction) {
-  const [, creatorId] = interaction.customId.split(':');
-  const roleId = interaction.values[0];
-  const data = getTicketData(interaction.channel);
+async function getAssignableTicketRoles(
+  interaction,
+  creatorId,
+) {
+  const {
+    guild,
+    actor,
+    creator,
+    botMember,
+  } =
+    await getRoleContext(
+      interaction,
+      creatorId,
+    );
 
-  if (!data || data.creatorId !== creatorId) {
-    await interaction.update({
-      content: 'This role menu is no longer valid for this ticket.',
+  if (
+    !guild ||
+    !actor ||
+    !creator ||
+    !botMember
+  ) {
+    return {
+      guild,
+      actor,
+      creator,
+      botMember,
+      config:
+        null,
+      roles: [],
+      error:
+        'I could not load the ticket user or server role information.',
+    };
+  }
+
+  if (
+    !actor.permissions.has(
+      PermissionFlagsBits.ManageRoles,
+    )
+  ) {
+    return {
+      guild,
+      actor,
+      creator,
+      botMember,
+      config:
+        null,
+      roles: [],
+      error:
+        'You need **Manage Roles** to use the Role button.',
+    };
+  }
+
+  if (
+    !botMember.permissions.has(
+      PermissionFlagsBits.ManageRoles,
+    )
+  ) {
+    return {
+      guild,
+      actor,
+      creator,
+      botMember,
+      config:
+        null,
+      roles: [],
+      error:
+        'I need **Manage Roles** to assign roles from tickets.',
+    };
+  }
+
+  if (
+    !canActorManageMember(
+      guild,
+      actor,
+      creator,
+    )
+  ) {
+    return {
+      guild,
+      actor,
+      creator,
+      botMember,
+      config:
+        null,
+      roles: [],
+      error:
+        'Your highest role must be above the ticket creator before you can manage their roles.',
+    };
+  }
+
+  const config =
+    await getGuildConfig(
+      guild,
+    );
+
+  if (
+    !config ||
+    !Array.isArray(
+      config.roleIds,
+    ) ||
+    !config.roleIds.length
+  ) {
+    return {
+      guild,
+      actor,
+      creator,
+      botMember,
+      config,
+      roles: [],
+      error:
+        'No ticket roles are configured. Run `/ticket-panel reconfigure:true` to choose them.',
+    };
+  }
+
+  const roles =
+    config.roleIds
+      .map(
+        (roleId) =>
+          guild.roles.cache.get(
+            String(
+              roleId,
+            ),
+          ),
+      )
+      .filter(
+        (role) =>
+          Boolean(
+            role &&
+            role.id !==
+              guild.roles.everyone.id &&
+            !role.managed &&
+            !creator.roles.cache.has(
+              role.id,
+            ) &&
+            canActorGiveRole(
+              guild,
+              actor,
+              role,
+            ) &&
+            canBotGiveRole(
+              botMember,
+              role,
+            ),
+          ),
+      )
+      .sort(
+        (a, b) =>
+          b.position -
+          a.position,
+      );
+
+  return {
+    guild,
+    actor,
+    creator,
+    botMember,
+    config,
+    roles,
+    error:
+      null,
+  };
+}
+
+async function showRoleMenu(
+  interaction,
+  creatorId,
+  requestedPage = 0,
+) {
+  const context =
+    await getAssignableTicketRoles(
+      interaction,
+      creatorId,
+    );
+
+  if (
+    context.error
+  ) {
+    await interaction.editReply({
+      content:
+        context.error,
       components: [],
+      allowedMentions: {
+        parse: [],
+      },
     });
+
     return;
   }
 
-  const { guild, actor, creator, botMember } = await getRoleContext(interaction, creatorId);
-  const config = await getGuildConfig(guild);
-  const role = guild.roles.cache.get(roleId);
+  const {
+    creator,
+    roles,
+  } =
+    context;
 
-  if (!actor?.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    await interaction.update({ content: 'You no longer have **Manage Roles**.', components: [] });
-    return;
-  }
-
-  if (!creator || !role) {
-    await interaction.update({ content: 'That user or role no longer exists.', components: [] });
-    return;
-  }
-
-  if (!config?.roleIds.includes(roleId)) {
-    await interaction.update({
-      content: 'That role is no longer in the configured ticket-role list.',
+  if (!roles.length) {
+    await interaction.editReply({
+      content:
+        `There are no configured roles currently available to give to <@${creator.id}>.`,
       components: [],
+      allowedMentions: {
+        parse: [],
+      },
     });
+
     return;
   }
 
-  const stillAssignable =
-    !role.managed &&
-    role.id !== guild.roles.everyone.id &&
-    !creator.roles.cache.has(role.id) &&
-    canActorManageMember(guild, actor, creator) &&
-    canActorGiveRole(guild, actor, role) &&
-    canBotGiveRole(botMember, role);
+  const pageCount =
+    Math.max(
+      1,
+      Math.ceil(
+        roles.length /
+        ROLE_PAGE_SIZE,
+      ),
+    );
 
-  if (!stillAssignable) {
-    await interaction.update({
-      content: 'That role can no longer be assigned by you or by the bot.',
-      components: [],
-    });
-    return;
+  const page =
+    Math.min(
+      Math.max(
+        Number(
+          requestedPage,
+        ) || 0,
+        0,
+      ),
+      pageCount -
+        1,
+    );
+
+  const pageRoles =
+    roles.slice(
+      page *
+        ROLE_PAGE_SIZE,
+      page *
+        ROLE_PAGE_SIZE +
+        ROLE_PAGE_SIZE,
+    );
+
+  const select =
+    new StringSelectMenuBuilder()
+      .setCustomId(
+        `ticket_role_select:${creator.id}`,
+      )
+      .setPlaceholder(
+        'Select a role to give',
+      )
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        pageRoles.map(
+          (role) => ({
+            label:
+              role.name.slice(
+                0,
+                100,
+              ),
+            description:
+              `Position ${role.position}`.slice(
+                0,
+                100,
+              ),
+            value:
+              role.id,
+          }),
+        ),
+      );
+
+  const components = [
+    new ActionRowBuilder()
+      .addComponents(
+        select,
+      ),
+  ];
+
+  if (
+    pageCount >
+    1
+  ) {
+    const navigation =
+      new ActionRowBuilder();
+
+    navigation.addComponents(
+      new ButtonBuilder()
+        .setCustomId(
+          `ticket_role_page:${creator.id}:${Math.max(
+            page - 1,
+            0,
+          )}`,
+        )
+        .setLabel('Back')
+        .setEmoji('⬅️')
+        .setStyle(
+          ButtonStyle.Secondary,
+        )
+        .setDisabled(
+          page ===
+            0,
+        ),
+      new ButtonBuilder()
+        .setCustomId(
+          `ticket_role_page:${creator.id}:${Math.min(
+            page + 1,
+            pageCount - 1,
+          )}`,
+        )
+        .setLabel(
+          `${page + 1}/${pageCount}`,
+        )
+        .setStyle(
+          ButtonStyle.Secondary,
+        )
+        .setDisabled(
+          true,
+        ),
+      new ButtonBuilder()
+        .setCustomId(
+          `ticket_role_page:${creator.id}:${Math.min(
+            page + 1,
+            pageCount - 1,
+          )}`,
+        )
+        .setLabel('Next')
+        .setEmoji('➡️')
+        .setStyle(
+          ButtonStyle.Secondary,
+        )
+        .setDisabled(
+          page >=
+            pageCount -
+              1,
+        ),
+    );
+
+    components.push(
+      navigation,
+    );
   }
+
+  await interaction.editReply({
+    content:
+      `🏷️ **Give Role** — choose a configured role to give to <@${creator.id}>.`,
+    components,
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
+async function openRoleMenu(
+  interaction,
+) {
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
 
   try {
-    await creator.roles.add(role, `Ticket role given by ${interaction.user.tag}`);
+    const data =
+      await getLiveTicketData(
+        interaction.channel,
+      );
+
+    if (!data) {
+      await interaction.editReply({
+        content:
+          'This button can only be used inside a ticket channel.',
+        components: [],
+      });
+
+      return;
+    }
+
+    await showRoleMenu(
+      interaction,
+      data.creatorId,
+      0,
+    );
   } catch (error) {
-    console.error('[TICKET ROLE ERROR]', error);
-    await interaction.update({
-      content: 'I could not give that role. Check the bot role hierarchy and permissions.',
+    console.error(
+      '[TICKET ROLE MENU ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        '❌ I could not open the ticket role menu. Check the Render log for `[TICKET ROLE MENU ERROR]`.',
       components: [],
-    });
-    return;
+      allowedMentions: {
+        parse: [],
+      },
+    }).catch(() => {});
   }
+}
 
-  await interaction.update({
-    content: `✅ Gave **${role.name}** to <@${creator.id}>.`,
-    components: [],
-    allowedMentions: { parse: [] },
-  });
+async function changeRolePage(
+  interaction,
+) {
+  await interaction.deferUpdate();
 
-  await interaction.channel.send({
-    content: `<@${interaction.user.id}> gave **${role.name}** to <@${creator.id}>.`,
-    allowedMentions: { parse: [] },
-  });
+  try {
+    const [
+      ,
+      creatorId,
+      pageString,
+    ] =
+      interaction.customId.split(
+        ':',
+      );
+
+    const data =
+      await getLiveTicketData(
+        interaction.channel,
+      );
+
+    if (
+      !data ||
+      String(
+        data.creatorId,
+      ) !==
+        String(
+          creatorId,
+        )
+    ) {
+      await interaction.editReply({
+        content:
+          'This role menu is no longer valid for this ticket.',
+        components: [],
+      });
+
+      return;
+    }
+
+    await showRoleMenu(
+      interaction,
+      creatorId,
+      Number(
+        pageString,
+      ) || 0,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET ROLE PAGE ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        '❌ I could not change the role-menu page.',
+      components: [],
+    }).catch(() => {});
+  }
+}
+
+async function giveSelectedRole(
+  interaction,
+) {
+  await interaction.deferUpdate();
+
+  try {
+    const [
+      ,
+      creatorId,
+    ] =
+      interaction.customId.split(
+        ':',
+      );
+
+    const roleId =
+      String(
+        interaction.values?.[0] ||
+        '',
+      );
+
+    const data =
+      await getLiveTicketData(
+        interaction.channel,
+      );
+
+    if (
+      !data ||
+      String(
+        data.creatorId,
+      ) !==
+        String(
+          creatorId,
+        )
+    ) {
+      await interaction.editReply({
+        content:
+          'This role menu is no longer valid for this ticket.',
+        components: [],
+      });
+
+      return;
+    }
+
+    const {
+      guild,
+      actor,
+      creator,
+      botMember,
+      config,
+      roles,
+      error,
+    } =
+      await getAssignableTicketRoles(
+        interaction,
+        creatorId,
+      );
+
+    if (error) {
+      await interaction.editReply({
+        content:
+          error,
+        components: [],
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+
+    const role =
+      guild.roles.cache.get(
+        roleId,
+      );
+
+    if (
+      !role ||
+      !config?.roleIds
+        ?.map(String)
+        .includes(
+          roleId,
+        )
+    ) {
+      await interaction.editReply({
+        content:
+          'That role is no longer in the configured ticket-role list.',
+        components: [],
+      });
+
+      return;
+    }
+
+    const stillAssignable =
+      roles.some(
+        (candidate) =>
+          candidate.id ===
+          role.id,
+      ) &&
+      canActorManageMember(
+        guild,
+        actor,
+        creator,
+      ) &&
+      canActorGiveRole(
+        guild,
+        actor,
+        role,
+      ) &&
+      canBotGiveRole(
+        botMember,
+        role,
+      );
+
+    if (!stillAssignable) {
+      await interaction.editReply({
+        content:
+          'That role can no longer be assigned by you or by the bot.',
+        components: [],
+      });
+
+      return;
+    }
+
+    await creator.roles.add(
+      role,
+      `Ticket role given by ${interaction.user.tag}`,
+    );
+
+    await interaction.editReply({
+      content:
+        `✅ Gave **${role.name}** to <@${creator.id}>.`,
+      components: [],
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    await interaction.channel
+      .send({
+        content:
+          `<@${interaction.user.id}> gave **${role.name}** to <@${creator.id}>.`,
+        allowedMentions: {
+          parse: [],
+        },
+      })
+      .catch((error) => {
+        console.error(
+          '[TICKET ROLE PUBLIC NOTICE ERROR]',
+          error,
+        );
+      });
+  } catch (error) {
+    console.error(
+      '[TICKET ROLE ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        '❌ I could not give that role. Check the bot role hierarchy/permissions and the Render log.',
+      components: [],
+      allowedMentions: {
+        parse: [],
+      },
+    }).catch(() => {});
+  }
 }
 
 
