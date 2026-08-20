@@ -11,6 +11,9 @@ module.exports = {
     .setName('search')
     .setDescription('Search media by ID or open the skin/clan blacklist manager.')
     .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator,
+    )
+    .setDefaultMemberPermissions(
       PermissionFlagsBits.ViewAuditLog,
     )
     .addStringOption((option) =>
