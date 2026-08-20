@@ -5,6 +5,7 @@ const {
   EmbedBuilder,
   MessageFlags,
   PermissionFlagsBits,
+  Routes,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
 } = require('discord.js');
@@ -16,6 +17,11 @@ const PROTECTED_REACTION_BOT_ID = SOURCE_MEDIA_BOT_ID;
 const PAGE_SIZE = 5;
 const APPROVE_EMOJI = '✔️';
 const REJECT_EMOJI = '❌';
+
+// Discord's official Search Guild Messages endpoint returns up to 25 matches
+// per request. /search uses this instead of walking the entire channel.
+const DISCORD_SEARCH_PAGE_SIZE = 25;
+const DISCORD_SEARCH_MAX_OFFSET = 9975;
 
 const MEDIA_COLLECTION = 'skin_media_index';
 const BLACKLIST_COLLECTION = 'skin_blacklist';
@@ -868,7 +874,224 @@ async function assertSourceChannelPermissions(client) {
   return channel;
 }
 
-async function getRecords(mediaId) {
+function flattenDiscordSearchMessages(response) {
+  const groups =
+    Array.isArray(response?.messages)
+      ? response.messages
+      : [];
+
+  const messages = [];
+
+  for (const group of groups) {
+    if (Array.isArray(group)) {
+      for (const raw of group) {
+        if (raw?.id) messages.push(raw);
+      }
+    } else if (group?.id) {
+      messages.push(group);
+    }
+  }
+
+  return messages;
+}
+
+async function searchDiscordMediaById(
+  client,
+  mediaId,
+  {
+    offset = 0,
+    limit = DISCORD_SEARCH_PAGE_SIZE,
+  } = {},
+) {
+  const id = normalizeMediaId(mediaId);
+  const channel = await getReviewChannel(client);
+  const guildId = String(channel.guildId || channel.guild?.id || '');
+
+  if (!guildId) {
+    throw new Error(
+      'Could not determine the guild for the skin review channel.',
+    );
+  }
+
+  const query = new URLSearchParams();
+
+  // Search the exact 24-character ID in message content, while hard-locking
+  // results to the designated source channel and designated source bot.
+  query.append('content', id);
+  query.append('channel_id', SKIN_REVIEW_CHANNEL_ID);
+  query.append('author_id', SOURCE_MEDIA_BOT_ID);
+  query.append(
+    'limit',
+    String(
+      Math.min(
+        Math.max(Number(limit) || 1, 1),
+        DISCORD_SEARCH_PAGE_SIZE,
+      ),
+    ),
+  );
+  query.append(
+    'offset',
+    String(
+      Math.min(
+        Math.max(Number(offset) || 0, 0),
+        DISCORD_SEARCH_MAX_OFFSET,
+      ),
+    ),
+  );
+  query.append('sort_by', 'timestamp');
+  query.append('sort_order', 'desc');
+
+  let response;
+
+  try {
+    response = await client.rest.get(
+      Routes.guildMessagesSearch(guildId),
+      {
+        query,
+      },
+    );
+  } catch (error) {
+    // Discord can answer 202/110000 while a guild search index is still being
+    // prepared. Keep this explicit so /search can use Mongo/cache fallback.
+    const rawCode =
+      error?.rawError?.code ??
+      error?.code ??
+      null;
+
+    if (
+      Number(rawCode) === 110000 ||
+      Number(error?.status) === 202
+    ) {
+      const retryAfter =
+        Number(
+          error?.rawError?.retry_after ??
+          error?.retry_after ??
+          0,
+        ) || 0;
+
+      const indexingError = new Error(
+        'Discord search index is still being prepared.',
+      );
+
+      indexingError.discordSearchIndexing = true;
+      indexingError.retryAfter = retryAfter;
+      throw indexingError;
+    }
+
+    throw error;
+  }
+
+  const rawMessages =
+    flattenDiscordSearchMessages(response);
+
+  const parsedRecords = [];
+
+  for (const raw of rawMessages) {
+    if (
+      String(raw.channel_id || '') !== SKIN_REVIEW_CHANNEL_ID ||
+      String(raw.author?.id || '') !== SOURCE_MEDIA_BOT_ID
+    ) {
+      continue;
+    }
+
+    const entries =
+      parseMediaEntries(raw.content);
+
+    for (
+      let entryIndex = 0;
+      entryIndex < entries.length;
+      entryIndex += 1
+    ) {
+      const entry = entries[entryIndex];
+
+      if (entry.mediaId !== id) continue;
+
+      parsedRecords.push({
+        _id: `${raw.id}:${entryIndex}`,
+        guildId,
+        channelId:
+          SKIN_REVIEW_CHANNEL_ID,
+        messageId:
+          String(raw.id),
+        entryIndex,
+        authorId:
+          SOURCE_MEDIA_BOT_ID,
+        authorBot:
+          true,
+        mediaId:
+          entry.mediaId,
+        prefix:
+          entry.prefix,
+        typeKey:
+          entry.typeKey,
+        typeLabel:
+          entry.typeLabel,
+        typeEmoji:
+          entry.typeEmoji,
+        url:
+          entry.url,
+        raw:
+          entry.raw,
+        createdAt:
+          raw.timestamp
+            ? new Date(raw.timestamp)
+            : new Date(),
+        indexedAt:
+          new Date(),
+        source:
+          'discord_search',
+      });
+    }
+  }
+
+  // Search results do not contain reaction data, so each result is hydrated
+  // later with Get Channel Message. Upsert the lightweight record into MongoDB
+  // at the same time so blacklist/startup reconciliation still has an index.
+  if (parsedRecords.length) {
+    const { media } =
+      await collections();
+
+    await media.bulkWrite(
+      parsedRecords.map(
+        (record) => ({
+          replaceOne: {
+            filter: {
+              _id:
+                record._id,
+            },
+            replacement:
+              record,
+            upsert:
+              true,
+          },
+        }),
+      ),
+      {
+        ordered:
+          false,
+      },
+    );
+  }
+
+  return {
+    records:
+      parsedRecords,
+    totalResults:
+      Number(
+        response?.total_results,
+      ) || parsedRecords.length,
+    offset:
+      Number(offset) || 0,
+    rawResultCount:
+      rawMessages.length,
+    doingDeepHistoricalIndex:
+      Boolean(
+        response?.doing_deep_historical_index,
+      ),
+  };
+}
+
+async function getRecordsFromMongo(mediaId) {
   const id = normalizeMediaId(mediaId);
   const { media } = await collections();
 
@@ -878,8 +1101,101 @@ async function getRecords(mediaId) {
       channelId: SKIN_REVIEW_CHANNEL_ID,
       authorId: SOURCE_MEDIA_BOT_ID,
     })
-    .sort({ createdAt: -1, messageId: -1, entryIndex: 1 })
+    .sort({
+      createdAt: -1,
+      messageId: -1,
+      entryIndex: 1,
+    })
     .toArray();
+}
+
+async function getRecordsUsingDiscordSearch(
+  client,
+  mediaId,
+) {
+  const id = normalizeMediaId(mediaId);
+  const all = [];
+  const seenKeys = new Set();
+  let offset = 0;
+  let reportedTotal = null;
+
+  while (
+    offset <=
+    DISCORD_SEARCH_MAX_OFFSET
+  ) {
+    const result =
+      await searchDiscordMediaById(
+        client,
+        id,
+        {
+          offset,
+          limit:
+            DISCORD_SEARCH_PAGE_SIZE,
+        },
+      );
+
+    if (reportedTotal === null) {
+      reportedTotal =
+        result.totalResults;
+    }
+
+    for (
+      const record of result.records
+    ) {
+      const key =
+        `${record.messageId}:${record.entryIndex}`;
+
+      if (
+        seenKeys.has(key)
+      ) {
+        continue;
+      }
+
+      seenKeys.add(key);
+      all.push(record);
+    }
+
+    // Discord explicitly warns that result page length should not be used as
+    // the only pagination signal. Use total_results + 25-result offsets.
+    offset +=
+      DISCORD_SEARCH_PAGE_SIZE;
+
+    if (
+      reportedTotal !== null &&
+      offset >= reportedTotal
+    ) {
+      break;
+    }
+
+    if (
+      !result.rawResultCount
+    ) {
+      break;
+    }
+  }
+
+  all.sort(
+    (a, b) => {
+      const dateDifference =
+        new Date(b.createdAt).getTime() -
+        new Date(a.createdAt).getTime();
+
+      if (dateDifference) {
+        return dateDifference;
+      }
+
+      return compareSnowflakes(
+        b.messageId,
+        a.messageId,
+      );
+    },
+  );
+
+  return all;
+}
+
+async function getRecords(mediaId) {
+  return getRecordsFromMongo(mediaId);
 }
 
 function recordKey(record) {
@@ -956,7 +1272,31 @@ function searchCustomId(action, mediaId, page, extra = null) {
 
 async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey = null) {
   const id = normalizeMediaId(mediaId);
-  const records = await getRecords(id);
+  let records = [];
+  let searchSource = 'Discord Search';
+
+  try {
+    records = await getRecordsUsingDiscordSearch(
+      client,
+      id,
+    );
+  } catch (error) {
+    console.error(
+      '[SKIN REVIEW DISCORD SEARCH ERROR]',
+      error,
+    );
+
+    // Discord can temporarily return 202 while its search index is preparing,
+    // or REST search may be unavailable due to an API/indexing issue. The
+    // existing Mongo index remains a safe fallback rather than making /search
+    // unusable.
+    records = await getRecordsFromMongo(id);
+    searchSource =
+      error?.discordSearchIndexing
+        ? 'MongoDB cache (Discord indexing)'
+        : 'MongoDB cache (Discord search fallback)';
+  }
+
   const blacklisted = await isBlacklisted(id);
 
   if (!records.length) {
@@ -983,6 +1323,7 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
     .setDescription(
       `**ID:** \`${id}\`\n` +
         `**Found:** ${records.length} media item${records.length === 1 ? '' : 's'}\n` +
+        `**Source:** ${searchSource}\n` +
         `**Page:** ${page + 1}/${pageCount}\n` +
         `**Blacklist:** ${blacklisted ? '🚫 **BLACKLISTED**' : '✅ Not blacklisted'}` +
         (selectedKey ? `\n**Selected:** \`${selectedKey}\`` : ''),
