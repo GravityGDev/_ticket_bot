@@ -129,6 +129,14 @@ const TICKET_TYPES = {
     emoji: '💳',
     requiresInGameId: true,
   },
+  dev_test: {
+    label: 'Dev test ticket',
+    slug: 'dev-test',
+    emoji: '🧪',
+    requiresInGameId: false,
+    restrictedToAdministrators: true,
+    awardsClaimPoints: false,
+  },
 };
 
 const YOUTUBE_RANGES = {
@@ -338,24 +346,56 @@ function buildPanelMessage() {
   return { embeds: [embed], components: [row] };
 }
 
-function buildTicketTypeMenu() {
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId('ticket_create_type')
-    .setPlaceholder('What do you need help with?')
-    .setMinValues(1)
-    .setMaxValues(1)
-    .addOptions(
-      Object.entries(TICKET_TYPES).map(([value, type]) => ({
-        label: type.label,
-        value,
-        emoji: type.emoji,
-      })),
+function buildTicketTypeMenu(member) {
+  const canUseRestrictedTickets =
+    isTicketAdministrator(
+      member,
     );
 
+  const options =
+    Object.entries(
+      TICKET_TYPES,
+    )
+      .filter(
+        ([, type]) =>
+          !type.restrictedToAdministrators ||
+          canUseRestrictedTickets,
+      )
+      .map(
+        ([value, type]) => ({
+          label:
+            type.label,
+          value,
+          emoji:
+            type.emoji,
+        }),
+      );
+
+  const menu =
+    new StringSelectMenuBuilder()
+      .setCustomId(
+        'ticket_create_type',
+      )
+      .setPlaceholder(
+        'What do you need help with?',
+      )
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        options,
+      );
+
   return {
-    content: '**Create a ticket**\nSelect the type of ticket you want to open.',
-    components: [new ActionRowBuilder().addComponents(menu)],
-    flags: MessageFlags.Ephemeral,
+    content:
+      '**Create a ticket**\nSelect the type of ticket you want to open.',
+    components: [
+      new ActionRowBuilder()
+        .addComponents(
+          menu,
+        ),
+    ],
+    flags:
+      MessageFlags.Ephemeral,
   };
 }
 
@@ -446,6 +486,13 @@ function getTypeInstructions(typeKey) {
         'First submit your **in-game user ID** below.',
         'Once unlocked, explain the payment problem and provide any relevant receipt/order reference or screenshots.',
         '**Do not post full card numbers, passwords, or other sensitive payment details.**',
+      ].join('\n');
+    case 'dev_test':
+      return [
+        '**Dev test ticket**',
+        'This ticket is for testing the ticket system and staff workflow.',
+        'Claim, Assist, Add Staff, Handover, close/reopen, transcript, and permission behavior can be tested here.',
+        '**Claiming this ticket does not award staff claim points.**',
       ].join('\n');
     default:
       return 'Support will be with you shortly.';
@@ -2102,20 +2149,62 @@ async function createTicket(interaction, typeKey) {
     return;
   }
 
-  // Keep the public ticket panel/type menu untouched. The creator receives a
-  // private confirmation containing the newly-created channel mention.
-  await interaction.deferReply({
-    flags:
-      MessageFlags.Ephemeral,
-  });
+  // The ticket-type menu itself is ephemeral. Acknowledge the selection as an
+  // update so the existing menu message is replaced by the ticket-created
+  // confirmation instead of creating a separate reply.
+  await interaction.deferUpdate();
 
   const guild = interaction.guild;
   if (!guild) {
-    await interaction.editReply({ content: 'Tickets can only be created inside a server.', components: [] });
+    await interaction.editReply({
+      content:
+        'Tickets can only be created inside a server.',
+      components: [],
+    });
     return;
   }
 
-  const isReportStaff = typeKey === 'report_staff';
+  const selectedType =
+    TICKET_TYPES[
+      typeKey
+    ];
+
+  if (
+    selectedType
+      ?.restrictedToAdministrators
+  ) {
+    const member =
+      interaction.member ||
+      guild.members.cache.get(
+        interaction.user.id,
+      ) ||
+      (await guild.members
+        .fetch(
+          interaction.user.id,
+        )
+        .catch(() => null));
+
+    if (
+      !isTicketAdministrator(
+        member,
+      )
+    ) {
+      await interaction.editReply({
+        content:
+          '❌ This ticket type is only available to the bot developer, server owner, and Administrators.',
+        components: [],
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
+  }
+
+  const isReportStaff =
+    typeKey ===
+    'report_staff';
   let configuredCategoryId = REPORT_STAFF_CATEGORY_ID;
 
   if (!isReportStaff) {
@@ -6154,8 +6243,12 @@ async function claimTicketUnlocked(interaction) {
     );
 
     // First eligible non-creator claim gets the ticket stat. Handover never
-    // awards another claim point.
+    // awards another claim point. Dev test tickets deliberately award nothing.
     if (
+      TICKET_TYPES[
+        data.typeKey
+      ]?.awardsClaimPoints !==
+        false &&
       String(
         interaction.user.id,
       ) !==
@@ -6195,6 +6288,17 @@ async function claimTicketUnlocked(interaction) {
           );
         });
       }
+    }
+
+    if (
+      TICKET_TYPES[
+        data.typeKey
+      ]?.awardsClaimPoints ===
+        false
+    ) {
+      console.log(
+        `[TICKET CLAIM] Claim points skipped for test ticket #${data.number} (${data.typeKey}).`,
+      );
     }
 
     await refreshTicketControlMessage(
@@ -8151,7 +8255,19 @@ async function handleTicketMessageCreate(
 async function handleTicketInteraction(interaction) {
   if (interaction.isButton()) {
     if (interaction.customId === 'ticket_create') {
-      await interaction.reply(buildTicketTypeMenu());
+      const member =
+        interaction.member ||
+        interaction.guild?.members.cache.get(
+          interaction.user.id,
+        ) ||
+        null;
+
+      await interaction.reply(
+        buildTicketTypeMenu(
+          member,
+        ),
+      );
+
       return true;
     }
     if (interaction.customId === 'ticket_close') return closeTicket(interaction);
