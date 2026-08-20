@@ -31,6 +31,12 @@ const FILTER_APPROVED = 'approved';
 const FILTER_REJECTED = 'rejected';
 const BLACKLIST_MANAGER_PAGE_SIZE = 15;
 
+// Approved / Rejected are reaction-based filters. Discord Search gives us the
+// matching messages quickly but not their reactions, so cache the filtered
+// record keys briefly to make arrow-button browsing fast and stable.
+const STATUS_FILTER_CACHE_TTL_MS = 2 * 60 * 1000;
+const statusFilterCache = new Map();
+
 const FILTER_OPTIONS = [
   {
     value: FILTER_ALL,
@@ -1608,6 +1614,193 @@ function filterLabel(value) {
   );
 }
 
+function isStatusFilter(value) {
+  const filter =
+    normalizeSearchFilter(
+      value,
+    );
+
+  return (
+    filter === FILTER_APPROVED ||
+    filter === FILTER_REJECTED
+  );
+}
+
+function statusFilterCacheKey(
+  mediaId,
+  filterValue,
+) {
+  return (
+    `${normalizeMediaId(mediaId)}:` +
+    `${normalizeSearchFilter(filterValue)}`
+  );
+}
+
+function getCachedStatusFilter(
+  mediaId,
+  filterValue,
+) {
+  if (
+    !isStatusFilter(
+      filterValue,
+    )
+  ) {
+    return null;
+  }
+
+  const key =
+    statusFilterCacheKey(
+      mediaId,
+      filterValue,
+    );
+
+  const cached =
+    statusFilterCache.get(
+      key,
+    );
+
+  if (!cached) {
+    return null;
+  }
+
+  if (
+    Date.now() -
+      cached.createdAt >
+    STATUS_FILTER_CACHE_TTL_MS
+  ) {
+    statusFilterCache.delete(
+      key,
+    );
+
+    return null;
+  }
+
+  return cached;
+}
+
+function setCachedStatusFilter(
+  mediaId,
+  filterValue,
+  records,
+) {
+  if (
+    !isStatusFilter(
+      filterValue,
+    )
+  ) {
+    return;
+  }
+
+  const key =
+    statusFilterCacheKey(
+      mediaId,
+      filterValue,
+    );
+
+  statusFilterCache.set(
+    key,
+    {
+      createdAt:
+        Date.now(),
+      records:
+        records.map(
+          (record) => ({
+            recordKey:
+              recordKey(
+                record,
+              ),
+            reactionStatus:
+              record._reactionStatus ||
+              null,
+            reactionStatusLabel:
+              record._reactionStatusLabel ||
+              null,
+          }),
+        ),
+    },
+  );
+}
+
+function invalidateStatusFilterCache(
+  mediaId,
+) {
+  const id =
+    normalizeMediaId(
+      mediaId,
+    );
+
+  statusFilterCache.delete(
+    statusFilterCacheKey(
+      id,
+      FILTER_APPROVED,
+    ),
+  );
+
+  statusFilterCache.delete(
+    statusFilterCacheKey(
+      id,
+      FILTER_REJECTED,
+    ),
+  );
+}
+
+function applyCachedStatusFilter(
+  records,
+  cached,
+  filterValue,
+) {
+  if (
+    !cached?.records?.length
+  ) {
+    return [];
+  }
+
+  const sourceByKey =
+    new Map(
+      records.map(
+        (record) => [
+          recordKey(
+            record,
+          ),
+          record,
+        ],
+      ),
+    );
+
+  const expectedFilter =
+    normalizeSearchFilter(
+      filterValue,
+    );
+
+  const filtered = [];
+
+  for (
+    const cachedRecord of
+    cached.records
+  ) {
+    const source =
+      sourceByKey.get(
+        cachedRecord.recordKey,
+      );
+
+    if (!source) continue;
+
+    filtered.push({
+      ...source,
+      _reactionStatus:
+        cachedRecord.reactionStatus ||
+        expectedFilter,
+      _reactionStatusLabel:
+        cachedRecord.reactionStatusLabel ||
+        filterLabel(
+          expectedFilter,
+        ),
+    });
+  }
+
+  return filtered;
+}
+
 function recordMatchesFilter(record, filterValue) {
   const filter =
     normalizeSearchFilter(
@@ -1797,33 +1990,69 @@ async function buildSearchPanel(
     records.length;
 
   if (
-    activeFilter ===
-      FILTER_APPROVED ||
-    activeFilter ===
-      FILTER_REJECTED
+    isStatusFilter(
+      activeFilter,
+    )
   ) {
-    const statusStartedAt =
-      Date.now();
+    const cached =
+      getCachedStatusFilter(
+        id,
+        activeFilter,
+      );
 
-    records =
-      await hydrateRecordsForStatusFilter(
-        client,
+    if (cached) {
+      records =
+        applyCachedStatusFilter(
+          records,
+          cached,
+          activeFilter,
+        );
+
+      console.log(
+        `[SKIN SEARCH] Reused ${filterLabel(activeFilter)} browser snapshot ` +
+          `for ${id} with ${records.length} matching media item(s).`,
+      );
+    } else {
+      const statusStartedAt =
+        Date.now();
+
+      const hydratedRecords =
+        await hydrateRecordsForStatusFilter(
+          client,
+          records,
+        );
+
+      records =
+        hydratedRecords.filter(
+          (record) =>
+            recordMatchesFilter(
+              record,
+              activeFilter,
+            ),
+        );
+
+      setCachedStatusFilter(
+        id,
+        activeFilter,
         records,
       );
 
-    console.log(
-      `[SKIN SEARCH] Hydrated ${records.length} media reaction state(s) for ` +
-        `${filterLabel(activeFilter)} filter in ${Date.now() - statusStartedAt}ms.`,
-    );
+      console.log(
+        `[SKIN SEARCH] Built ${filterLabel(activeFilter)} browser snapshot ` +
+          `for ${id}: ${records.length}/${allRecordCount} matching item(s) ` +
+          `in ${Date.now() - statusStartedAt}ms.`,
+      );
+    }
+  } else {
+    records =
+      records.filter(
+        (record) =>
+          recordMatchesFilter(
+            record,
+            activeFilter,
+          ),
+      );
   }
-
-  records = records.filter(
-    (record) =>
-      recordMatchesFilter(
-        record,
-        activeFilter,
-      ),
-  );
 
   if (!allRecordCount) {
     return {
@@ -1850,9 +2079,9 @@ async function buildSearchPanel(
             .setTitle('🔎 Skin / Badge Search')
             .setDescription(
               `**ID:** \`${id}\`\n` +
-                `**Found:** ${allRecordCount} media item${allRecordCount === 1 ? '' : 's'}\n` +
+                `**Filtering:** ${FILTER_OPTIONS.find((option) => option.value === activeFilter)?.emoji || '🔎'} **${filterLabel(activeFilter)}**\n` +
+                `**Results:** 0 matching / ${allRecordCount} total\n` +
                 `**Source:** ${searchSource}\n` +
-                `**Filter:** ${filterLabel(activeFilter)}\n` +
                 `**Blacklist:** ${
                   blacklisted
                     ? `🚫 **${blacklistName}** | \`${id}\``
@@ -1864,7 +2093,9 @@ async function buildSearchPanel(
           new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder()
               .setCustomId(searchCustomId('filter', id, 0, activeFilter))
-              .setPlaceholder('Filter media type')
+              .setPlaceholder(
+      `Filtering: ${filterLabel(activeFilter)}`,
+    )
               .setMinValues(1)
               .setMaxValues(1)
               .addOptions(
@@ -1889,15 +2120,28 @@ async function buildSearchPanel(
   const pageRecords = records.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
   const hydrated = await hydratePageRecords(client, pageRecords);
 
+  const activeFilterOption =
+    FILTER_OPTIONS.find(
+      (option) =>
+        option.value ===
+        activeFilter,
+    );
+
+  const activeFilterEmoji =
+    activeFilterOption?.emoji ||
+    '🔎';
+
   const header = new EmbedBuilder()
     .setColor(blacklisted ? 0xed4245 : 0x5865f2)
-    .setTitle('🔎 Skin / Badge Search')
+    .setTitle(
+      `🔎 Skin / Badge Search • ${filterLabel(activeFilter)}`,
+    )
     .setDescription(
       `**ID:** \`${id}\`\n` +
-        `**Found:** ${records.length} media item${records.length === 1 ? '' : 's'} / ${allRecordCount} total\n` +
-        `**Source:** ${searchSource}\n` +
-        `**Filter:** ${filterLabel(activeFilter)}\n` +
+        `**Filtering:** ${activeFilterEmoji} **${filterLabel(activeFilter)}**\n` +
+        `**Results:** ${records.length} matching / ${allRecordCount} total\n` +
         `**Page:** ${page + 1}/${pageCount}\n` +
+        `**Source:** ${searchSource}\n` +
         `**Blacklist:** ${
           blacklisted
             ? `🚫 **${blacklistName}** | \`${id}\``
@@ -1961,7 +2205,9 @@ async function buildSearchPanel(
 
   const filterMenu = new StringSelectMenuBuilder()
     .setCustomId(searchCustomId('filter', id, page, activeFilter))
-    .setPlaceholder('Filter media type')
+    .setPlaceholder(
+      `Filtering: ${filterLabel(activeFilter)}`,
+    )
     .setMinValues(1)
     .setMaxValues(1)
     .addOptions(
@@ -2081,7 +2327,9 @@ async function buildSearchPanel(
           activeFilter,
         ),
       )
-      .setLabel(`Page ${page + 1}/${pageCount}`)
+      .setLabel(
+        `${filterLabel(activeFilter)} • ${page + 1}/${pageCount}`,
+      )
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(true),
     new ButtonBuilder()
@@ -3091,6 +3339,10 @@ async function handleSkinReviewInteraction(interaction, client) {
           selectedId,
         );
 
+        invalidateStatusFilterCache(
+          selectedId,
+        );
+
         const name =
           String(
             record?.clanName ||
@@ -3176,6 +3428,10 @@ async function handleSkinReviewInteraction(interaction, client) {
           interaction.user.id,
           clanName,
         );
+
+      invalidateStatusFilterCache(
+        mediaId,
+      );
 
       console.log(
         `[SKIN REVIEW] ${clanName} | ${mediaId} blacklisted by ` +
@@ -3352,7 +3608,19 @@ async function handleSkinReviewInteraction(interaction, client) {
         await rejectMessage(message);
       }
 
-      await rerenderInteraction(interaction, client, mediaId, page, extra, filterValue);
+      // The item may have moved between Pending / Approved / Rejected.
+      invalidateStatusFilterCache(
+        mediaId,
+      );
+
+      await rerenderInteraction(
+        interaction,
+        client,
+        mediaId,
+        page,
+        null,
+        filterValue,
+      );
       return true;
     }
 
@@ -3391,6 +3659,10 @@ async function handleSkinReviewInteraction(interaction, client) {
 
       await interaction.deferUpdate();
       await unblacklistMediaId(mediaId);
+
+      invalidateStatusFilterCache(
+        mediaId,
+      );
 
       console.log(
         `[SKIN REVIEW] ${mediaId} unblacklisted by ${interaction.user.id}.`,
