@@ -19,9 +19,9 @@ const STAR_MANAGEMENT_ROLES = Object.freeze({
 
 const PERIOD_LABELS = Object.freeze({
   lifetime: 'LIFETIME',
-  weekly: 'WEEKLY • LAST 7 DAYS',
-  monthly: 'MONTHLY • LAST 30 DAYS',
-  quarterly: 'QUARTERLY • LAST 90 DAYS',
+  weekly: 'WEEKLY • 7 DAYS',
+  monthly: 'MONTHLY • 30 DAYS',
+  quarterly: 'QUARTERLY • 90 DAYS',
 });
 
 function escapeXml(value) {
@@ -34,6 +34,11 @@ function escapeXml(value) {
 }
 
 function safeCardText(value, fallback = '') {
+  // Discord display names can contain Mathematical Unicode alphabets and emoji.
+  // librsvg/Sharp may render those as hex-code boxes when the host does not
+  // have the matching glyph font. NFKC converts most styled alphabets back to
+  // normal letters, then we remove emoji/symbol-only characters that are not
+  // reliable in server-side SVG fonts.
   const normalized = String(value ?? '')
     .normalize('NFKC')
     .replace(/\p{Extended_Pictographic}/gu, '')
@@ -56,10 +61,13 @@ function getStarLevel(member) {
 }
 
 function getWarningCount(member) {
-  return WARNING_ROLE_IDS.filter((roleId) => member.roles.cache.has(roleId)).length;
+  return WARNING_ROLE_IDS.filter((roleId) =>
+    member.roles.cache.has(roleId),
+  ).length;
 }
 
 function getXpState(tickets, messages, pointSettings) {
+  // Performance XP uses the same owner-editable weighting as Activity Score.
   const totalXp =
     tickets * pointSettings.ticketClaimPoints +
     messages * pointSettings.trackedMessagePoints;
@@ -97,17 +105,17 @@ async function fetchAvatarPng(member) {
 
     const buffer = Buffer.from(await response.arrayBuffer());
     return await sharp(buffer)
-      .resize(220, 220, { fit: 'cover' })
+      .resize(280, 280, { fit: 'cover' })
       .png()
       .toBuffer();
   } catch (error) {
     console.error('[RANK CARD AVATAR ERROR]', error);
 
     const fallback = Buffer.from(`
-      <svg width="220" height="220" xmlns="http://www.w3.org/2000/svg">
-        <rect width="220" height="220" rx="110" fill="#343944"/>
-        <circle cx="110" cy="86" r="40" fill="#717784"/>
-        <path d="M46 194c12-49 42-69 64-69s52 20 64 69" fill="#717784"/>
+      <svg width="280" height="280" xmlns="http://www.w3.org/2000/svg">
+        <rect width="280" height="280" rx="140" fill="#343944"/>
+        <circle cx="140" cy="108" r="52" fill="#717784"/>
+        <path d="M56 250c15-61 52-88 84-88s69 27 84 88" fill="#717784"/>
       </svg>
     `);
 
@@ -115,18 +123,23 @@ async function fetchAvatarPng(member) {
   }
 }
 
-async function getRankRows(guild, snapshot) {
+async function getRankRows(guild, snapshot, hiddenStaffUserIds = []) {
   try {
     await guild.members.fetch();
   } catch (error) {
     console.error('[RANK CARD MEMBER FETCH ERROR]', error);
   }
 
+  const hidden = new Set(
+    (hiddenStaffUserIds || []).map(String),
+  );
+
   return [...guild.members.cache.values()]
     .filter(
       (member) =>
         !member.user.bot &&
-        member.permissions.has(PermissionFlagsBits.ViewAuditLog),
+        member.permissions.has(PermissionFlagsBits.ViewAuditLog) &&
+        !hidden.has(member.id),
     )
     .map((member) => ({
       member,
@@ -145,37 +158,14 @@ async function getRankRows(guild, snapshot) {
     });
 }
 
-function buildStarMarkup(starLevel) {
-  if (starLevel === 2) {
-    return `
-      <polygon points="118,480 126,500 148,502 131,516 137,538 118,526 99,538 105,516 88,502 110,500" fill="#f7c948"/>
-      <polygon points="160,480 168,500 190,502 173,516 179,538 160,526 141,538 147,516 130,502 152,500" fill="#f7c948"/>
-    `;
-  }
+function posterNameFontSize(value) {
+  const length = String(value || '').length;
 
-  if (starLevel === 1) {
-    return `
-      <polygon points="118,480 126,500 148,502 131,516 137,538 118,526 99,538 105,516 88,502 110,500" fill="#f7c948"/>
-    `;
-  }
-
-  return `<circle cx="118" cy="510" r="16" fill="#64dfd2" opacity=".95"/>`;
-}
-
-function buildWarningMarkup(warningCount) {
-  if (warningCount > 0) {
-    return `
-      <polygon points="118,560 138,594 98,594" fill="#ffb65c"/>
-      <rect x="116" y="570" width="4" height="13" rx="2" fill="#171a21"/>
-      <circle cx="118" cy="588" r="2.5" fill="#171a21"/>
-    `;
-  }
-
-  return `
-    <circle cx="118" cy="577" r="20" fill="#79dda6"/>
-    <path d="M105 577l8 8 16-18" fill="none" stroke="#17221c"
-      stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  `;
+  if (length <= 10) return 76;
+  if (length <= 14) return 66;
+  if (length <= 18) return 58;
+  if (length <= 22) return 50;
+  return 44;
 }
 
 async function renderRankCard(guild, member, periodKey) {
@@ -183,31 +173,84 @@ async function renderRankCard(guild, member, periodKey) {
     getStaffSnapshot(guild.id, periodKey),
     getStaffTrackingSettings(guild.id),
   ]);
-  const rows = await getRankRows(guild, snapshot);
 
-  const rankIndex = rows.findIndex((row) => row.member.id === member.id);
-  const tickets = snapshot.claimCounts.get(member.id) || 0;
-  const messages = snapshot.messageCounts.get(member.id) || 0;
-  const rank = rankIndex >= 0 ? rankIndex + 1 : rows.length + 1;
-  const xp = getXpState(tickets, messages, pointSettings);
-  const starLevel = getStarLevel(member);
-  const warningCount = getWarningCount(member);
+  const hiddenStaffIds = new Set(
+    pointSettings.hiddenStaffUserIds || [],
+  );
+  const isRankHidden = hiddenStaffIds.has(member.id);
+
+  const rows = await getRankRows(
+    guild,
+    snapshot,
+    pointSettings.hiddenStaffUserIds,
+  );
+
+  const rankIndex = rows.findIndex(
+    (row) => row.member.id === member.id,
+  );
+
+  const tickets =
+    snapshot.claimCounts.get(member.id) || 0;
+
+  const messages =
+    snapshot.messageCounts.get(member.id) || 0;
+
+  const rank =
+    !isRankHidden && rankIndex >= 0
+      ? rankIndex + 1
+      : null;
+
+  const xp = getXpState(
+    tickets,
+    messages,
+    pointSettings,
+  );
+
+  const starLevel =
+    getStarLevel(member);
+
+  const warningCount =
+    getWarningCount(member);
+
   const score =
-    tickets * pointSettings.ticketClaimPoints +
-    messages * pointSettings.trackedMessagePoints;
+    tickets *
+      pointSettings.ticketClaimPoints +
+    messages *
+      pointSettings.trackedMessagePoints;
 
-  const avatarPng = await fetchAvatarPng(member);
-  const avatarData = `data:image/png;base64,${avatarPng.toString('base64')}`;
+  const avatarPng =
+    await fetchAvatarPng(member);
+
+  const avatarData =
+    `data:image/png;base64,${avatarPng.toString('base64')}`;
 
   const rawDisplayName =
-    member.displayName || member.user.globalName || member.user.username;
-  const displayName = escapeXml(
-    safeCardText(rawDisplayName, member.user.username).slice(0, 28),
-  );
-  const username = escapeXml(
-    `@${safeCardText(member.user.username, member.user.id).slice(0, 32)}`,
-  );
-  const period = escapeXml(PERIOD_LABELS[periodKey] || PERIOD_LABELS.lifetime);
+    member.displayName ||
+    member.user.globalName ||
+    member.user.username;
+
+  const normalizedDisplayName =
+    safeCardText(
+      rawDisplayName,
+      member.user.username,
+    ).slice(0, 28);
+
+  const displayName =
+    escapeXml(normalizedDisplayName);
+
+  const username =
+    escapeXml(
+      `@${safeCardText(
+        member.user.username,
+        member.user.id,
+      ).slice(0, 30)}`,
+    );
+
+  const period =
+    escapeXml(
+      PERIOD_LABELS[periodKey] ||
+        PERIOD_LABELS.lifetime,
+    );
 
   const starText =
     starLevel === 2
@@ -215,138 +258,562 @@ async function renderRankCard(guild, member, periodKey) {
       : starLevel === 1
         ? '1-STAR MANAGEMENT'
         : 'STAFF';
+
   const warningText =
     warningCount > 0
-      ? `${warningCount} WARNING ROLE${warningCount === 1 ? '' : 'S'}`
+      ? `${warningCount} WARNING ROLE${
+          warningCount === 1
+            ? ''
+            : 'S'
+        }`
       : 'NO WARNING ROLES';
 
-  const progressPercent = Math.round(xp.progress * 100);
-  const progressWidth = xp.progress > 0 ? Math.max(12, Math.round(962 * xp.progress)) : 0;
+  const progressPercent =
+    Math.round(
+      xp.progress * 100,
+    );
+
+  const progressWidth =
+    xp.progress > 0
+      ? Math.max(
+          12,
+          Math.round(
+            1280 * xp.progress,
+          ),
+        )
+      : 0;
+
+  const displayRank =
+    isRankHidden
+      ? 'RANK HIDDEN'
+      : `RANK #${rank}`;
+
+  const nameFontSize =
+    posterNameFontSize(
+      normalizedDisplayName,
+    );
+
+  const ticketPointLabel =
+    `${pointSettings.ticketClaimPoints} point${
+      pointSettings.ticketClaimPoints === 1
+        ? ''
+        : 's'
+    } per ticket claim`;
+
+  const messagePointLabel =
+    `${pointSettings.trackedMessagePoints} point${
+      pointSettings.trackedMessagePoints === 1
+        ? ''
+        : 's'
+    } per tracked message`;
+
+  const starMarkup =
+    starLevel === 2
+      ? `
+        <polygon points="106,570 117,596 145,598 123,616 131,644 106,628 81,644 89,616 67,598 95,596"
+                 fill="#f8c94d"/>
+        <polygon points="166,570 177,596 205,598 183,616 191,644 166,628 141,644 149,616 127,598 155,596"
+                 fill="#f8c94d"/>`
+      : starLevel === 1
+        ? `
+          <polygon points="132,570 143,596 171,598 149,616 157,644 132,628 107,644 115,616 93,598 121,596"
+                   fill="#f8c94d"/>`
+        : `
+          <circle cx="132" cy="610" r="20"
+                  fill="#43d9d0" opacity=".94"/>`;
+
+  const warningMarkup =
+    warningCount > 0
+      ? `
+        <polygon points="132,684 155,724 109,724"
+                 fill="#ffb65c"/>
+        <rect x="129" y="697" width="6" height="15"
+              rx="3" fill="#141821"/>
+        <circle cx="132" cy="718" r="3"
+                fill="#141821"/>`
+      : `
+        <circle cx="132" cy="704" r="28"
+                fill="none" stroke="#78dda5" stroke-width="6"/>
+        <path d="M116 704l11 11 23-25"
+              fill="none" stroke="#78dda5"
+              stroke-width="7" stroke-linecap="round"
+              stroke-linejoin="round"/>`;
 
   const svg = `
-  <svg width="1500" height="980" viewBox="0 0 1500 980"
+  <svg width="1536" height="1024"
+       viewBox="0 0 1536 1024"
        xmlns="http://www.w3.org/2000/svg">
+
     <defs>
-      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="#141821"/>
-        <stop offset="0.5" stop-color="#1a2028"/>
-        <stop offset="1" stop-color="#121620"/>
+      <linearGradient id="borderGradient" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#25e4dc"/>
+        <stop offset=".48" stop-color="#52b6ff"/>
+        <stop offset="1" stop-color="#a13cff"/>
       </linearGradient>
-      <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="#56e0d2"/>
-        <stop offset="1" stop-color="#8075ff"/>
+
+      <linearGradient id="accentGradient" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#26ddd6"/>
+        <stop offset=".52" stop-color="#55b8ff"/>
+        <stop offset="1" stop-color="#9a42ff"/>
       </linearGradient>
-      <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
-        <stop offset="0" stop-color="#50dccd"/>
-        <stop offset="0.55" stop-color="#6e8fff"/>
-        <stop offset="1" stop-color="#9a68ff"/>
+
+      <linearGradient id="backgroundGradient" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#07121f"/>
+        <stop offset=".48" stop-color="#07111d"/>
+        <stop offset="1" stop-color="#0b1024"/>
       </linearGradient>
-      <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-        <feDropShadow dx="0" dy="14" stdDeviation="18" flood-opacity=".35"/>
+
+      <linearGradient id="panelGradient" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#09192b"/>
+        <stop offset="1" stop-color="#090e1f"/>
+      </linearGradient>
+
+      <radialGradient id="rightGlow" cx="1" cy=".5" r=".75">
+        <stop offset="0" stop-color="#32296d" stop-opacity=".34"/>
+        <stop offset="1" stop-color="#08111f" stop-opacity="0"/>
+      </radialGradient>
+
+      <pattern id="dotPattern" width="16" height="16"
+               patternUnits="userSpaceOnUse">
+        <circle cx="2" cy="2" r="1.7"
+                fill="#58a6ff" opacity=".18"/>
+      </pattern>
+
+      <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="12"
+                      stdDeviation="20"
+                      flood-color="#000000"
+                      flood-opacity=".34"/>
       </filter>
+
+      <filter id="cyanGlow" x="-60%" y="-60%" width="220%" height="220%">
+        <feGaussianBlur stdDeviation="5" result="blur"/>
+        <feMerge>
+          <feMergeNode in="blur"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+
       <clipPath id="avatarClip">
-        <circle cx="170" cy="174" r="110"/>
+        <circle cx="226" cy="226" r="126"/>
       </clipPath>
-      <clipPath id="barClip">
-        <rect x="300" y="310" width="962" height="54" rx="27"/>
+
+      <clipPath id="progressClip">
+        <rect x="112" y="424" width="1312" height="64" rx="32"/>
       </clipPath>
     </defs>
 
-    <rect x="20" y="20" width="1460" height="940" rx="46"
-          fill="url(#bg)" filter="url(#shadow)"/>
+    <!-- Main poster -->
+    <rect x="16" y="16"
+          width="1504" height="992"
+          rx="40"
+          fill="url(#backgroundGradient)"
+          stroke="url(#borderGradient)"
+          stroke-width="3"/>
 
-    <path d="M1128 20H1434c25 0 46 21 46 46v848c0 25-21 46-46 46H1328L1082 20z"
-          fill="url(#accent)" opacity=".92"/>
-    <path d="M1120 20L1338 960" stroke="#ffffff" stroke-opacity=".09" stroke-width="3"/>
-    <path d="M0 0" stroke="none"/>
+    <rect x="18" y="18"
+          width="1500" height="988"
+          rx="38"
+          fill="url(#rightGlow)"/>
 
-    <circle cx="170" cy="174" r="126" fill="#10141c" stroke="url(#accent)" stroke-width="7"/>
-    <image href="${avatarData}" x="60" y="64" width="220" height="220"
-           preserveAspectRatio="xMidYMid slice" clip-path="url(#avatarClip)"/>
+    <!-- subtle diagonal background geometry -->
+    <path d="M0 0L240 0L0 250z"
+          fill="#0c2132" opacity=".42"/>
+    <path d="M1210 18H1517V340L1118 724L980 724L1450 245z"
+          fill="#16154a" opacity=".16"/>
+    <path d="M1010 1002L1518 494V1002z"
+          fill="#271160" opacity=".12"/>
+    <rect x="1290" y="20"
+          width="220" height="225"
+          fill="url(#dotPattern)"
+          opacity=".66"/>
 
-    <text x="300" y="120" font-family="Arial, Helvetica, sans-serif"
-          font-size="66" font-weight="700" fill="#ffffff">${displayName}</text>
-    <text x="302" y="168" font-family="Arial, Helvetica, sans-serif"
-          font-size="34" fill="#b3bac8">${username}</text>
+    <!-- avatar -->
+    <circle cx="226" cy="226" r="146"
+            fill="#040914"
+            stroke="url(#accentGradient)"
+            stroke-width="5"
+            filter="url(#softShadow)"/>
 
-    <rect x="1050" y="72" width="260" height="70" rx="35"
-          fill="#2a2f39" stroke="#4b5261" stroke-width="2"/>
-    <text x="1180" y="116" text-anchor="middle"
-          font-family="Arial, Helvetica, sans-serif" font-size="28"
-          font-weight="700" fill="#dde3ec">${period}</text>
+    <circle cx="226" cy="226" r="132"
+            fill="#060b16"
+            stroke="#ffffff"
+            stroke-opacity=".18"
+            stroke-width="2"/>
 
-    <text x="300" y="248" font-family="Arial, Helvetica, sans-serif"
-          font-size="56" font-weight="700" fill="#ffffff">LEVEL ${xp.level}</text>
-    <text x="520" y="248" font-family="Arial, Helvetica, sans-serif"
-          font-size="42" fill="#cfd5df">XP ${xp.currentXp.toLocaleString()} / ${xp.requiredXp.toLocaleString()}</text>
-    <text x="1088" y="248" font-family="Arial, Helvetica, sans-serif"
-          font-size="58" font-weight="700" fill="#ffffff">RANK #${rank}</text>
+    <image href="${avatarData}"
+           x="100" y="100"
+           width="252" height="252"
+           preserveAspectRatio="xMidYMid slice"
+           clip-path="url(#avatarClip)"/>
 
-    <text x="1262" y="292" text-anchor="end"
+    <!-- name -->
+    <text x="402" y="175"
           font-family="Arial, Helvetica, sans-serif"
-          font-size="28" font-weight="700" fill="#d2d8e2">${progressPercent}% TO NEXT LEVEL</text>
+          font-size="${nameFontSize}"
+          font-weight="800"
+          letter-spacing="1"
+          fill="#ffffff">${displayName}</text>
 
-    <rect x="300" y="310" width="962" height="54" rx="27"
-          fill="#0a0e16" stroke="#4a5160" stroke-width="3"/>
-    <g clip-path="url(#barClip)">
-      <rect x="300" y="310" width="${progressWidth}" height="54" fill="url(#bar)"/>
-      <rect x="300" y="310" width="${progressWidth}" height="14" fill="#ffffff" opacity=".12"/>
+    <text x="404" y="226"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="34"
+          fill="#9ba9bc">${username}</text>
+
+    <!-- period pill -->
+    <rect x="1210" y="93"
+          width="224" height="68"
+          rx="34"
+          fill="#09111f"
+          stroke="url(#accentGradient)"
+          stroke-width="2"/>
+
+    <text x="1322" y="137"
+          text-anchor="middle"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="28"
+          font-weight="800"
+          fill="#ffffff">${period}</text>
+
+    <!-- Level / rank -->
+    <text x="404" y="320"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="58"
+          font-weight="800">
+      <tspan fill="url(#accentGradient)">LEVEL</tspan>
+      <tspan fill="#ffffff"> ${xp.level}</tspan>
+    </text>
+
+    <text x="406" y="370"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="34"
+          fill="#adb8c8">
+      XP ${xp.currentXp.toLocaleString()} / ${xp.requiredXp.toLocaleString()}
+    </text>
+
+    <line x1="816" y1="276"
+          x2="816" y2="374"
+          stroke="#7f8998"
+          stroke-opacity=".55"
+          stroke-width="2"/>
+
+    <text x="927" y="323"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="${isRankHidden ? 48 : 58}"
+          font-weight="800"
+          fill="#ffffff">${escapeXml(displayRank)}</text>
+
+    <text x="927" y="370"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="30"
+          font-weight="700"
+          fill="#adb8c8">
+      ${progressPercent}% TO NEXT LEVEL
+    </text>
+
+    <!-- Progress bar -->
+    <rect x="94" y="407"
+          width="1348" height="98"
+          rx="34"
+          fill="#07101d"
+          stroke="#3b4658"
+          stroke-width="2"/>
+
+    <rect x="112" y="424"
+          width="1312" height="64"
+          rx="32"
+          fill="#040a13"
+          stroke="#2d3949"
+          stroke-width="2"/>
+
+    <g clip-path="url(#progressClip)">
+      <rect x="112" y="424"
+            width="${progressWidth}"
+            height="64"
+            fill="url(#accentGradient)"/>
+      <rect x="112" y="424"
+            width="${progressWidth}"
+            height="12"
+            fill="#ffffff"
+            opacity=".14"/>
     </g>
-    <rect x="300" y="310" width="962" height="54" rx="27"
-          fill="none" stroke="#ffffff" stroke-opacity=".14"/>
 
-    ${buildStarMarkup(starLevel)}
-    <text x="200" y="520"
+    <!-- Left status column -->
+    ${starMarkup}
+
+    <line x1="210" y1="571"
+          x2="210" y2="648"
+          stroke="#617084"
+          stroke-opacity=".55"/>
+
+    <text x="230" y="622"
           font-family="Arial, Helvetica, sans-serif"
-          font-size="34" font-weight="700" fill="#64dfd2">${escapeXml(starText)}</text>
+          font-size="30"
+          font-weight="800"
+          fill="#35dbd4">${escapeXml(starText)}</text>
 
-    ${buildWarningMarkup(warningCount)}
-    <text x="200" y="588" font-family="Arial, Helvetica, sans-serif"
-          font-size="34" font-weight="700"
-          fill="${warningCount ? '#ffb65c' : '#79dda6'}">${escapeXml(warningText)}</text>
+    <line x1="84" y1="663"
+          x2="516" y2="663"
+          stroke="#647083"
+          stroke-opacity=".35"/>
 
-    <text x="86" y="720" font-family="Arial, Helvetica, sans-serif"
-          font-size="28" fill="#7f8796">PERFORMANCE XP</text>
-    <text x="86" y="770" font-family="Arial, Helvetica, sans-serif"
-          font-size="52" font-weight="700" fill="#ffffff">${xp.totalXp.toLocaleString()} TOTAL XP</text>
+    ${warningMarkup}
 
-    <rect x="420" y="500" width="280" height="190" rx="28" fill="#2a2f3a"/>
-    <rect x="740" y="500" width="280" height="190" rx="28" fill="#2a2f3a"/>
-    <rect x="1060" y="500" width="280" height="190" rx="28" fill="#2a2f3a"/>
+    <line x1="210" y1="670"
+          x2="210" y2="738"
+          stroke="#617084"
+          stroke-opacity=".55"/>
 
-    <text x="454" y="560" font-family="Arial, Helvetica, sans-serif"
-          font-size="24" font-weight="700" fill="#98a1af">TICKETS CLAIMED</text>
-    <text x="454" y="640" font-family="Arial, Helvetica, sans-serif"
-          font-size="74" font-weight="700" fill="#ffffff">${tickets.toLocaleString()}</text>
-
-    <text x="774" y="560" font-family="Arial, Helvetica, sans-serif"
-          font-size="24" font-weight="700" fill="#98a1af">TRACKED MESSAGES</text>
-    <text x="774" y="640" font-family="Arial, Helvetica, sans-serif"
-          font-size="74" font-weight="700" fill="#ffffff">${messages.toLocaleString()}</text>
-
-    <text x="1094" y="560" font-family="Arial, Helvetica, sans-serif"
-          font-size="24" font-weight="700" fill="#98a1af">ACTIVITY SCORE</text>
-    <text x="1094" y="640" font-family="Arial, Helvetica, sans-serif"
-          font-size="74" font-weight="700" fill="#ffffff">${score.toLocaleString()}</text>
-
-    <rect x="420" y="735" width="920" height="130" rx="26" fill="#1f2530" stroke="#313846"/>
-    <text x="460" y="795" font-family="Arial, Helvetica, sans-serif"
-          font-size="28" font-weight="700" fill="#cfd6df">SCORING MODEL</text>
-    <text x="460" y="842" font-family="Arial, Helvetica, sans-serif"
-          font-size="30" fill="#aeb6c4">${pointSettings.ticketClaimPoints} point${pointSettings.ticketClaimPoints === 1 ? '' : 's'} per ticket claim • ${pointSettings.trackedMessagePoints} point${pointSettings.trackedMessagePoints === 1 ? '' : 's'} per tracked message</text>
-
-    <text x="1340" y="928" text-anchor="end"
+    <text x="230" y="716"
           font-family="Arial, Helvetica, sans-serif"
-          font-size="22" fill="#8992a1">Snay.io Staff Rank Poster</text>
+          font-size="30"
+          font-weight="800"
+          fill="${warningCount ? '#ffb65c' : '#78dda5'}">${escapeXml(warningText)}</text>
+
+    <line x1="84" y1="756"
+          x2="516" y2="756"
+          stroke="#647083"
+          stroke-opacity=".35"/>
+
+    <!-- Performance XP -->
+    <text x="94" y="823"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="26"
+          letter-spacing="1"
+          fill="#8291a7">PERFORMANCE XP</text>
+
+    <text x="94" y="895"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="64"
+          font-weight="800">
+      <tspan fill="url(#accentGradient)">${xp.totalXp.toLocaleString()}</tspan>
+      <tspan fill="#ffffff"> TOTAL XP</tspan>
+    </text>
+
+    <!-- Stat card: tickets -->
+    <rect x="551" y="535"
+          width="278" height="224"
+          rx="24"
+          fill="url(#panelGradient)"
+          stroke="url(#accentGradient)"
+          stroke-width="1.5"/>
+
+    <circle cx="620" cy="599" r="38"
+            fill="#081426"
+            stroke="url(#accentGradient)"
+            stroke-width="2"/>
+
+    <!-- ticket icon -->
+    <path d="M603 592l19-19 9 9 7-7 13 13-7 7 9 9-19 19-8-8-7 7-14-14 7-7z"
+          fill="none"
+          stroke="#26ded6"
+          stroke-width="3"
+          stroke-linejoin="round"/>
+
+    <text x="677" y="589"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="24"
+          font-weight="800"
+          fill="#ffffff">TICKETS</text>
+    <text x="677" y="621"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="24"
+          font-weight="800"
+          fill="#ffffff">CLAIMED</text>
+
+    <line x1="579" y1="658"
+          x2="800" y2="658"
+          stroke="url(#accentGradient)"
+          stroke-width="3"
+          stroke-dasharray="3 10"
+          stroke-linecap="round"/>
+
+    <text x="690" y="724"
+          text-anchor="middle"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="68"
+          font-weight="800"
+          fill="#ffffff">${tickets.toLocaleString()}</text>
+
+    <!-- Stat card: messages -->
+    <rect x="852" y="535"
+          width="278" height="224"
+          rx="24"
+          fill="url(#panelGradient)"
+          stroke="url(#accentGradient)"
+          stroke-width="1.5"/>
+
+    <circle cx="921" cy="599" r="38"
+            fill="#081426"
+            stroke="url(#accentGradient)"
+            stroke-width="2"/>
+
+    <!-- chat icon -->
+    <rect x="901" y="584"
+          width="40" height="29"
+          rx="7"
+          fill="none"
+          stroke="#31d9dc"
+          stroke-width="3"/>
+    <path d="M914 613l-8 10 1-10"
+          fill="none"
+          stroke="#31d9dc"
+          stroke-width="3"
+          stroke-linejoin="round"/>
+    <circle cx="912" cy="598" r="2.4" fill="#31d9dc"/>
+    <circle cx="921" cy="598" r="2.4" fill="#31d9dc"/>
+    <circle cx="930" cy="598" r="2.4" fill="#31d9dc"/>
+
+    <text x="978" y="589"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="23"
+          font-weight="800"
+          fill="#ffffff">TRACKED</text>
+    <text x="978" y="621"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="23"
+          font-weight="800"
+          fill="#ffffff">MESSAGES</text>
+
+    <line x1="880" y1="658"
+          x2="1101" y2="658"
+          stroke="url(#accentGradient)"
+          stroke-width="3"
+          stroke-dasharray="3 10"
+          stroke-linecap="round"/>
+
+    <text x="991" y="724"
+          text-anchor="middle"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="68"
+          font-weight="800"
+          fill="#ffffff">${messages.toLocaleString()}</text>
+
+    <!-- Stat card: score -->
+    <rect x="1153" y="535"
+          width="278" height="224"
+          rx="24"
+          fill="url(#panelGradient)"
+          stroke="url(#accentGradient)"
+          stroke-width="1.5"/>
+
+    <circle cx="1222" cy="599" r="38"
+            fill="#081426"
+            stroke="url(#accentGradient)"
+            stroke-width="2"/>
+
+    <!-- activity icon -->
+    <polyline points="1202,615 1217,600 1228,608 1244,589"
+              fill="none"
+              stroke="#4ab8ff"
+              stroke-width="5"
+              stroke-linecap="round"
+              stroke-linejoin="round"/>
+    <polyline points="1235,589 1244,589 1244,598"
+              fill="none"
+              stroke="#4ab8ff"
+              stroke-width="5"
+              stroke-linecap="round"
+              stroke-linejoin="round"/>
+
+    <text x="1278" y="589"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="22"
+          font-weight="800"
+          fill="#ffffff">ACTIVITY</text>
+    <text x="1278" y="621"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="22"
+          font-weight="800"
+          fill="#ffffff">SCORE</text>
+
+    <line x1="1181" y1="658"
+          x2="1402" y2="658"
+          stroke="url(#accentGradient)"
+          stroke-width="3"
+          stroke-dasharray="3 10"
+          stroke-linecap="round"/>
+
+    <text x="1292" y="724"
+          text-anchor="middle"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="68"
+          font-weight="800"
+          fill="#ffffff">${score.toLocaleString()}</text>
+
+    <!-- Scoring model -->
+    <rect x="551" y="779"
+          width="880" height="133"
+          rx="24"
+          fill="url(#panelGradient)"
+          stroke="url(#accentGradient)"
+          stroke-width="1.5"/>
+
+    <circle cx="619" cy="845"
+            r="38"
+            fill="#081426"
+            stroke="url(#accentGradient)"
+            stroke-width="2"/>
+
+    <!-- target icon -->
+    <circle cx="619" cy="845" r="18"
+            fill="none" stroke="#668cff" stroke-width="4"/>
+    <circle cx="619" cy="845" r="7"
+            fill="none" stroke="#32d9d5" stroke-width="4"/>
+    <line x1="619" y1="819" x2="619" y2="829"
+          stroke="#668cff" stroke-width="4"/>
+    <line x1="619" y1="861" x2="619" y2="871"
+          stroke="#668cff" stroke-width="4"/>
+    <line x1="593" y1="845" x2="603" y2="845"
+          stroke="#668cff" stroke-width="4"/>
+    <line x1="635" y1="845" x2="645" y2="845"
+          stroke="#668cff" stroke-width="4"/>
+
+    <text x="688" y="829"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="28"
+          font-weight="800"
+          fill="#ffffff">SCORING MODEL</text>
+
+    <text x="688" y="868"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="25"
+          fill="#aeb9c9">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}</text>
+
+    <!-- footer -->
+    <line x1="84" y1="958"
+          x2="516" y2="958"
+          stroke="#728096"
+          stroke-opacity=".45"/>
+
+    <line x1="1000" y1="958"
+          x2="1432" y2="958"
+          stroke="#728096"
+          stroke-opacity=".45"/>
+
+    <!-- small brand mark -->
+    <path d="M604 939l23-14 22 0-22 14-23 0zm0 0v22l23 0 22-14h-22v-8z"
+          fill="url(#accentGradient)"/>
+
+    <text x="668" y="966"
+          font-family="Arial, Helvetica, sans-serif"
+          font-size="25"
+          fill="#8996aa">Snay.io Staff Rank Poster</text>
+
   </svg>`;
 
-  return sharp(Buffer.from(svg)).png().toBuffer();
+  return sharp(
+    Buffer.from(svg),
+  )
+    .png({
+      compressionLevel: 9,
+    })
+    .toBuffer();
 }
 
 async function sendRankCard(
   interaction,
   periodKey = 'lifetime',
-  targetUser = null,
 ) {
   if (!interaction.inGuild()) {
     await interaction.reply({
@@ -360,7 +827,10 @@ async function sendRankCard(
     .fetch(interaction.user.id)
     .catch(() => null);
 
-  if (!requester || !requester.permissions.has(PermissionFlagsBits.ViewAuditLog)) {
+  if (
+    !requester ||
+    !requester.permissions.has(PermissionFlagsBits.ViewAuditLog)
+  ) {
     await interaction.reply({
       content: 'This command is available to staff with **View Audit Log** permission.',
       flags: MessageFlags.Ephemeral,
@@ -368,7 +838,17 @@ async function sendRankCard(
     return;
   }
 
-  const targetId = targetUser?.id || interaction.user.id;
+  // Read the selected target directly from the slash-command interaction.
+  // This avoids any argument-order/version mismatch between command files and
+  // the rank-card helper.
+  const selectedUser = interaction.options?.getUser('staff') || null;
+  const targetId = selectedUser?.id || interaction.user.id;
+
+  console.log(
+    `[RANK] Requested by ${interaction.user.id}; target=${targetId}; ` +
+      `period=${periodKey}`,
+  );
+
   const member = await interaction.guild.members
     .fetch(targetId)
     .catch(() => null);
@@ -379,16 +859,30 @@ async function sendRankCard(
     !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
   ) {
     await interaction.reply({
-      content: 'That user is not a tracked staff member with **View Audit Log** permission.',
-      flags: MessageFlags.Ephemeral,
+      content: `This user isn't Snay.io staff.`,
+      allowedMentions: { parse: [] },
     });
+
+    setTimeout(() => {
+      interaction.deleteReply().catch(() => {});
+    }, 3000);
+
     return;
   }
 
   await interaction.deferReply();
 
   try {
-    const card = await renderRankCard(interaction.guild, member, periodKey);
+    const card = await renderRankCard(
+      interaction.guild,
+      member,
+      periodKey,
+    );
+
+    console.log(
+      `[RANK] Generated card for ${member.user.tag} (${member.id}) ` +
+        `requested by ${interaction.user.tag} (${interaction.user.id}).`,
+    );
 
     await interaction.editReply({
       files: [
