@@ -27,6 +27,7 @@ const { getNextTicketNumber } = require('./ticket-counter-store');
 const { recordTicketClaim } = require('./staff-tracking-store');
 const { evaluateStaffGoalsForMember } = require('./staff-settings');
 const {
+  STAFF_ROLE_IDS,
   getHighestStaffRoleIndex,
   isStaffMember,
   isBotDeveloper,
@@ -50,6 +51,11 @@ const ASSIST_STAFF_PAGE_SIZE = 23;
 // of truth, but this prevents a just-added assistant's first message from being
 // deleted if the next state read is briefly stale.
 const ticketAssistantAccessCache = new Map();
+
+const TICKET_STATE_CACHE_TTL_MS = 30 * 1000;
+const STAFF_MEMBER_CACHE_TTL_MS = 60 * 1000;
+const liveTicketStateCache = new Map();
+const guildTicketStaffCache = new Map();
 const REPORT_STAFF_SECURITY_LOG_CHANNEL_ID =
   process.env.REPORT_STAFF_SECURITY_LOG_CHANNEL_ID || '1150135578378125383';
 const TRANSCRIPT_LOG_CHANNEL_ID =
@@ -766,6 +772,64 @@ function hasCachedTicketAssistant(
   );
 }
 
+function setLiveTicketStateCache(channelId, data) {
+  liveTicketStateCache.set(
+    String(channelId),
+    {
+      data,
+      cachedAt: Date.now(),
+    },
+  );
+}
+
+function getLiveTicketStateCache(channelId) {
+  const key = String(channelId);
+  const cached = liveTicketStateCache.get(key);
+
+  if (!cached) {
+    return null;
+  }
+
+  if (
+    Date.now() - cached.cachedAt >
+    TICKET_STATE_CACHE_TTL_MS
+  ) {
+    liveTicketStateCache.delete(key);
+    return null;
+  }
+
+  return cached.data;
+}
+
+function getCachedGuildTicketStaff(guildId) {
+  const key = String(guildId);
+  const cached = guildTicketStaffCache.get(key);
+
+  if (!cached) {
+    return null;
+  }
+
+  if (
+    Date.now() - cached.cachedAt >
+    STAFF_MEMBER_CACHE_TTL_MS
+  ) {
+    guildTicketStaffCache.delete(key);
+    return null;
+  }
+
+  return cached.members;
+}
+
+function setCachedGuildTicketStaff(guildId, members) {
+  guildTicketStaffCache.set(
+    String(guildId),
+    {
+      members,
+      cachedAt: Date.now(),
+    },
+  );
+}
+
 function isTicketStaffMember(member) {
   return Boolean(
     member &&
@@ -785,53 +849,71 @@ async function getTicketStaffMembers(
   guild,
   creatorId = null,
 ) {
-  await guild.members
-    .fetch()
-    .catch((error) => {
-      console.error(
-        '[TICKET STAFF FETCH ERROR]',
-        error,
-      );
-    });
+  let staffMembers =
+    getCachedGuildTicketStaff(
+      guild.id,
+    );
 
-  return [
-    ...guild.members.cache.values(),
-  ]
-    .filter(
-      (member) =>
-        isTicketStaffMember(
-          member,
-        ) &&
-        String(member.id) !==
-          String(creatorId || ''),
-    )
-    .sort((a, b) => {
-      const levelDifference =
-        getHighestStaffRoleIndex(
-          b,
-        ) -
-        getHighestStaffRoleIndex(
-          a,
-        );
+  if (!staffMembers) {
+    if (
+      guild.members.cache.size <
+      2
+    ) {
+      await guild.members
+        .fetch()
+        .catch((error) => {
+          console.error(
+            '[TICKET STAFF FETCH ERROR]',
+            error,
+          );
+        });
+    }
 
-      if (levelDifference) {
-        return levelDifference;
-      }
+    staffMembers =
+      [
+        ...guild.members.cache.values(),
+      ]
+        .filter(
+          (member) =>
+            isTicketStaffMember(
+              member,
+            ),
+        )
+        .sort((a, b) => {
+          const levelDifference =
+            getHighestStaffRoleIndex(b) -
+            getHighestStaffRoleIndex(a);
 
-      return (
-        a.displayName ||
-        a.user.username
-      ).localeCompare(
-        b.displayName ||
-          b.user.username,
-        undefined,
-        {
-          sensitivity:
-            'base',
-        },
-      );
-    });
+          if (levelDifference) {
+            return levelDifference;
+          }
+
+          return (
+            a.displayName ||
+            a.user.username
+          ).localeCompare(
+            b.displayName ||
+            b.user.username,
+            undefined,
+            {
+              sensitivity: 'base',
+            },
+          );
+        });
+
+    setCachedGuildTicketStaff(
+      guild.id,
+      staffMembers,
+    );
+  }
+
+  return staffMembers.filter(
+    (member) =>
+      String(member.id) !==
+      String(creatorId || ''),
+  );
 }
+
 
 async function setTicketStaffTyping(
   channel,
@@ -962,84 +1044,43 @@ async function applyTicketStaffTypingState(
     return;
   }
 
-  const staffMembers =
-    await getTicketStaffMembers(
-      channel.guild,
-      data.creatorId,
-    );
+  const allowedIds = [
+    ...new Set([
+      data.claimedById
+        ? String(data.claimedById)
+        : null,
+      ...(
+        Array.isArray(data.assistStaffIds)
+          ? data.assistStaffIds.map(String)
+          : []
+      ),
+    ].filter(Boolean)),
+  ];
 
-  const assistants =
-    new Set(
-      Array.isArray(
-        data.assistStaffIds,
-      )
-        ? data.assistStaffIds.map(
-            String,
-          )
-        : [],
-    );
+  await Promise.all(
+    allowedIds.map(
+      async (staffId) => {
+        await setTicketStaffTyping(
+          channel,
+          staffId,
+          true,
+          reason,
+        );
 
-  for (
-    const member of
-    staffMembers
-  ) {
-    const canTalk =
-      isTicketAdministrator(
-        member,
-      ) ||
-      String(member.id) ===
-        String(
-          data.claimedById ||
-            '',
-        ) ||
-      assistants.has(
-        String(member.id),
-      );
-
-    await setTicketStaffTyping(
-      channel,
-      member.id,
-      canTalk,
-      reason,
-    ).catch((error) => {
-      console.error(
-        `[TICKET STAFF PERMISSION SYNC ERROR] ${member.id}`,
-        error,
-      );
-    });
-
-    if (
-      assistants.has(
-        String(
-          member.id,
-        ),
-      )
-    ) {
-      cacheTicketAssistants(
-        channel.id,
-        [
-          member.id,
-        ],
-      );
-    } else if (
-      String(
-        member.id,
-      ) !==
-        String(
-          data.claimedById ||
-          '',
-        ) &&
-      !isTicketAdministrator(
-        member,
-      )
-    ) {
-      removeCachedTicketAssistant(
-        channel.id,
-        member.id,
-      );
-    }
-  }
+        if (
+          staffId !==
+          String(data.claimedById || '')
+        ) {
+          cacheTicketAssistants(
+            channel.id,
+            [staffId],
+          );
+        }
+      },
+    ),
+  );
 }
+
 
 async function deletePinNotification(
   channel,
@@ -1143,11 +1184,16 @@ async function pinTicketControlMessage(
       'Pinned ticket controls',
     );
 
-    await deletePinNotification(
+    deletePinNotification(
       message.channel,
       message,
       pinStartedAt,
-    );
+    ).catch((error) => {
+      console.error(
+        '[TICKET PIN NOTICE BACKGROUND CLEANUP ERROR]',
+        error,
+      );
+    });
   } catch (error) {
     console.error(
       '[TICKET CONTROL PIN ERROR]',
@@ -1697,13 +1743,18 @@ function getTicketData(channel) {
   };
 }
 
-async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket data updated') {
-  // Historical function name retained to minimise churn in the ticket workflow.
-  // It now stores mutable ticket state in MongoDB instead of editing the
-  // Discord channel topic.
-  const next = { ...data, ...patch };
+async function updateTicketTopic(
+  channel,
+  data,
+  patch = {},
+  reason = 'Ticket data updated',
+) {
+  const next = {
+    ...data,
+    ...patch,
+  };
 
-  await setTicketState(channel.id, {
+  const storedState = {
     guildId: channel.guildId,
     number: next.number,
     typeKey: next.typeKey,
@@ -1733,24 +1784,71 @@ async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket dat
     closedAt: next.closedAt || null,
     updatedAt: new Date().toISOString(),
     updateReason: reason,
-  });
+  };
 
-  return next;
+  await setTicketState(
+    channel.id,
+    storedState,
+  );
+
+  const cachedNext = {
+    ...next,
+    ...storedState,
+  };
+
+  setLiveTicketStateCache(
+    channel.id,
+    cachedNext,
+  );
+
+  return cachedNext;
 }
 
+
 async function getLiveTicketData(channel) {
-  const base = getTicketData(channel);
-  if (!base) return null;
+  const base =
+    getTicketData(
+      channel,
+    );
 
-  try {
-    const stored = await getTicketState(channel.id);
-    if (!stored) return base;
+  if (!base) {
+    return null;
+  }
 
+  const cached =
+    getLiveTicketStateCache(
+      channel.id,
+    );
+
+  if (cached) {
     return {
       ...base,
-      claimedById: stored.claimedById ?? base.claimedById,
+      ...cached,
+    };
+  }
+
+  try {
+    const stored =
+      await getTicketState(
+        channel.id,
+      );
+
+    if (!stored) {
+      setLiveTicketStateCache(
+        channel.id,
+        base,
+      );
+      return base;
+    }
+
+    const live = {
+      ...base,
+      claimedById:
+        stored.claimedById ??
+        base.claimedById,
       claimHistory:
-        Array.isArray(stored.claimHistory) && stored.claimHistory.length
+        Array.isArray(stored.claimHistory) &&
+        stored.claimHistory.length
           ? stored.claimHistory
           : base.claimHistory,
       assistStaffIds:
@@ -1766,55 +1864,52 @@ async function getLiveTicketData(channel) {
           ? stored.handoverHistory
           : base.handoverHistory,
       pendingHandover:
-        stored.pendingHandover || base.pendingHandover,
+        stored.pendingHandover ||
+        base.pendingHandover,
       controlMessageId:
-        stored.controlMessageId || base.controlMessageId,
-      inGameIdStatus: stored.inGameIdStatus || base.inGameIdStatus,
-      youtubeStatus: stored.youtubeStatus || base.youtubeStatus,
+        stored.controlMessageId ||
+        base.controlMessageId,
+      inGameIdStatus:
+        stored.inGameIdStatus ||
+        base.inGameIdStatus,
+      youtubeStatus:
+        stored.youtubeStatus ||
+        base.youtubeStatus,
       staffSelectionStatus:
-        stored.staffSelectionStatus || base.staffSelectionStatus,
-      reportedStaffId: stored.reportedStaffId || base.reportedStaffId,
-      unmuteDecision: stored.unmuteDecision || base.unmuteDecision,
-      unmuteDecisionBy: stored.unmuteDecisionBy || base.unmuteDecisionBy,
-      closedById: stored.closedById || base.closedById,
-      closedAt: stored.closedAt || base.closedAt,
+        stored.staffSelectionStatus ||
+        base.staffSelectionStatus,
+      reportedStaffId:
+        stored.reportedStaffId ||
+        base.reportedStaffId,
+      unmuteDecision:
+        stored.unmuteDecision ||
+        base.unmuteDecision,
+      unmuteDecisionBy:
+        stored.unmuteDecisionBy ||
+        base.unmuteDecisionBy,
+      closedById:
+        stored.closedById ||
+        base.closedById,
+      closedAt:
+        stored.closedAt ||
+        base.closedAt,
     };
+
+    setLiveTicketStateCache(
+      channel.id,
+      live,
+    );
+
+    return live;
   } catch (error) {
-    console.error('[TICKET STATE READ ERROR]', error);
+    console.error(
+      '[TICKET STATE READ ERROR]',
+      error,
+    );
     return base;
   }
 }
 
-async function runTicketCreationQueued(guildId, task) {
-  const previous = ticketCreationQueues.get(guildId) || Promise.resolve();
-  let release;
-  const blocker = new Promise((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.catch(() => {}).then(() => blocker);
-  ticketCreationQueues.set(guildId, queued);
-
-  await previous.catch(() => {});
-
-  try {
-    return await task();
-  } finally {
-    release();
-    if (ticketCreationQueues.get(guildId) === queued) {
-      ticketCreationQueues.delete(guildId);
-    }
-  }
-}
-
-
-function mergeOverwrite(map, id, type, allowBits = 0n, denyBits = 0n) {
-  const existing = map.get(id) || { id, type, allow: 0n, deny: 0n };
-
-  existing.allow = (existing.allow | allowBits) & ~denyBits;
-  existing.deny = (existing.deny | denyBits) & ~allowBits;
-
-  map.set(id, existing);
-}
 
 function buildTicketPermissionOverwrites(
   guild,
@@ -1822,17 +1917,22 @@ function buildTicketPermissionOverwrites(
   creatorId,
   botId,
   creatorCanSend,
-  staffMembers = [],
 ) {
   const overwriteMap = new Map();
 
-  for (const overwrite of category.permissionOverwrites.cache.values()) {
-    overwriteMap.set(overwrite.id, {
-      id: overwrite.id,
-      type: overwrite.type,
-      allow: overwrite.allow.bitfield,
-      deny: overwrite.deny.bitfield,
-    });
+  for (
+    const overwrite of
+    category.permissionOverwrites.cache.values()
+  ) {
+    overwriteMap.set(
+      overwrite.id,
+      {
+        id: overwrite.id,
+        type: overwrite.type,
+        allow: overwrite.allow.bitfield,
+        deny: overwrite.deny.bitfield,
+      },
+    );
   }
 
   mergeOverwrite(
@@ -1843,71 +1943,68 @@ function buildTicketPermissionOverwrites(
     PermissionFlagsBits.ViewChannel,
   );
 
-  const baseTicketMemberPermissions =
+  const basePermissions =
     PermissionFlagsBits.ViewChannel |
     PermissionFlagsBits.ReadMessageHistory |
     PermissionFlagsBits.AttachFiles |
-    PermissionFlagsBits.EmbedLinks;
+    PermissionFlagsBits.EmbedLinks |
+    PermissionFlagsBits.AddReactions |
+    PermissionFlagsBits.UseApplicationCommands;
 
-  const creatorAllow = creatorCanSend
-    ? baseTicketMemberPermissions | PermissionFlagsBits.SendMessages
-    : baseTicketMemberPermissions;
-  const creatorDeny = creatorCanSend ? 0n : PermissionFlagsBits.SendMessages;
+  mergeOverwrite(
+    overwriteMap,
+    creatorId,
+    1,
+    creatorCanSend
+      ? (
+          basePermissions |
+          PermissionFlagsBits.SendMessages
+        )
+      : basePermissions,
+    creatorCanSend
+      ? 0n
+      : PermissionFlagsBits.SendMessages,
+  );
 
-  mergeOverwrite(overwriteMap, creatorId, 1, creatorAllow, creatorDeny);
+  mergeOverwrite(
+    overwriteMap,
+    botId,
+    1,
+    basePermissions |
+      PermissionFlagsBits.SendMessages |
+      PermissionFlagsBits.ManageChannels |
+      PermissionFlagsBits.ManageMessages |
+      PermissionFlagsBits.PinMessages,
+    0n,
+  );
 
-  const botPermissions =
-    baseTicketMemberPermissions |
-    PermissionFlagsBits.SendMessages |
-    PermissionFlagsBits.ManageChannels |
-    PermissionFlagsBits.ManageMessages |
-    PermissionFlagsBits.PinMessages;
-  mergeOverwrite(overwriteMap, botId, 1, botPermissions, 0n);
-
-  // Staff may see the ticket immediately, but every individual staff member is
-  // explicitly denied SendMessages until they are the claimer or an assistant.
-  //
-  // A member overwrite is deliberate: it overrides category/role SendMessages
-  // grants. Discord Administrator still bypasses overwrites, so messageCreate
-  // enforcement below provides the second enforcement layer for admins.
-  for (const member of staffMembers) {
+  // Only nine role overwrites instead of one overwrite per staff member.
+  for (
+    const roleId of
+    STAFF_ROLE_IDS
+  ) {
     if (
-      String(member.id) ===
-        String(creatorId) ||
-      String(member.id) ===
-        String(botId)
-    ) {
-      continue;
-    }
-
-    if (
-      isTicketAdministrator(
-        member,
+      !guild.roles.cache.has(
+        roleId,
       )
     ) {
-      mergeOverwrite(
-        overwriteMap,
-        member.id,
-        1,
-        baseTicketMemberPermissions |
-          PermissionFlagsBits.SendMessages,
-        0n,
-      );
-
       continue;
     }
 
     mergeOverwrite(
       overwriteMap,
-      member.id,
-      1,
-      baseTicketMemberPermissions,
+      roleId,
+      0,
+      basePermissions,
       PermissionFlagsBits.SendMessages,
     );
   }
 
-  return [...overwriteMap.values()];
+  return [
+    ...overwriteMap.values(),
+  ];
 }
+
 
 function shouldCreatorBeUnlocked(data) {
   if (
@@ -2113,14 +2210,6 @@ async function createTicket(interaction, typeKey) {
     const state = initialSubmissionState(typeKey);
     const creatorCanSend = shouldCreatorBeUnlocked({ typeKey, ...state });
 
-    const ticketStaffMembers =
-      isReportStaff
-        ? []
-        : await getTicketStaffMembers(
-            guild,
-            interaction.user.id,
-          );
-
     const permissionOverwrites = isReportStaff
       ? buildReportStaffPermissionOverwrites(
           guild,
@@ -2133,7 +2222,6 @@ async function createTicket(interaction, typeKey) {
           interaction.user.id,
           botMember.id,
           creatorCanSend,
-          ticketStaffMembers,
         );
 
     let channel;
@@ -6370,9 +6458,17 @@ async function openAssistMenu(
     });
   }
 
-  // Repair/synchronise ownership overwrites after the interaction is safely
-  // acknowledged. This also repairs assistants on older active tickets.
-  await applyTicketStaffTypingState(
+  const payload =
+    buildAssistActionMenu();
+
+  delete payload.flags;
+
+  await interaction.editReply(
+    payload,
+  );
+
+  // Repair after the menu is already visible.
+  applyTicketStaffTypingState(
     interaction.channel,
     data,
     `Assist menu permission sync by ${interaction.user.tag}`,
@@ -6382,15 +6478,6 @@ async function openAssistMenu(
       error,
     );
   });
-
-  const payload =
-    buildAssistActionMenu();
-
-  delete payload.flags;
-
-  await interaction.editReply(
-    payload,
-  );
 }
 
 async function getEligibleAssistStaff(
@@ -6810,57 +6897,17 @@ async function addAssistStaff(
       validIds,
     );
 
-    // Re-sync every ticket staff member. The current owner + assistants get an
-    // explicit member SendMessages allow; everybody else keeps the deny.
-    await applyTicketStaffTypingState(
-      interaction.channel,
-      nextData,
-      `Ticket assistants synchronized by ${interaction.user.tag}`,
-    );
-
-    // Verify each newly selected assistant after the full sync.
-    for (
-      const staffId of
-      validIds
-    ) {
-      const member =
-        interaction.guild.members.cache.get(
-          staffId,
-        ) ||
-        (await interaction.guild.members
-          .fetch(
+    await Promise.all(
+      validIds.map(
+        (staffId) =>
+          setTicketStaffTyping(
+            interaction.channel,
             staffId,
-          )
-          .catch(() => null));
-
-      if (!member) {
-        throw new Error(
-          `Could not resolve selected assistant ${staffId}.`,
-        );
-      }
-
-      const permissions =
-        interaction.channel.permissionsFor(
-          member,
-        );
-
-      if (
-        !permissions?.has(
-          PermissionFlagsBits.ViewChannel,
-        ) ||
-        !permissions?.has(
-          PermissionFlagsBits.SendMessages,
-        )
-      ) {
-        // One final targeted retry in case the full staff sync hit an old deny.
-        await setTicketStaffTyping(
-          interaction.channel,
-          staffId,
-          true,
-          `Final assistant permission verification by ${interaction.user.tag}`,
-        );
-      }
-    }
+            true,
+            `Added as ticket assistant by ${interaction.user.tag}`,
+          ),
+      ),
+    );
 
     await refreshTicketControlMessage(
       interaction.channel,
