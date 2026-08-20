@@ -1,6 +1,7 @@
 const {
   ActionRowBuilder,
   ApplicationCommandOptionType,
+  ApplicationCommandType,
   EmbedBuilder,
   MessageFlags,
   PermissionFlagsBits,
@@ -61,7 +62,9 @@ function commandRequiredPermissions(json) {
 
 function memberCanUseCommand(member, json) {
   const required =
-    commandRequiredPermissions(json);
+    commandRequiredPermissions(
+      json,
+    );
 
   // No default permission restriction.
   if (
@@ -91,7 +94,9 @@ function memberCanUseCommand(member, json) {
 
 function permissionLabel(json) {
   const required =
-    commandRequiredPermissions(json);
+    commandRequiredPermissions(
+      json,
+    );
 
   if (required === null) {
     return 'No special Discord permission';
@@ -145,6 +150,11 @@ function getAvailableCommands(
     .filter(
       ({ json }) =>
         json?.name &&
+        (
+          json.type === undefined ||
+          json.type ===
+            ApplicationCommandType.ChatInput
+        ) &&
         memberCanUseCommand(
           member,
           json,

@@ -1,5 +1,4 @@
 const {
-  PermissionFlagsBits,
   SlashCommandBuilder,
 } = require('discord.js');
 const {
@@ -9,10 +8,7 @@ const {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('search')
-    .setDescription('Search media by ID or open the skin/clan blacklist manager.')
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.Administrator,
-    )
+    .setDescription('Search skins/badges by ID; admins can also manage the blacklist.')
     .addStringOption((option) =>
       option
         .setName('id')
