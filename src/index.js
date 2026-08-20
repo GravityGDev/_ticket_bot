@@ -8,6 +8,7 @@ const {
   GatewayIntentBits,
   Events,
   MessageFlags,
+  Partials,
   REST,
   Routes,
 } = require('discord.js');
@@ -36,6 +37,14 @@ const {
   evaluateAllStaffGoals,
   processDueWarningRemovals,
 } = require('./staff-settings');
+const {
+  initializeSkinReview,
+  handleSkinReviewInteraction,
+  handleSkinReviewMessageCreate,
+  handleSkinReviewMessageUpdate,
+  handleSkinReviewMessageDelete,
+  handleSkinReviewReactionAdd,
+} = require('./skin-review');
 
 const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID'];
 for (const key of requiredEnv) {
@@ -54,7 +63,14 @@ const client = new Client({
     // Report Staff tickets are continuously archived so a manual channel
     // deletion cannot destroy the transcript.
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent,
+  ],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.Reaction,
+    Partials.User,
   ],
 });
 
@@ -209,6 +225,12 @@ client.on(Events.MessageCreate, (message) => {
 });
 
 client.on(Events.MessageCreate, (message) => {
+  handleSkinReviewMessageCreate(message).catch((error) => {
+    console.error('[SKIN REVIEW MESSAGE CREATE ERROR]', error);
+  });
+});
+
+client.on(Events.MessageCreate, (message) => {
   recordStaffActivityMessage(message)
     .then((recorded) => {
       if (recorded) {
@@ -226,15 +248,33 @@ client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
   });
 });
 
+client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
+  handleSkinReviewMessageUpdate(oldMessage, newMessage).catch((error) => {
+    console.error('[SKIN REVIEW MESSAGE UPDATE ERROR]', error);
+  });
+});
+
 client.on(Events.MessageDelete, (message) => {
   trackReportStaffMessageDelete(message).catch((error) => {
     console.error('[REPORT STAFF MESSAGE DELETE TRACKER ERROR]', error);
   });
 });
 
+client.on(Events.MessageDelete, (message) => {
+  handleSkinReviewMessageDelete(message).catch((error) => {
+    console.error('[SKIN REVIEW MESSAGE DELETE ERROR]', error);
+  });
+});
+
 client.on(Events.MessageBulkDelete, (messages) => {
   trackReportStaffMessageDeleteBulk(messages).catch((error) => {
     console.error('[REPORT STAFF MESSAGE BULK DELETE TRACKER ERROR]', error);
+  });
+});
+
+client.on(Events.MessageReactionAdd, (reaction, user) => {
+  handleSkinReviewReactionAdd(reaction, user).catch((error) => {
+    console.error('[SKIN REVIEW REACTION ADD ERROR]', error);
   });
 });
 
@@ -261,6 +301,12 @@ client.once(Events.ClientReady, (readyClient) => {
 client.once(Events.ClientReady, () => {
   initializeStaffTracking().catch((error) => {
     console.error('[STAFF TRACKING INITIALIZE ERROR]', error);
+  });
+});
+
+client.once(Events.ClientReady, (readyClient) => {
+  initializeSkinReview(readyClient).catch((error) => {
+    console.error('[SKIN REVIEW STARTUP ERROR]', error);
   });
 });
 
@@ -302,6 +348,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       await command.execute(interaction, client);
+      return;
+    }
+
+    if (await handleSkinReviewInteraction(interaction, client)) {
       return;
     }
 

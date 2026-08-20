@@ -1,0 +1,1156 @@
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  MessageFlags,
+  PermissionFlagsBits,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+} = require('discord.js');
+const { getMongoDb } = require('./database');
+
+const SKIN_REVIEW_CHANNEL_ID = '1193625435796422657';
+const PROTECTED_REACTION_BOT_ID = '891220330817912852';
+const PAGE_SIZE = 5;
+const APPROVE_EMOJI = '✔️';
+const REJECT_EMOJI = '❌';
+
+const MEDIA_COLLECTION = 'skin_media_index';
+const BLACKLIST_COLLECTION = 'skin_blacklist';
+const META_COLLECTION = 'skin_review_meta';
+
+let initializationPromise = null;
+
+function normalizeMediaId(value) {
+  const id = String(value || '').trim().toLowerCase();
+
+  if (!/^[a-f0-9]{24}$/.test(id)) {
+    throw new Error('Skin IDs must be a 24-character hexadecimal ID.');
+  }
+
+  return id;
+}
+
+function cleanMediaUrl(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[>),.;]+$/g, '');
+}
+
+function classifyMedia(prefix, url) {
+  const normalizedPrefix = String(prefix || '').toLowerCase();
+
+  if (normalizedPrefix === 'clanbadge') {
+    return {
+      key: 'clanBadge',
+      label: 'Clan Badge',
+      emoji: '🏷️',
+    };
+  }
+
+  if (normalizedPrefix === 'clan') {
+    return {
+      key: 'clan',
+      label: 'Clan Skin',
+      emoji: '🛡️',
+    };
+  }
+
+  const lower = String(url || '').toLowerCase();
+
+  if (lower.includes('/vip-skins/')) {
+    return {
+      key: 'vip',
+      label: 'VIP Skin',
+      emoji: '💎',
+    };
+  }
+
+  if (lower.includes('/premium-skins/')) {
+    return {
+      key: 'premium',
+      label: 'Premium Skin',
+      emoji: '✨',
+    };
+  }
+
+  if (lower.includes('/free-skins/')) {
+    return {
+      key: 'free',
+      label: 'Free Skin',
+      emoji: '🖼️',
+    };
+  }
+
+  return {
+    key: 'skin',
+    label: 'Skin',
+    emoji: '🖼️',
+  };
+}
+
+function parseMediaEntries(content) {
+  const source = String(content || '');
+  const entries = [];
+
+  // Exact formats supported:
+  //
+  // clan:<CLAN_ID>|<MEDIA_URL>
+  // clanBadge:<CLAN_ID>|<MEDIA_URL>
+  // <USER_ID>|<MEDIA_URL>
+  //
+  // The 24-character value immediately before "|" is always the searchable
+  // ID. Everything immediately after "|" up to whitespace / Discord markup is
+  // the media URL displayed in /search.
+  //
+  // The pattern is intentionally not line-anchored, so it still works if the
+  // other bot adds text before/after the media record or includes multiple
+  // records in a single Discord message.
+  const pattern =
+    /(?:(clanBadge|clan)\s*:\s*)?([a-fA-F0-9]{24})\s*\|\s*(https?:\/\/[^\s<>\n]+)/gi;
+
+  for (const match of source.matchAll(pattern)) {
+    const prefix = match[1] || null;
+    const mediaId = String(match[2]).toLowerCase();
+    const url = cleanMediaUrl(match[3]);
+
+    if (!url) continue;
+
+    const type = classifyMedia(prefix, url);
+
+    entries.push({
+      mediaId,
+      prefix,
+      url,
+      typeKey: type.key,
+      typeLabel: type.label,
+      typeEmoji: type.emoji,
+      raw: match[0].trim(),
+    });
+  }
+
+  return entries;
+}
+
+async function collections() {
+  const db = await getMongoDb();
+
+  return {
+    media: db.collection(MEDIA_COLLECTION),
+    blacklist: db.collection(BLACKLIST_COLLECTION),
+    meta: db.collection(META_COLLECTION),
+  };
+}
+
+async function ensureIndexes() {
+  const { media, blacklist } = await collections();
+
+  await Promise.all([
+    media.createIndex({ mediaId: 1, createdAt: -1 }),
+    media.createIndex({ messageId: 1 }),
+    media.createIndex({ channelId: 1, mediaId: 1 }),
+    blacklist.createIndex({ blacklistedAt: -1 }),
+  ]);
+}
+
+function compareSnowflakes(left, right) {
+  const a = BigInt(String(left));
+  const b = BigInt(String(right));
+
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+async function indexMediaMessage(message) {
+  if (!message || message.channelId !== SKIN_REVIEW_CHANNEL_ID) {
+    return [];
+  }
+
+  const entries = parseMediaEntries(message.content);
+  const { media } = await collections();
+
+  await media.deleteMany({
+    messageId: String(message.id),
+  });
+
+  if (!entries.length) return [];
+
+  const createdAt =
+    message.createdAt instanceof Date
+      ? message.createdAt
+      : new Date(message.createdTimestamp || Date.now());
+
+  const documents = entries.map((entry, index) => ({
+    _id: `${message.id}:${index}`,
+    guildId: String(message.guildId || message.guild?.id || ''),
+    channelId: SKIN_REVIEW_CHANNEL_ID,
+    messageId: String(message.id),
+    entryIndex: index,
+    authorId: String(message.author?.id || ''),
+    authorBot: Boolean(message.author?.bot),
+    mediaId: entry.mediaId,
+    prefix: entry.prefix,
+    typeKey: entry.typeKey,
+    typeLabel: entry.typeLabel,
+    typeEmoji: entry.typeEmoji,
+    url: entry.url,
+    raw: entry.raw,
+    createdAt,
+    indexedAt: new Date(),
+  }));
+
+  if (documents.length) {
+    await media.bulkWrite(
+      documents.map((document) => ({
+        replaceOne: {
+          filter: { _id: document._id },
+          replacement: document,
+          upsert: true,
+        },
+      })),
+      { ordered: false },
+    );
+  }
+
+  return documents;
+}
+
+async function updateMetaFromMessages(messages, updates = {}) {
+  if (!messages.length) return;
+
+  const ids = messages
+    .map((message) => String(message.id))
+    .sort(compareSnowflakes);
+
+  const { meta } = await collections();
+  const current = await meta.findOne({
+    _id: SKIN_REVIEW_CHANNEL_ID,
+  });
+
+  const oldest = ids[0];
+  const newest = ids[ids.length - 1];
+
+  let oldestIndexedMessageId =
+    current?.oldestIndexedMessageId || oldest;
+  let newestIndexedMessageId =
+    current?.newestIndexedMessageId || newest;
+
+  if (compareSnowflakes(oldest, oldestIndexedMessageId) < 0) {
+    oldestIndexedMessageId = oldest;
+  }
+
+  if (compareSnowflakes(newest, newestIndexedMessageId) > 0) {
+    newestIndexedMessageId = newest;
+  }
+
+  await meta.updateOne(
+    { _id: SKIN_REVIEW_CHANNEL_ID },
+    {
+      $set: {
+        oldestIndexedMessageId,
+        newestIndexedMessageId,
+        updatedAt: new Date(),
+        ...updates,
+      },
+    },
+    { upsert: true },
+  );
+}
+
+async function indexBatch(messages) {
+  const sorted = [...messages].sort((a, b) =>
+    compareSnowflakes(a.id, b.id),
+  );
+
+  for (const message of sorted) {
+    const documents = await indexMediaMessage(message);
+
+    if (documents.length) {
+      await enforceBlacklistOnMessage(
+        message,
+        documents.map((document) => document.mediaId),
+      );
+    }
+  }
+
+  await updateMetaFromMessages(sorted);
+
+  return sorted;
+}
+
+async function syncRecentMessages(channel) {
+  const { meta } = await collections();
+  const state = await meta.findOne({
+    _id: SKIN_REVIEW_CHANNEL_ID,
+  });
+
+  if (!state?.newestIndexedMessageId) return;
+
+  let after = String(state.newestIndexedMessageId);
+
+  while (true) {
+    const batch = await channel.messages.fetch({
+      after,
+      limit: 100,
+      cache: false,
+    });
+
+    if (!batch.size) break;
+
+    const sorted = await indexBatch([...batch.values()]);
+    after = String(sorted[sorted.length - 1].id);
+
+    if (batch.size < 100) break;
+  }
+}
+
+async function backfillHistory(channel) {
+  const { meta } = await collections();
+  let state = await meta.findOne({
+    _id: SKIN_REVIEW_CHANNEL_ID,
+  });
+
+  if (state?.backfillComplete) return;
+
+  let before = state?.oldestIndexedMessageId || null;
+
+  while (true) {
+    const options = {
+      limit: 100,
+      cache: false,
+    };
+
+    if (before) options.before = before;
+
+    const batch = await channel.messages.fetch(options);
+
+    if (!batch.size) {
+      await meta.updateOne(
+        { _id: SKIN_REVIEW_CHANNEL_ID },
+        {
+          $set: {
+            backfillComplete: true,
+            backfillCompletedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+      break;
+    }
+
+    const sorted = await indexBatch([...batch.values()]);
+    before = String(sorted[0].id);
+
+    await meta.updateOne(
+      { _id: SKIN_REVIEW_CHANNEL_ID },
+      {
+        $set: {
+          oldestIndexedMessageId: before,
+          updatedAt: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+
+    if (batch.size < 100) {
+      await meta.updateOne(
+        { _id: SKIN_REVIEW_CHANNEL_ID },
+        {
+          $set: {
+            backfillComplete: true,
+            backfillCompletedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+      break;
+    }
+  }
+}
+
+async function getReviewChannel(client) {
+  const channel =
+    client.channels.cache.get(SKIN_REVIEW_CHANNEL_ID) ||
+    (await client.channels.fetch(SKIN_REVIEW_CHANNEL_ID).catch(() => null));
+
+  if (
+    !channel ||
+    !channel.isTextBased() ||
+    !channel.messages?.fetch
+  ) {
+    throw new Error(
+      `Skin review channel ${SKIN_REVIEW_CHANNEL_ID} is missing or not readable.`,
+    );
+  }
+
+  return channel;
+}
+
+async function initializeSkinReview(client) {
+  if (initializationPromise) return initializationPromise;
+
+  initializationPromise = (async () => {
+    await ensureIndexes();
+
+    const channel = await getReviewChannel(client);
+
+    console.log('[SKIN REVIEW] Synchronising media index...');
+    await syncRecentMessages(channel);
+    await backfillHistory(channel);
+
+    console.log('[SKIN REVIEW] Media index ready.');
+  })().catch((error) => {
+    initializationPromise = null;
+    console.error('[SKIN REVIEW INITIALIZE ERROR]', error);
+    throw error;
+  });
+
+  return initializationPromise;
+}
+
+async function isBlacklisted(mediaId) {
+  const id = normalizeMediaId(mediaId);
+  const { blacklist } = await collections();
+
+  return Boolean(
+    await blacklist.findOne({
+      _id: id,
+    }),
+  );
+}
+
+async function getBlacklistedIds(mediaIds) {
+  const ids = [...new Set(mediaIds.map(normalizeMediaId))];
+  if (!ids.length) return new Set();
+
+  const { blacklist } = await collections();
+  const records = await blacklist
+    .find({
+      _id: { $in: ids },
+    })
+    .project({ _id: 1 })
+    .toArray();
+
+  return new Set(records.map((record) => String(record._id)));
+}
+
+function normalizedEmojiName(value) {
+  return String(value || '').replace(/\uFE0F/g, '');
+}
+
+function isApproveReactionName(value) {
+  const name = normalizedEmojiName(value);
+  return name === '✔' || name === '✅';
+}
+
+function isRejectReactionName(value) {
+  return normalizedEmojiName(value) === '❌';
+}
+
+async function fetchAllReactionUsers(reaction) {
+  const users = new Map();
+  let after = null;
+
+  while (true) {
+    const page = await reaction.users.fetch({
+      limit: 100,
+      ...(after ? { after } : {}),
+    });
+
+    if (!page.size) break;
+
+    for (const user of page.values()) {
+      users.set(user.id, user);
+    }
+
+    after = [...page.keys()].sort(compareSnowflakes).at(-1);
+
+    if (page.size < 100) break;
+  }
+
+  return [...users.values()];
+}
+
+async function removeReactionUsers(reaction, preserveUserIds = new Set()) {
+  const users = await fetchAllReactionUsers(reaction);
+
+  for (const user of users) {
+    if (preserveUserIds.has(String(user.id))) continue;
+
+    await reaction.users.remove(user.id).catch((error) => {
+      console.error(
+        `[SKIN REVIEW] Could not remove ${reaction.emoji.name} from ${user.id}:`,
+        error,
+      );
+    });
+  }
+}
+
+async function fetchSourceMessage(client, messageId) {
+  const channel = await getReviewChannel(client);
+
+  return channel.messages.fetch(String(messageId)).catch(() => null);
+}
+
+async function rejectMessage(message) {
+  if (!message) throw new Error('The source media message no longer exists.');
+
+  for (const reaction of message.reactions.cache.values()) {
+    if (!isApproveReactionName(reaction.emoji.name)) continue;
+
+    await removeReactionUsers(
+      reaction,
+      new Set([PROTECTED_REACTION_BOT_ID]),
+    );
+  }
+
+  await message.react(REJECT_EMOJI);
+}
+
+async function approveMessage(message) {
+  if (!message) throw new Error('The source media message no longer exists.');
+
+  for (const reaction of message.reactions.cache.values()) {
+    if (!isRejectReactionName(reaction.emoji.name)) continue;
+
+    await removeReactionUsers(reaction);
+  }
+
+  await message.react(APPROVE_EMOJI);
+}
+
+async function enforceBlacklistOnMessage(message, mediaIds = null) {
+  const ids = mediaIds || parseMediaEntries(message.content).map((entry) => entry.mediaId);
+  if (!ids.length) return false;
+
+  const blacklisted = await getBlacklistedIds(ids);
+  if (!blacklisted.size) return false;
+
+  await rejectMessage(message);
+  return true;
+}
+
+async function handleSkinReviewMessageCreate(message) {
+  if (message.channelId !== SKIN_REVIEW_CHANNEL_ID) return;
+
+  const documents = await indexMediaMessage(message);
+  if (!documents.length) return;
+
+  await updateMetaFromMessages([message]);
+
+  await enforceBlacklistOnMessage(
+    message,
+    documents.map((document) => document.mediaId),
+  );
+}
+
+async function handleSkinReviewMessageUpdate(oldMessage, newMessage) {
+  let message = newMessage;
+
+  if (message?.partial) {
+    message = await message.fetch().catch(() => null);
+  }
+
+  if (!message || message.channelId !== SKIN_REVIEW_CHANNEL_ID) return;
+
+  const documents = await indexMediaMessage(message);
+
+  if (documents.length) {
+    await enforceBlacklistOnMessage(
+      message,
+      documents.map((document) => document.mediaId),
+    );
+  }
+}
+
+async function handleSkinReviewMessageDelete(message) {
+  if (!message || message.channelId !== SKIN_REVIEW_CHANNEL_ID) return;
+
+  const { media } = await collections();
+
+  await media.deleteMany({
+    messageId: String(message.id),
+  });
+}
+
+async function getMediaIdsForMessage(message) {
+  const { media } = await collections();
+  let records = await media
+    .find({ messageId: String(message.id) })
+    .project({ mediaId: 1 })
+    .toArray();
+
+  if (!records.length) {
+    records = await indexMediaMessage(message);
+  }
+
+  return [...new Set(records.map((record) => String(record.mediaId)))];
+}
+
+async function handleSkinReviewReactionAdd(reaction, user) {
+  if (!reaction || !user) return;
+
+  if (reaction.partial) {
+    reaction = await reaction.fetch().catch(() => null);
+  }
+
+  if (!reaction) return;
+
+  let message = reaction.message;
+
+  if (message?.partial) {
+    message = await message.fetch().catch(() => null);
+  }
+
+  if (!message || message.channelId !== SKIN_REVIEW_CHANNEL_ID) return;
+  if (!isApproveReactionName(reaction.emoji.name)) return;
+
+  // The designated bot's initial ✔️ must always remain.
+  if (String(user.id) === PROTECTED_REACTION_BOT_ID) return;
+
+  const mediaIds = await getMediaIdsForMessage(message);
+  if (!mediaIds.length) return;
+
+  const blacklisted = await getBlacklistedIds(mediaIds);
+  if (!blacklisted.size) return;
+
+  await reaction.users.remove(user.id).catch((error) => {
+    console.error('[SKIN REVIEW BLACKLIST REACTION REMOVE ERROR]', error);
+  });
+
+  await message.react(REJECT_EMOJI).catch((error) => {
+    console.error('[SKIN REVIEW BLACKLIST REJECT REACTION ERROR]', error);
+  });
+}
+
+async function requireStaff(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({
+      content: 'Use this inside the server.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+    return null;
+  }
+
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
+
+  if (
+    !member ||
+    !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
+  ) {
+    const payload = {
+      content: 'You need **View Audit Log** staff permission to use the skin review system.',
+      flags: MessageFlags.Ephemeral,
+    };
+
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload).catch(() => {});
+    } else {
+      await interaction.reply(payload).catch(() => {});
+    }
+
+    return null;
+  }
+
+  return member;
+}
+
+async function assertSourceChannelPermissions(client) {
+  const channel = await getReviewChannel(client);
+  const guild = channel.guild;
+  const me = guild.members.me || (await guild.members.fetchMe().catch(() => null));
+
+  if (!me) {
+    throw new Error('I could not resolve my server member for the skin channel.');
+  }
+
+  const permissions = channel.permissionsFor(me);
+  const required = [
+    [PermissionFlagsBits.ViewChannel, 'View Channel'],
+    [PermissionFlagsBits.ReadMessageHistory, 'Read Message History'],
+    [PermissionFlagsBits.AddReactions, 'Add Reactions'],
+    [PermissionFlagsBits.ManageMessages, 'Manage Messages'],
+  ];
+
+  const missing = required
+    .filter(([permission]) => !permissions?.has(permission))
+    .map(([, name]) => name);
+
+  if (missing.length) {
+    throw new Error(
+      `I am missing permissions in <#${SKIN_REVIEW_CHANNEL_ID}>: ${missing.join(', ')}.`,
+    );
+  }
+
+  return channel;
+}
+
+async function getRecords(mediaId) {
+  const id = normalizeMediaId(mediaId);
+  const { media } = await collections();
+
+  return media
+    .find({ mediaId: id })
+    .sort({ createdAt: -1, messageId: -1, entryIndex: 1 })
+    .toArray();
+}
+
+function recordKey(record) {
+  return `${record.messageId}.${record.entryIndex}`;
+}
+
+function parseRecordKey(value) {
+  const match = String(value || '').match(/^(\d{16,22})\.(\d{1,3})$/);
+  if (!match) return null;
+
+  return {
+    messageId: match[1],
+    entryIndex: Number(match[2]),
+  };
+}
+
+async function getRecordByKey(mediaId, key) {
+  const parsed = parseRecordKey(key);
+  if (!parsed) return null;
+
+  const { media } = await collections();
+
+  return media.findOne({
+    mediaId: normalizeMediaId(mediaId),
+    messageId: parsed.messageId,
+    entryIndex: parsed.entryIndex,
+  });
+}
+
+function reactionCounts(message) {
+  let approve = 0;
+  let reject = 0;
+
+  if (!message) return { approve, reject };
+
+  for (const reaction of message.reactions.cache.values()) {
+    if (isApproveReactionName(reaction.emoji.name)) {
+      approve += Number(reaction.count) || 0;
+    } else if (isRejectReactionName(reaction.emoji.name)) {
+      reject += Number(reaction.count) || 0;
+    }
+  }
+
+  return { approve, reject };
+}
+
+async function hydratePageRecords(client, records) {
+  const hydrated = [];
+
+  for (const record of records) {
+    const message = await fetchSourceMessage(client, record.messageId);
+
+    hydrated.push({
+      record,
+      message,
+      counts: reactionCounts(message),
+    });
+  }
+
+  return hydrated;
+}
+
+function searchCustomId(action, mediaId, page, extra = null) {
+  return [
+    'skinreview',
+    action,
+    mediaId,
+    String(page),
+    ...(extra ? [extra] : []),
+  ].join(':');
+}
+
+async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey = null) {
+  const id = normalizeMediaId(mediaId);
+  const records = await getRecords(id);
+  const blacklisted = await isBlacklisted(id);
+
+  if (!records.length) {
+    return {
+      empty: true,
+      payload: {
+        content:
+          `🔎 I could not find any media associated with \`${id}\` in <#${SKIN_REVIEW_CHANNEL_ID}>.`,
+        embeds: [],
+        components: [],
+        allowedMentions: { parse: [] },
+      },
+    };
+  }
+
+  const pageCount = Math.max(1, Math.ceil(records.length / PAGE_SIZE));
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
+  const pageRecords = records.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  const hydrated = await hydratePageRecords(client, pageRecords);
+
+  const header = new EmbedBuilder()
+    .setColor(blacklisted ? 0xed4245 : 0x5865f2)
+    .setTitle('🔎 Skin / Badge Search')
+    .setDescription(
+      `**ID:** \`${id}\`\n` +
+        `**Found:** ${records.length} media item${records.length === 1 ? '' : 's'}\n` +
+        `**Page:** ${page + 1}/${pageCount}\n` +
+        `**Blacklist:** ${blacklisted ? '🚫 **BLACKLISTED**' : '✅ Not blacklisted'}` +
+        (selectedKey ? `\n**Selected:** \`${selectedKey}\`` : ''),
+    )
+    .setFooter({
+      text: 'Select one of the five items below, then Approve or Reject it.',
+    });
+
+  const embeds = [header];
+
+  hydrated.forEach(({ record, message, counts }, index) => {
+    const absoluteIndex = page * PAGE_SIZE + index + 1;
+    const key = recordKey(record);
+    const selected = key === selectedKey;
+
+    const embed = new EmbedBuilder()
+      .setColor(selected ? 0xfee75c : 0x2b2d31)
+      .setTitle(
+        `${selected ? '▶ ' : ''}${absoluteIndex}. ${record.typeEmoji || '🖼️'} ${record.typeLabel || 'Skin'}`,
+      )
+      .setDescription(
+        `**ID:** \`${record.mediaId}\`\n` +
+          `**Message:** ${message ? `[Jump to source](${message.url})` : '⚠️ Source message unavailable'}\n` +
+          `**Reactions:** ${APPROVE_EMOJI} ${counts.approve} • ${REJECT_EMOJI} ${counts.reject}\n` +
+          `**Source message ID:** \`${record.messageId}\``,
+      )
+      .setImage(record.url)
+      .setTimestamp(new Date(record.createdAt));
+
+    embeds.push(embed);
+  });
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(searchCustomId('select', id, page))
+    .setPlaceholder('Select a skin / badge on this page')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(
+      pageRecords.map((record, index) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(
+            `${page * PAGE_SIZE + index + 1}. ${record.typeLabel || 'Skin'}`.slice(0, 100),
+          )
+          .setDescription(
+            `${record.mediaId} • ${record.messageId}`.slice(0, 100),
+          )
+          .setValue(recordKey(record))
+          .setDefault(recordKey(record) === selectedKey),
+      ),
+    );
+
+  const selectedRecord = selectedKey
+    ? pageRecords.find((record) => recordKey(record) === selectedKey)
+    : null;
+
+  const actionRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(
+        searchCustomId(
+          'approve',
+          id,
+          page,
+          selectedRecord ? recordKey(selectedRecord) : 'none',
+        ),
+      )
+      .setLabel('Approve')
+      .setEmoji(APPROVE_EMOJI)
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!selectedRecord || blacklisted),
+    new ButtonBuilder()
+      .setCustomId(
+        searchCustomId(
+          'reject',
+          id,
+          page,
+          selectedRecord ? recordKey(selectedRecord) : 'none',
+        ),
+      )
+      .setLabel('Reject')
+      .setEmoji(REJECT_EMOJI)
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!selectedRecord),
+    new ButtonBuilder()
+      .setCustomId(
+        searchCustomId(
+          blacklisted ? 'unblacklist' : 'blacklist',
+          id,
+          page,
+        ),
+      )
+      .setLabel(blacklisted ? 'UnBlacklist' : 'Blacklist')
+      .setEmoji(blacklisted ? '🔓' : '🚫')
+      .setStyle(blacklisted ? ButtonStyle.Secondary : ButtonStyle.Danger),
+  );
+
+  const pageRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(searchCustomId('page', id, Math.max(0, page - 1)))
+      .setEmoji('⬅️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page <= 0),
+    new ButtonBuilder()
+      .setCustomId(searchCustomId('noop', id, page))
+      .setLabel(`Page ${page + 1}/${pageCount}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(searchCustomId('page', id, Math.min(pageCount - 1, page + 1)))
+      .setEmoji('➡️')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page >= pageCount - 1),
+  );
+
+  return {
+    empty: false,
+    page,
+    pageCount,
+    payload: {
+      content: '',
+      embeds,
+      components: [
+        new ActionRowBuilder().addComponents(select),
+        actionRow,
+        pageRow,
+      ],
+      allowedMentions: { parse: [] },
+    },
+  };
+}
+
+async function executeSkinSearch(interaction, client) {
+  if (!(await requireStaff(interaction))) return;
+
+  const mediaId = normalizeMediaId(
+    interaction.options.getString('id', true),
+  );
+
+  await interaction.deferReply({
+    flags: MessageFlags.Ephemeral,
+  });
+
+  try {
+    await assertSourceChannelPermissions(client);
+    await initializeSkinReview(client);
+
+    const result = await buildSearchPanel(client, mediaId, 0, null);
+    await interaction.editReply(result.payload);
+  } catch (error) {
+    console.error('[SKIN SEARCH ERROR]', error);
+
+    await interaction.editReply({
+      content: `I could not search the skin channel: ${error?.message || 'Unknown error'}`,
+      embeds: [],
+      components: [],
+      allowedMentions: { parse: [] },
+    });
+  }
+}
+
+async function blacklistMediaId(client, mediaId, userId) {
+  const id = normalizeMediaId(mediaId);
+  const { blacklist } = await collections();
+
+  await blacklist.updateOne(
+    { _id: id },
+    {
+      $set: {
+        mediaId: id,
+        blacklistedAt: new Date(),
+        blacklistedBy: String(userId),
+        channelId: SKIN_REVIEW_CHANNEL_ID,
+      },
+    },
+    { upsert: true },
+  );
+
+  const records = await getRecords(id);
+  const messageIds = [...new Set(records.map((record) => String(record.messageId)))];
+
+  let updated = 0;
+
+  for (const messageId of messageIds) {
+    const message = await fetchSourceMessage(client, messageId);
+    if (!message) continue;
+
+    await rejectMessage(message);
+    updated += 1;
+  }
+
+  return updated;
+}
+
+async function unblacklistMediaId(mediaId) {
+  const id = normalizeMediaId(mediaId);
+  const { blacklist } = await collections();
+
+  await blacklist.deleteOne({ _id: id });
+}
+
+async function rerenderInteraction(interaction, client, mediaId, page, selectedKey = null) {
+  const result = await buildSearchPanel(client, mediaId, page, selectedKey);
+  await interaction.editReply(result.payload);
+}
+
+async function handleSkinReviewInteraction(interaction, client) {
+  if (!interaction.customId?.startsWith('skinreview:')) {
+    return false;
+  }
+
+  if (!(await requireStaff(interaction))) return true;
+
+  const parts = interaction.customId.split(':');
+  const action = parts[1];
+  const mediaId = normalizeMediaId(parts[2]);
+  const page = Number(parts[3]) || 0;
+  const extra = parts[4] || null;
+
+  try {
+    await assertSourceChannelPermissions(client);
+    await initializeSkinReview(client);
+
+    if (action === 'noop' && interaction.isButton()) {
+      await interaction.deferUpdate();
+      return true;
+    }
+
+    if (action === 'page' && interaction.isButton()) {
+      await interaction.deferUpdate();
+      await rerenderInteraction(interaction, client, mediaId, page, null);
+      return true;
+    }
+
+    if (action === 'select' && interaction.isStringSelectMenu()) {
+      const selectedKey = interaction.values[0];
+      const selected = await getRecordByKey(mediaId, selectedKey);
+
+      if (!selected) {
+        await interaction.update({
+          content: 'That media item is no longer indexed.',
+          embeds: [],
+          components: [],
+        });
+        return true;
+      }
+
+      await interaction.deferUpdate();
+      await rerenderInteraction(interaction, client, mediaId, page, selectedKey);
+      return true;
+    }
+
+    if ((action === 'approve' || action === 'reject') && interaction.isButton()) {
+      if (!extra || extra === 'none') {
+        await interaction.reply({
+          content: 'Select a skin / badge first.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return true;
+      }
+
+      const record = await getRecordByKey(mediaId, extra);
+
+      if (!record) {
+        await interaction.reply({
+          content: 'That media item is no longer indexed.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return true;
+      }
+
+      if (action === 'approve' && (await isBlacklisted(mediaId))) {
+        await interaction.reply({
+          content: 'This ID is blacklisted. **UnBlacklist it first** before approving media.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return true;
+      }
+
+      await interaction.deferUpdate();
+
+      const message = await fetchSourceMessage(client, record.messageId);
+
+      if (!message) {
+        throw new Error('The source media message no longer exists.');
+      }
+
+      if (action === 'approve') {
+        await approveMessage(message);
+      } else {
+        await rejectMessage(message);
+      }
+
+      await rerenderInteraction(interaction, client, mediaId, page, extra);
+      return true;
+    }
+
+    if (action === 'blacklist' && interaction.isButton()) {
+      await interaction.deferUpdate();
+
+      const updated = await blacklistMediaId(
+        client,
+        mediaId,
+        interaction.user.id,
+      );
+
+      console.log(
+        `[SKIN REVIEW] ${mediaId} blacklisted by ${interaction.user.id}; ${updated} message(s) rejected.`,
+      );
+
+      await rerenderInteraction(interaction, client, mediaId, page, null);
+      return true;
+    }
+
+    if (action === 'unblacklist' && interaction.isButton()) {
+      await interaction.deferUpdate();
+      await unblacklistMediaId(mediaId);
+
+      console.log(
+        `[SKIN REVIEW] ${mediaId} unblacklisted by ${interaction.user.id}.`,
+      );
+
+      await rerenderInteraction(interaction, client, mediaId, page, null);
+      return true;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('[SKIN REVIEW INTERACTION ERROR]', error);
+
+    const payload = {
+      content: `Skin review action failed: ${error?.message || 'Unknown error'}`,
+      flags: MessageFlags.Ephemeral,
+    };
+
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload).catch(() => {});
+    } else {
+      await interaction.reply(payload).catch(() => {});
+    }
+
+    return true;
+  }
+}
+
+module.exports = {
+  SKIN_REVIEW_CHANNEL_ID,
+  PROTECTED_REACTION_BOT_ID,
+  initializeSkinReview,
+  executeSkinSearch,
+  handleSkinReviewInteraction,
+  handleSkinReviewMessageCreate,
+  handleSkinReviewMessageUpdate,
+  handleSkinReviewMessageDelete,
+  handleSkinReviewReactionAdd,
+};
