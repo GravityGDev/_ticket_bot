@@ -1,4 +1,5 @@
 const {
+  MessageFlags,
   PermissionFlagsBits,
   SlashCommandBuilder,
 } = require('discord.js');
@@ -29,6 +30,20 @@ module.exports = {
     ),
 
   async execute(interaction) {
+    if (
+      !interaction.inGuild() ||
+      !interaction.memberPermissions?.has(
+        PermissionFlagsBits.ViewAuditLog,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'You need **View Audit Log** staff permission to use `/rank`.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     await sendRankCard(
       interaction,
       interaction.options.getString('period') || 'lifetime',

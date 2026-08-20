@@ -14,12 +14,27 @@ module.exports = {
         .setName('reconfigure')
         .setDescription('Run the ticket setup again for this server.'),
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator,
+    ),
 
   async execute(interaction) {
     if (!interaction.guild || !interaction.channel?.isTextBased()) {
       await interaction.reply({
         content: 'Use this command in a text channel inside a server.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (
+      !interaction.memberPermissions?.has(
+        PermissionFlagsBits.Administrator,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'You need **Administrator** permission to use `/ticket-panel`.',
         flags: MessageFlags.Ephemeral,
       });
       return;

@@ -1,14 +1,33 @@
-const { SlashCommandBuilder } = require('discord.js');
+const {
+  MessageFlags,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+} = require('discord.js');
 const { sendStaffTrackingPanel } = require('../staff-tracking');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('staff-stats')
-    .setDescription('Open the staff performance and activity dashboard.'),
+    .setDescription('Open the staff performance and activity dashboard.')
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator,
+    ),
 
   async execute(interaction) {
-    // Runtime access rules allow server Administrators plus the bot owner and
-    // any staff explicitly whitelisted in Staff Tracking Settings.
+    if (
+      !interaction.inGuild() ||
+      !interaction.memberPermissions?.has(
+        PermissionFlagsBits.Administrator,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'You need **Administrator** permission to use `/staff-stats`.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     await sendStaffTrackingPanel(interaction);
   },
 };

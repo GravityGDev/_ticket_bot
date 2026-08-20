@@ -1,11 +1,32 @@
-const { SlashCommandBuilder } = require('discord.js');
+const {
+  MessageFlags,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+} = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('ping')
-    .setDescription('Check whether the bot is online.'),
+    .setDescription('Check whether the bot is online.')
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ViewAuditLog,
+    ),
 
   async execute(interaction) {
+    if (
+      !interaction.inGuild() ||
+      !interaction.memberPermissions?.has(
+        PermissionFlagsBits.ViewAuditLog,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'You need **View Audit Log** staff permission to use `/ping`.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     const sent = await interaction.reply({
       content: 'Pinging...',
       fetchReply: true,

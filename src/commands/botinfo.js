@@ -1,11 +1,33 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const {
+  EmbedBuilder,
+  MessageFlags,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+} = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('botinfo')
-    .setDescription('Show basic information about the bot.'),
+    .setDescription('Show basic information about the bot.')
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator,
+    ),
 
   async execute(interaction) {
+    if (
+      !interaction.inGuild() ||
+      !interaction.memberPermissions?.has(
+        PermissionFlagsBits.Administrator,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'You need **Administrator** permission to use `/botinfo`.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     const client = interaction.client;
 
     const embed = new EmbedBuilder()

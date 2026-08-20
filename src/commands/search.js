@@ -13,9 +13,6 @@ module.exports = {
     .setDefaultMemberPermissions(
       PermissionFlagsBits.Administrator,
     )
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.ViewAuditLog,
-    )
     .addStringOption((option) =>
       option
         .setName('id')

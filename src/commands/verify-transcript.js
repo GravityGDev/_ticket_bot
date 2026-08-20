@@ -25,7 +25,7 @@ module.exports = {
       'Verify a Snay ticket transcript has not been modified.',
     )
     .setDefaultMemberPermissions(
-      PermissionFlagsBits.ViewAuditLog,
+      PermissionFlagsBits.Administrator,
     )
     .addAttachmentOption(
       (option) =>
@@ -68,12 +68,12 @@ module.exports = {
     if (
       !member ||
       !member.permissions.has(
-        PermissionFlagsBits.ViewAuditLog,
+        PermissionFlagsBits.Administrator,
       )
     ) {
       await interaction.reply({
         content:
-          'You need **View Audit Log** staff permission to verify transcripts.',
+          'You need **Administrator** permission to use `/verify-transcript`.',
         flags:
           MessageFlags.Ephemeral,
       });

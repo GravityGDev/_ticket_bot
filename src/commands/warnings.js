@@ -12,7 +12,7 @@ module.exports = {
     .setName('warnings')
     .setDescription('View a staff member’s full warning history.')
     .setDefaultMemberPermissions(
-      PermissionFlagsBits.ViewAuditLog,
+      PermissionFlagsBits.Administrator,
     )
     .addUserOption((option) =>
       option
@@ -37,12 +37,12 @@ module.exports = {
     if (
       !requester ||
       !requester.permissions.has(
-        PermissionFlagsBits.ViewAuditLog,
+        PermissionFlagsBits.Administrator,
       )
     ) {
       await interaction.reply({
         content:
-          'You need **View Audit Log** staff permission to view warning history.',
+          'You need **Administrator** permission to use `/warnings`.',
         flags: MessageFlags.Ephemeral,
       });
       return;
