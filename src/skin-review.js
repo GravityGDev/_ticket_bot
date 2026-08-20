@@ -912,48 +912,129 @@ async function handleSkinReviewReactionAdd(reaction, user) {
   });
 }
 
-async function requireStaff(interaction) {
+async function sendSkinAccessDenied(
+  interaction,
+  content,
+) {
+  const payload = {
+    content,
+    flags:
+      MessageFlags.Ephemeral,
+    allowedMentions: {
+      parse: [],
+    },
+  };
+
+  if (
+    interaction.deferred ||
+    interaction.replied
+  ) {
+    await interaction
+      .followUp(payload)
+      .catch(() => {});
+  } else if (
+    interaction.isRepliable()
+  ) {
+    await interaction
+      .reply(payload)
+      .catch(() => {});
+  }
+}
+
+function isSkinAdministrator(member) {
+  return Boolean(
+    member?.permissions?.has(
+      PermissionFlagsBits.Administrator,
+    ),
+  );
+}
+
+async function requireSearchAccess(interaction) {
   if (!interaction.inGuild()) {
-    await interaction.reply({
-      content: 'Use this inside the server.',
-      flags: MessageFlags.Ephemeral,
-    }).catch(() => {});
+    await sendSkinAccessDenied(
+      interaction,
+      'Use the skin review system inside the Snay.io server.',
+    );
     return null;
   }
 
-  const member = await interaction.guild.members
-    .fetch(interaction.user.id)
-    .catch(() => null);
+  const member =
+    await interaction.guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null);
+
+  if (!member) {
+    await sendSkinAccessDenied(
+      interaction,
+      'I could not resolve your server permissions.',
+    );
+    return null;
+  }
+
+  const reviewChannel =
+    interaction.guild.channels.cache.get(
+      SKIN_REVIEW_CHANNEL_ID,
+    ) ||
+    (await interaction.guild.channels
+      .fetch(
+        SKIN_REVIEW_CHANNEL_ID,
+      )
+      .catch(() => null));
 
   if (
-    !member ||
-    !member.permissions.has(
-      PermissionFlagsBits.Administrator,
+    !reviewChannel ||
+    !reviewChannel.isTextBased()
+  ) {
+    await sendSkinAccessDenied(
+      interaction,
+      `I could not access the configured skin moderation channel <#${SKIN_REVIEW_CHANNEL_ID}>.`,
+    );
+    return null;
+  }
+
+  const permissions =
+    reviewChannel.permissionsFor(
+      member,
+    );
+
+  if (
+    !permissions?.has(
+      PermissionFlagsBits.ViewChannel,
+    ) ||
+    !permissions?.has(
+      PermissionFlagsBits.ReadMessageHistory,
     )
   ) {
-    const payload = {
-      content:
-        'Only server **Administrators** can use the skin review / blacklist system.',
-      flags: MessageFlags.Ephemeral,
-    };
-
-    if (
-      interaction.deferred ||
-      interaction.replied
-    ) {
-      await interaction
-        .followUp(payload)
-        .catch(() => {});
-    } else {
-      await interaction
-        .reply(payload)
-        .catch(() => {});
-    }
-
+    await sendSkinAccessDenied(
+      interaction,
+      `You need access to <#${SKIN_REVIEW_CHANNEL_ID}> to use skin search/review.`,
+    );
     return null;
   }
 
   return member;
+}
+
+async function requireBlacklistAdministrator(
+  interaction,
+  member,
+) {
+  if (
+    isSkinAdministrator(
+      member,
+    )
+  ) {
+    return true;
+  }
+
+  await sendSkinAccessDenied(
+    interaction,
+    'Only server **Administrators** can Blacklist or UnBlacklist IDs.',
+  );
+
+  return false;
 }
 
 async function assertSourceChannelPermissions(client) {
@@ -1458,6 +1539,7 @@ async function buildSearchPanel(
   requestedPage = 0,
   selectedKey = null,
   requestedFilter = FILTER_ALL,
+  canManageBlacklist = false,
 ) {
   const id = normalizeMediaId(mediaId);
   const activeFilter = normalizeSearchFilter(requestedFilter);
@@ -1660,7 +1742,7 @@ async function buildSearchPanel(
     ? pageRecords.find((record) => recordKey(record) === selectedKey)
     : null;
 
-  const actionRow = new ActionRowBuilder().addComponents(
+  const actionButtons = [
     new ButtonBuilder()
       .setCustomId(
         searchCustomId(
@@ -1668,13 +1750,18 @@ async function buildSearchPanel(
           id,
           page,
           activeFilter,
-          selectedRecord ? recordKey(selectedRecord) : 'none',
+          selectedRecord
+            ? recordKey(selectedRecord)
+            : 'none',
         ),
       )
       .setLabel('Approve')
       .setEmoji(APPROVE_EMOJI)
       .setStyle(ButtonStyle.Success)
-      .setDisabled(!selectedRecord || blacklisted),
+      .setDisabled(
+        !selectedRecord ||
+        blacklisted,
+      ),
     new ButtonBuilder()
       .setCustomId(
         searchCustomId(
@@ -1682,26 +1769,58 @@ async function buildSearchPanel(
           id,
           page,
           activeFilter,
-          selectedRecord ? recordKey(selectedRecord) : 'none',
+          selectedRecord
+            ? recordKey(selectedRecord)
+            : 'none',
         ),
       )
       .setLabel('Reject')
       .setEmoji(REJECT_EMOJI)
       .setStyle(ButtonStyle.Danger)
-      .setDisabled(!selectedRecord),
-    new ButtonBuilder()
-      .setCustomId(
-        searchCustomId(
-          blacklisted ? 'unblacklist' : 'blacklist',
-          id,
-          page,
-          activeFilter,
+      .setDisabled(
+        !selectedRecord,
+      ),
+  ];
+
+  // Blacklist management is intentionally not rendered at all for ordinary
+  // staff. Even if an old button is somehow available, the interaction handler
+  // performs the Administrator check again.
+  if (canManageBlacklist) {
+    actionButtons.push(
+      new ButtonBuilder()
+        .setCustomId(
+          searchCustomId(
+            blacklisted
+              ? 'unblacklist'
+              : 'blacklist',
+            id,
+            page,
+            activeFilter,
+          ),
+        )
+        .setLabel(
+          blacklisted
+            ? 'UnBlacklist'
+            : 'Blacklist',
+        )
+        .setEmoji(
+          blacklisted
+            ? '🔓'
+            : '🚫',
+        )
+        .setStyle(
+          blacklisted
+            ? ButtonStyle.Secondary
+            : ButtonStyle.Danger,
         ),
-      )
-      .setLabel(blacklisted ? 'UnBlacklist' : 'Blacklist')
-      .setEmoji(blacklisted ? '🔓' : '🚫')
-      .setStyle(blacklisted ? ButtonStyle.Secondary : ButtonStyle.Danger),
-  );
+    );
+  }
+
+  const actionRow =
+    new ActionRowBuilder()
+      .addComponents(
+        actionButtons,
+      );
 
   const pageRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -2095,8 +2214,60 @@ async function buildBlacklistManagerPanel(
   };
 }
 
+function buildStaffSearchHomePanel() {
+  return {
+    content: '',
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle(
+          '🔎 Skin / Badge Search',
+        )
+        .setDescription(
+          `Search media posted in <#${SKIN_REVIEW_CHANNEL_ID}> by skin, clan, or badge ID.\n\n` +
+            'You can **Approve** and **Reject** matching media.\n' +
+            'Blacklist management is available to Administrators only.',
+        )
+        .setFooter({
+          text:
+            'Press Search below or use /search id:<ID> for a direct lookup.',
+        }),
+    ],
+    components: [
+      new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(
+              managerCustomId(
+                'search',
+                0,
+              ),
+            )
+            .setLabel('Search')
+            .setEmoji('🔎')
+            .setStyle(
+              ButtonStyle.Primary,
+            ),
+        ),
+    ],
+    allowedMentions: {
+      parse: [],
+    },
+  };
+}
+
 async function executeSkinSearch(interaction, client) {
-  if (!(await requireStaff(interaction))) return;
+  const member =
+    await requireSearchAccess(
+      interaction,
+    );
+
+  if (!member) return;
+
+  const canManageBlacklist =
+    isSkinAdministrator(
+      member,
+    );
 
   const rawMediaId =
     interaction.options.getString(
@@ -2105,22 +2276,35 @@ async function executeSkinSearch(interaction, client) {
     );
 
   await interaction.deferReply({
-    flags: MessageFlags.Ephemeral,
+    flags:
+      MessageFlags.Ephemeral,
   });
 
   try {
-    await assertSourceChannelPermissions(client);
-    await initializeSkinReview(client);
+    await assertSourceChannelPermissions(
+      client,
+    );
+
+    await initializeSkinReview(
+      client,
+    );
 
     if (!rawMediaId) {
-      const manager =
-        await buildBlacklistManagerPanel(
-          0,
-        );
+      if (canManageBlacklist) {
+        const manager =
+          await buildBlacklistManagerPanel(
+            0,
+          );
 
-      await interaction.editReply(
-        manager.payload,
-      );
+        await interaction.editReply(
+          manager.payload,
+        );
+      } else {
+        await interaction.editReply(
+          buildStaffSearchHomePanel(),
+        );
+      }
+
       return;
     }
 
@@ -2136,19 +2320,198 @@ async function executeSkinSearch(interaction, client) {
         0,
         null,
         FILTER_ALL,
+        canManageBlacklist,
       );
 
     await interaction.editReply(
       result.payload,
     );
   } catch (error) {
-    console.error('[SKIN SEARCH ERROR]', error);
+    console.error(
+      '[SKIN SEARCH ERROR]',
+      error,
+    );
 
     await interaction.editReply({
-      content: `I could not search the skin channel: ${error?.message || 'Unknown error'}`,
+      content:
+        `I could not search the skin channel: ${
+          error?.message ||
+          'Unknown error'
+        }`,
       embeds: [],
       components: [],
-      allowedMentions: { parse: [] },
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  }
+}
+
+async function executeSkinContextSearch(
+  interaction,
+  client,
+) {
+  const member =
+    await requireSearchAccess(
+      interaction,
+    );
+
+  if (!member) return;
+
+  const targetMessage =
+    interaction.targetMessage;
+
+  if (
+    !isSourceMediaMessage(
+      targetMessage,
+    )
+  ) {
+    await interaction.reply({
+      content:
+        `Use **Search Associated Media** on a message in <#${SKIN_REVIEW_CHANNEL_ID}> posted by the configured media bot.`,
+      flags:
+        MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
+    });
+    return;
+  }
+
+  const entries =
+    parseMediaEntries(
+      targetMessage.content,
+    );
+
+  const uniqueEntries = [];
+  const seenIds = new Set();
+
+  for (const entry of entries) {
+    if (
+      seenIds.has(
+        entry.mediaId,
+      )
+    ) {
+      continue;
+    }
+
+    seenIds.add(
+      entry.mediaId,
+    );
+
+    uniqueEntries.push(
+      entry,
+    );
+  }
+
+  if (!uniqueEntries.length) {
+    await interaction.reply({
+      content:
+        'I could not find a valid skin / clan / badge ID in that message.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
+
+  try {
+    await assertSourceChannelPermissions(
+      client,
+    );
+
+    await initializeSkinReview(
+      client,
+    );
+
+    const canManageBlacklist =
+      isSkinAdministrator(
+        member,
+      );
+
+    if (
+      uniqueEntries.length === 1
+    ) {
+      const result =
+        await buildSearchPanel(
+          client,
+          uniqueEntries[0].mediaId,
+          0,
+          null,
+          FILTER_ALL,
+          canManageBlacklist,
+        );
+
+      await interaction.editReply(
+        result.payload,
+      );
+
+      return;
+    }
+
+    const menu =
+      new StringSelectMenuBuilder()
+        .setCustomId(
+          'skinreview:context-pick',
+        )
+        .setPlaceholder(
+          'Select the ID to search',
+        )
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(
+          uniqueEntries
+            .slice(0, 25)
+            .map(
+              (entry) =>
+                new StringSelectMenuOptionBuilder()
+                  .setLabel(
+                    `${entry.typeLabel || 'Media'} • ${entry.mediaId}`.slice(
+                      0,
+                      100,
+                    ),
+                  )
+                  .setDescription(
+                    'Pull every skin and badge associated with this ID.',
+                  )
+                  .setValue(
+                    entry.mediaId,
+                  ),
+            ),
+        );
+
+    await interaction.editReply({
+      content:
+        'That message contains more than one media ID. Choose which ID you want to search.',
+      embeds: [],
+      components: [
+        new ActionRowBuilder()
+          .addComponents(
+            menu,
+          ),
+      ],
+      allowedMentions: {
+        parse: [],
+      },
+    });
+  } catch (error) {
+    console.error(
+      '[SKIN CONTEXT SEARCH ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        `I could not search associated media: ${
+          error?.message ||
+          'Unknown error'
+        }`,
+      embeds: [],
+      components: [],
     });
   }
 }
@@ -2260,15 +2623,30 @@ async function rerenderInteraction(
   selectedKey = null,
   filterValue = FILTER_ALL,
 ) {
-  const result = await buildSearchPanel(
-    client,
-    mediaId,
-    page,
-    selectedKey,
-    filterValue,
-  );
+  const member =
+    interaction.guild
+      ? await interaction.guild.members
+          .fetch(
+            interaction.user.id,
+          )
+          .catch(() => null)
+      : null;
 
-  await interaction.editReply(result.payload);
+  const result =
+    await buildSearchPanel(
+      client,
+      mediaId,
+      page,
+      selectedKey,
+      filterValue,
+      isSkinAdministrator(
+        member,
+      ),
+    );
+
+  await interaction.editReply(
+    result.payload,
+  );
 }
 
 async function handleSkinReviewInteraction(interaction, client) {
@@ -2276,7 +2654,17 @@ async function handleSkinReviewInteraction(interaction, client) {
     return false;
   }
 
-  if (!(await requireStaff(interaction))) return true;
+  const member =
+    await requireSearchAccess(
+      interaction,
+    );
+
+  if (!member) return true;
+
+  const canManageBlacklist =
+    isSkinAdministrator(
+      member,
+    );
 
   const parts =
     interaction.customId.split(':');
@@ -2287,6 +2675,34 @@ async function handleSkinReviewInteraction(interaction, client) {
     await assertSourceChannelPermissions(client);
     await initializeSkinReview(client);
 
+    if (
+      action === 'context-pick' &&
+      interaction.isStringSelectMenu()
+    ) {
+      const mediaId =
+        normalizeMediaId(
+          interaction.values[0],
+        );
+
+      await interaction.deferUpdate();
+
+      const result =
+        await buildSearchPanel(
+          client,
+          mediaId,
+          0,
+          null,
+          FILTER_ALL,
+          canManageBlacklist,
+        );
+
+      await interaction.editReply(
+        result.payload,
+      );
+
+      return true;
+    }
+
     // ---------------------------------------------------------------
     // Plain /search blacklist-manager interactions.
     // ---------------------------------------------------------------
@@ -2296,6 +2712,21 @@ async function handleSkinReviewInteraction(interaction, client) {
 
       const managerPage =
         Number(parts[3]) || 0;
+
+      const managerSearchAction =
+        managerAction === 'search' ||
+        managerAction === 'search-submit';
+
+      if (
+        !managerSearchAction &&
+        !canManageBlacklist
+      ) {
+        await requireBlacklistAdministrator(
+          interaction,
+          member,
+        );
+        return true;
+      }
 
       if (
         managerAction === 'noop' &&
@@ -2354,6 +2785,7 @@ async function handleSkinReviewInteraction(interaction, client) {
             0,
             null,
             FILTER_ALL,
+            canManageBlacklist,
           );
 
         await interaction.editReply(
@@ -2460,6 +2892,15 @@ async function handleSkinReviewInteraction(interaction, client) {
       action === 'blacklist-submit' &&
       interaction.isModalSubmit()
     ) {
+      if (
+        !(await requireBlacklistAdministrator(
+          interaction,
+          member,
+        ))
+      ) {
+        return true;
+      }
+
       const returnPage =
         Number(parts[2]) || 0;
 
@@ -2678,6 +3119,15 @@ async function handleSkinReviewInteraction(interaction, client) {
     }
 
     if (action === 'blacklist' && interaction.isButton()) {
+      if (
+        !(await requireBlacklistAdministrator(
+          interaction,
+          member,
+        ))
+      ) {
+        return true;
+      }
+
       await interaction.showModal(
         createBlacklistModal({
           mediaId,
@@ -2692,6 +3142,15 @@ async function handleSkinReviewInteraction(interaction, client) {
     }
 
     if (action === 'unblacklist' && interaction.isButton()) {
+      if (
+        !(await requireBlacklistAdministrator(
+          interaction,
+          member,
+        ))
+      ) {
+        return true;
+      }
+
       await interaction.deferUpdate();
       await unblacklistMediaId(mediaId);
 
@@ -2727,6 +3186,7 @@ module.exports = {
   PROTECTED_REACTION_BOT_ID,
   initializeSkinReview,
   executeSkinSearch,
+  executeSkinContextSearch,
   handleSkinReviewInteraction,
   handleSkinReviewMessageCreate,
   handleSkinReviewMessageUpdate,

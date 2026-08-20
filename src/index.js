@@ -336,18 +336,29 @@ client.once(Events.ClientReady, (readyClient) => {
   timer.unref?.();
 });
 
-// Slash commands, ticket buttons, and ticket select menus.
+// Application commands, ticket buttons, and ticket select menus.
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    if (interaction.isChatInputCommand()) {
-      const command = client.commands.get(interaction.commandName);
+    if (
+      interaction.isChatInputCommand() ||
+      interaction.isMessageContextMenuCommand()
+    ) {
+      const command =
+        client.commands.get(
+          interaction.commandName,
+        );
 
       if (!command) {
-        console.warn(`[COMMAND] Discord sent /${interaction.commandName}, but it is not loaded locally.`);
+        console.warn(
+          `[COMMAND] Discord sent ${interaction.commandName}, but it is not loaded locally.`,
+        );
         return;
       }
 
-      await command.execute(interaction, client);
+      await command.execute(
+        interaction,
+        client,
+      );
       return;
     }
 
@@ -392,10 +403,10 @@ async function start() {
   try {
     const commands = loadCommands();
 
-    console.log(`[STARTUP] Found ${commands.length} valid slash command(s).`);
+    console.log(`[STARTUP] Found ${commands.length} valid application command(s).`);
     await registerCommands(commands);
 
-    console.log('[STARTUP] Slash command registration complete. Logging in...');
+    console.log('[STARTUP] Application command registration complete. Logging in...');
     await client.login(process.env.DISCORD_TOKEN);
   } catch (error) {
     console.error('[STARTUP ERROR]', error);
