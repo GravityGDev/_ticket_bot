@@ -699,18 +699,101 @@ async function setTicketStaffTyping(
   enabled,
   reason,
 ) {
+  const id =
+    String(
+      staffId,
+    );
+
+  const member =
+    channel.guild.members.cache.get(
+      id,
+    ) ||
+    (await channel.guild.members
+      .fetch(
+        id,
+      )
+      .catch(() => null));
+
+  const overwrite = {
+    ViewChannel: true,
+    ReadMessageHistory: true,
+    AttachFiles: true,
+    EmbedLinks: true,
+    AddReactions: true,
+    UseApplicationCommands: true,
+    SendMessages:
+      Boolean(
+        enabled,
+      ),
+  };
+
+  // First try the normal overwrite edit. This should clear the old member-level
+  // SendMessages deny when enabled=true.
   await channel.permissionOverwrites.edit(
-    String(staffId),
-    {
-      ViewChannel: true,
-      ReadMessageHistory: true,
-      AttachFiles: true,
-      EmbedLinks: true,
-      SendMessages:
-        Boolean(enabled),
-    },
+    member || id,
+    overwrite,
     reason,
   );
+
+  if (
+    !enabled ||
+    !member
+  ) {
+    return;
+  }
+
+  // Verify the effective permission. If Discord still resolves SendMessages as
+  // denied, rebuild the member overwrite from scratch. This covers stale /
+  // inherited member overwrite states from tickets created before this fix.
+  let effective =
+    channel.permissionsFor(
+      member,
+    );
+
+  if (
+    effective?.has(
+      PermissionFlagsBits.SendMessages,
+    )
+  ) {
+    return;
+  }
+
+  console.warn(
+    `[TICKET ASSIST PERMISSION RETRY] ${id} still cannot SendMessages in ${channel.id}; rebuilding member overwrite.`,
+  );
+
+  await channel.permissionOverwrites
+    .delete(
+      member,
+      `${reason} - clearing stale ticket staff deny`,
+    )
+    .catch((error) => {
+      console.error(
+        '[TICKET ASSIST OVERWRITE DELETE RETRY ERROR]',
+        error,
+      );
+    });
+
+  await channel.permissionOverwrites.edit(
+    member,
+    overwrite,
+    `${reason} - rebuilt assistant access`,
+  );
+
+  effective =
+    channel.permissionsFor(
+      member,
+    );
+
+  if (
+    !effective?.has(
+      PermissionFlagsBits.SendMessages,
+    )
+  ) {
+    throw new Error(
+      `Discord still reports SendMessages denied for assistant ${id} after rebuilding the member overwrite.`,
+    );
+  }
 }
 
 async function applyTicketStaffTypingState(
@@ -5703,6 +5786,8 @@ async function claimTicketUnlocked(interaction) {
     return;
   }
 
+  await interaction.deferUpdate();
+
   const claimedAt =
     new Date();
 
@@ -5804,25 +5889,33 @@ async function claimTicketUnlocked(interaction) {
       error,
     );
 
-    await interaction.reply({
+    await interaction.followUp({
       content:
         'I could not claim this ticket. Please try again.',
       flags:
         MessageFlags.Ephemeral,
-    });
+    }).catch(() => {});
     return;
   }
 
-  await interaction.reply({
-    content:
-      `🎫 Ticket claimed by <@${interaction.user.id}>.\n` +
-      'The **Claim** button is now **Assist**. Only the claimer and added assistants can talk as staff.',
-    allowedMentions: {
-      users: [
-        interaction.user.id,
-      ],
-    },
-  });
+  // Public ticket notices should be ordinary channel messages, not interaction
+  // replies. Keep the claim notice intentionally short.
+  await interaction.channel
+    .send({
+      content:
+        `🎫 Ticket claimed by <@${interaction.user.id}>.`,
+      allowedMentions: {
+        users: [
+          interaction.user.id,
+        ],
+      },
+    })
+    .catch((error) => {
+      console.error(
+        '[TICKET CLAIM NOTICE SEND ERROR]',
+        error,
+      );
+    });
 }
 
 function buildAssistActionMenu() {
@@ -5945,6 +6038,19 @@ async function openAssistMenu(
   if (!data) {
     return;
   }
+
+  // Repair/synchronise ownership overwrites whenever the owner opens Assist.
+  // This also fixes assistants added to tickets before this permission fix.
+  await applyTicketStaffTypingState(
+    interaction.channel,
+    data,
+    `Assist menu permission sync by ${interaction.user.tag}`,
+  ).catch((error) => {
+    console.error(
+      '[TICKET ASSIST MENU PERMISSION SYNC ERROR]',
+      error,
+    );
+  });
 
   await interaction.reply(
     buildAssistActionMenu(),
@@ -6350,18 +6456,8 @@ async function addAssistStaff(
   let nextData;
 
   try {
-    for (
-      const staffId of
-      validIds
-    ) {
-      await setTicketStaffTyping(
-        interaction.channel,
-        staffId,
-        true,
-        `Added as ticket assistant by ${interaction.user.tag}`,
-      );
-    }
-
+    // Persist the assistant list first so both the permission sync and the
+    // MessageCreate staff guard read the same updated ownership state.
     nextData =
       await updateTicketTopic(
         interaction.channel,
@@ -6372,6 +6468,58 @@ async function addAssistStaff(
         },
         `Ticket assistants added by ${interaction.user.tag}`,
       );
+
+    // Re-sync every ticket staff member. The current owner + assistants get an
+    // explicit member SendMessages allow; everybody else keeps the deny.
+    await applyTicketStaffTypingState(
+      interaction.channel,
+      nextData,
+      `Ticket assistants synchronized by ${interaction.user.tag}`,
+    );
+
+    // Verify each newly selected assistant after the full sync.
+    for (
+      const staffId of
+      validIds
+    ) {
+      const member =
+        interaction.guild.members.cache.get(
+          staffId,
+        ) ||
+        (await interaction.guild.members
+          .fetch(
+            staffId,
+          )
+          .catch(() => null));
+
+      if (!member) {
+        throw new Error(
+          `Could not resolve selected assistant ${staffId}.`,
+        );
+      }
+
+      const permissions =
+        interaction.channel.permissionsFor(
+          member,
+        );
+
+      if (
+        !permissions?.has(
+          PermissionFlagsBits.ViewChannel,
+        ) ||
+        !permissions?.has(
+          PermissionFlagsBits.SendMessages,
+        )
+      ) {
+        // One final targeted retry in case the full staff sync hit an old deny.
+        await setTicketStaffTyping(
+          interaction.channel,
+          staffId,
+          true,
+          `Final assistant permission verification by ${interaction.user.tag}`,
+        );
+      }
+    }
 
     await refreshTicketControlMessage(
       interaction.channel,
@@ -6398,7 +6546,7 @@ async function addAssistStaff(
           (id) =>
             `<@${id}>`,
         )
-        .join(', ')} as ticket assistants. They can now talk in this ticket.`,
+        .join(', ')} as ticket assistants. Their **View Channel** and **Send Messages** access has been enabled.`,
     components: [],
     allowedMentions: {
       users:
