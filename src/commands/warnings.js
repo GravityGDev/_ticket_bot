@@ -6,6 +6,9 @@ const {
 const {
   buildWarningHistoryPayload,
 } = require('../warn-system');
+const {
+  isStaffMember,
+} = require('../staff-role-hierarchy');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -35,9 +38,12 @@ module.exports = {
       .catch(() => null);
 
     if (
-      !requester ||
-      !requester.permissions.has(
-        PermissionFlagsBits.Administrator,
+      !interaction.__snayPermissionAuthorized &&
+      (
+        !requester ||
+        !requester.permissions.has(
+          PermissionFlagsBits.Administrator,
+        )
       )
     ) {
       await interaction.reply({
@@ -60,8 +66,8 @@ module.exports = {
     if (
       !targetMember ||
       targetMember.user.bot ||
-      !targetMember.permissions.has(
-        PermissionFlagsBits.ViewAuditLog,
+      !isStaffMember(
+        targetMember,
       )
     ) {
       await interaction.reply({

@@ -272,6 +272,10 @@ async function downloadEvidenceFiles(attachments) {
 }
 
 
+const {
+  isStaffMember,
+} = require('../staff-role-hierarchy');
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('warn')
@@ -405,6 +409,7 @@ module.exports = {
     }
 
     if (
+      !interaction.__snayPermissionAuthorized &&
       !interaction.memberPermissions?.has(
         PermissionFlagsBits.Administrator,
       )
@@ -436,7 +441,9 @@ module.exports = {
       }
 
       if (
-        !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
+        !isStaffMember(
+          member,
+        )
       ) {
         throw new Error('This user is not Snay.io staff.');
       }

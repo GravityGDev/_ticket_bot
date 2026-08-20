@@ -28,6 +28,7 @@ module.exports = {
     }
 
     if (
+      !interaction.__snayPermissionAuthorized &&
       !interaction.memberPermissions?.has(
         PermissionFlagsBits.Administrator,
       )

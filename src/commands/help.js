@@ -10,6 +10,15 @@ const {
   StringSelectMenuOptionBuilder,
 } = require('discord.js');
 
+const {
+  commandKeyFromJson,
+  canMemberUseCommandSync,
+  getMinimumRoleSync,
+} = require('../staff-command-permissions');
+const {
+  STAFF_ROLE_IDS,
+} = require('../staff-role-hierarchy');
+
 const HELP_MENU_COMMANDS_PER_PAGE = 23;
 const HELP_COLLECTOR_TIME = 15 * 60 * 1000;
 
@@ -61,77 +70,33 @@ function commandRequiredPermissions(json) {
 }
 
 function memberCanUseCommand(member, json) {
-  const required =
-    commandRequiredPermissions(
+  return canMemberUseCommandSync(
+    member,
+    commandKeyFromJson(
       json,
-    );
-
-  // No default permission restriction.
-  if (
-    required === null
-  ) {
-    return true;
-  }
-
-  // Discord's Administrator permission bypasses other channel/server perms.
-  if (
-    member.permissions.has(
-      PermissionFlagsBits.Administrator,
-    )
-  ) {
-    return true;
-  }
-
-  // "0" means there are no normal default member permissions.
-  if (required === 0n) {
-    return false;
-  }
-
-  return member.permissions.has(
-    required,
+    ),
   );
 }
 
-function permissionLabel(json) {
-  const required =
-    commandRequiredPermissions(
+function permissionLabel(json, guildId) {
+  const commandKey =
+    commandKeyFromJson(
       json,
     );
 
-  if (required === null) {
-    return 'No special Discord permission';
-  }
+  const minimum =
+    getMinimumRoleSync(
+      guildId,
+      commandKey,
+    );
 
-  if (required === 0n) {
-    return 'Restricted by Discord command permissions';
-  }
-
-  const matches = [];
-
-  for (
-    const [name, bit] of
-    Object.entries(PermissionFlagsBits)
-  ) {
-    if (
-      typeof bit !== 'bigint'
-    ) {
-      continue;
-    }
-
-    if (
-      (required & bit) === bit
-    ) {
-      matches.push(
-        humanizePermissionName(
-          name,
-        ),
-      );
-    }
+  if (minimum === null) {
+    return 'Developer only';
   }
 
   return (
-    matches.join(', ') ||
-    'Restricted'
+    `<@&${STAFF_ROLE_IDS[minimum]}> or higher ` +
+    `(staff level ${minimum + 1}+)`
   );
 }
 
@@ -614,6 +579,7 @@ function buildCommandListEmbed(
 function buildCommandDetailEmbed(
   json,
   commandIds,
+  guildId,
 ) {
   const rootMention =
     commandMention(
@@ -634,7 +600,7 @@ function buildCommandDetailEmbed(
   );
 
   sections.push(
-    `**Permission**\n${permissionLabel(json)}`,
+    `**Permission**\n${permissionLabel(json, guildId)}`,
   );
 
   if (subcommands.length) {
@@ -720,6 +686,7 @@ function buildHelpPayload({
   availableCommands,
   commandIds,
   page,
+  guildId,
   selectedCommandName = null,
 }) {
   const menu =
@@ -752,6 +719,7 @@ function buildHelpPayload({
         buildCommandDetailEmbed(
           selected.json,
           commandIds,
+          guildId,
         ),
       );
     }
@@ -808,9 +776,12 @@ module.exports = {
         );
 
     if (
-      !member ||
-      !member.permissions.has(
-        PermissionFlagsBits.ViewAuditLog,
+      !interaction.__snayPermissionAuthorized &&
+      (
+        !member ||
+        !member.permissions.has(
+          PermissionFlagsBits.ViewAuditLog,
+        )
       )
     ) {
       await interaction.reply({
@@ -843,6 +814,8 @@ module.exports = {
         commandIds,
         page:
           currentPage,
+        guildId:
+          interaction.guild.id,
         selectedCommandName,
       });
 
@@ -924,6 +897,8 @@ module.exports = {
             commandIds,
             page:
               currentPage,
+            guildId:
+              interaction.guild.id,
             selectedCommandName,
           });
 
@@ -945,6 +920,8 @@ module.exports = {
             commandIds,
             page:
               currentPage,
+            guildId:
+              interaction.guild.id,
             selectedCommandName,
           });
 

@@ -14,9 +14,12 @@ module.exports = {
 
   async execute(interaction) {
     if (
-      !interaction.inGuild() ||
-      !interaction.memberPermissions?.has(
-        PermissionFlagsBits.ViewAuditLog,
+      !interaction.__snayPermissionAuthorized &&
+      (
+        !interaction.inGuild() ||
+        !interaction.memberPermissions?.has(
+          PermissionFlagsBits.ViewAuditLog,
+        )
       )
     ) {
       await interaction.reply({

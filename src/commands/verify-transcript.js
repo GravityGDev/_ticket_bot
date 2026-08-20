@@ -66,9 +66,12 @@ module.exports = {
         );
 
     if (
-      !member ||
-      !member.permissions.has(
-        PermissionFlagsBits.Administrator,
+      !interaction.__snayPermissionAuthorized &&
+      (
+        !member ||
+        !member.permissions.has(
+          PermissionFlagsBits.Administrator,
+        )
       )
     ) {
       await interaction.reply({
