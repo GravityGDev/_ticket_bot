@@ -546,7 +546,7 @@ async function renderRankCard(guild, member, periodKey) {
           stroke="#617084"
           stroke-opacity=".55"/>
 
-    <text x="230" y="622"
+    <text x="220" y="622"
           font-family="Arial, Helvetica, sans-serif"
           font-size="30"
           font-weight="800"
@@ -564,7 +564,7 @@ async function renderRankCard(guild, member, periodKey) {
           stroke="#617084"
           stroke-opacity=".55"/>
 
-    <text x="230" y="716"
+    <text x="220" y="716"
           font-family="Arial, Helvetica, sans-serif"
           font-size="30"
           font-weight="800"
@@ -591,44 +591,58 @@ async function renderRankCard(guild, member, periodKey) {
     </text>
 
     <!-- Stat card: tickets -->
-    <rect x="551" y="535"
-          width="278" height="224"
+    <rect x="610" y="535"
+          width="255" height="224"
           rx="24"
           fill="url(#panelGradient)"
           stroke="url(#accentGradient)"
           stroke-width="1.5"/>
 
-    <circle cx="620" cy="599" r="38"
+    <circle cx="672" cy="599" r="38"
             fill="#081426"
             stroke="url(#accentGradient)"
             stroke-width="2"/>
 
-    <!-- ticket icon -->
-    <path d="M603 592l19-19 9 9 7-7 13 13-7 7 9 9-19 19-8-8-7 7-14-14 7-7z"
+    <!-- clean ticket icon -->
+    <path d="M650 582
+             H690
+             C690 590 696 594 704 594
+             V604
+             C696 604 690 608 690 616
+             H650
+             C650 608 644 604 636 604
+             V594
+             C644 594 650 590 650 582Z"
           fill="none"
           stroke="#26ded6"
-          stroke-width="3"
+          stroke-width="3.5"
           stroke-linejoin="round"/>
+    <line x1="670" y1="586"
+          x2="670" y2="612"
+          stroke="#26ded6"
+          stroke-width="2.5"
+          stroke-dasharray="4 5"
+          stroke-linecap="round"/>
 
-    <text x="677" y="589"
+    <text x="724" y="589"
           font-family="Arial, Helvetica, sans-serif"
           font-size="24"
           font-weight="800"
           fill="#ffffff">TICKETS</text>
-    <text x="677" y="621"
+    <text x="724" y="621"
           font-family="Arial, Helvetica, sans-serif"
           font-size="24"
           font-weight="800"
           fill="#ffffff">CLAIMED</text>
 
-    <line x1="579" y1="658"
-          x2="800" y2="658"
+    <line x1="638" y1="658"
+          x2="837" y2="658"
           stroke="url(#accentGradient)"
           stroke-width="3"
           stroke-dasharray="3 10"
           stroke-linecap="round"/>
 
-    <text x="690" y="724"
+    <text x="738" y="724"
           text-anchor="middle"
           font-family="Arial, Helvetica, sans-serif"
           font-size="68"
@@ -636,53 +650,53 @@ async function renderRankCard(guild, member, periodKey) {
           fill="#ffffff">${tickets.toLocaleString()}</text>
 
     <!-- Stat card: messages -->
-    <rect x="852" y="535"
-          width="278" height="224"
+    <rect x="895" y="535"
+          width="255" height="224"
           rx="24"
           fill="url(#panelGradient)"
           stroke="url(#accentGradient)"
           stroke-width="1.5"/>
 
-    <circle cx="921" cy="599" r="38"
+    <circle cx="957" cy="599" r="38"
             fill="#081426"
             stroke="url(#accentGradient)"
             stroke-width="2"/>
 
     <!-- chat icon -->
-    <rect x="901" y="584"
+    <rect x="937" y="584"
           width="40" height="29"
           rx="7"
           fill="none"
           stroke="#31d9dc"
           stroke-width="3"/>
-    <path d="M914 613l-8 10 1-10"
+    <path d="M950 613l-8 10 1-10"
           fill="none"
           stroke="#31d9dc"
           stroke-width="3"
           stroke-linejoin="round"/>
-    <circle cx="912" cy="598" r="2.4" fill="#31d9dc"/>
-    <circle cx="921" cy="598" r="2.4" fill="#31d9dc"/>
-    <circle cx="930" cy="598" r="2.4" fill="#31d9dc"/>
+    <circle cx="948" cy="598" r="2.4" fill="#31d9dc"/>
+    <circle cx="957" cy="598" r="2.4" fill="#31d9dc"/>
+    <circle cx="966" cy="598" r="2.4" fill="#31d9dc"/>
 
-    <text x="978" y="589"
+    <text x="1006" y="589"
           font-family="Arial, Helvetica, sans-serif"
           font-size="23"
           font-weight="800"
           fill="#ffffff">TRACKED</text>
-    <text x="978" y="621"
+    <text x="1006" y="621"
           font-family="Arial, Helvetica, sans-serif"
           font-size="23"
           font-weight="800"
           fill="#ffffff">MESSAGES</text>
 
-    <line x1="880" y1="658"
-          x2="1101" y2="658"
+    <line x1="923" y1="658"
+          x2="1122" y2="658"
           stroke="url(#accentGradient)"
           stroke-width="3"
           stroke-dasharray="3 10"
           stroke-linecap="round"/>
 
-    <text x="991" y="724"
+    <text x="1022" y="724"
           text-anchor="middle"
           font-family="Arial, Helvetica, sans-serif"
           font-size="68"
@@ -690,51 +704,51 @@ async function renderRankCard(guild, member, periodKey) {
           fill="#ffffff">${messages.toLocaleString()}</text>
 
     <!-- Stat card: score -->
-    <rect x="1153" y="535"
-          width="278" height="224"
+    <rect x="1180" y="535"
+          width="255" height="224"
           rx="24"
           fill="url(#panelGradient)"
           stroke="url(#accentGradient)"
           stroke-width="1.5"/>
 
-    <circle cx="1222" cy="599" r="38"
+    <circle cx="1242" cy="599" r="38"
             fill="#081426"
             stroke="url(#accentGradient)"
             stroke-width="2"/>
 
     <!-- activity icon -->
-    <polyline points="1202,615 1217,600 1228,608 1244,589"
+    <polyline points="1222,615 1237,600 1248,608 1264,589"
               fill="none"
               stroke="#4ab8ff"
               stroke-width="5"
               stroke-linecap="round"
               stroke-linejoin="round"/>
-    <polyline points="1235,589 1244,589 1244,598"
+    <polyline points="1255,589 1264,589 1264,598"
               fill="none"
               stroke="#4ab8ff"
               stroke-width="5"
               stroke-linecap="round"
               stroke-linejoin="round"/>
 
-    <text x="1278" y="589"
+    <text x="1290" y="589"
           font-family="Arial, Helvetica, sans-serif"
           font-size="22"
           font-weight="800"
           fill="#ffffff">ACTIVITY</text>
-    <text x="1278" y="621"
+    <text x="1290" y="621"
           font-family="Arial, Helvetica, sans-serif"
           font-size="22"
           font-weight="800"
           fill="#ffffff">SCORE</text>
 
-    <line x1="1181" y1="658"
-          x2="1402" y2="658"
+    <line x1="1208" y1="658"
+          x2="1407" y2="658"
           stroke="url(#accentGradient)"
           stroke-width="3"
           stroke-dasharray="3 10"
           stroke-linecap="round"/>
 
-    <text x="1292" y="724"
+    <text x="1307" y="724"
           text-anchor="middle"
           font-family="Arial, Helvetica, sans-serif"
           font-size="68"
@@ -742,14 +756,14 @@ async function renderRankCard(guild, member, periodKey) {
           fill="#ffffff">${score.toLocaleString()}</text>
 
     <!-- Scoring model -->
-    <rect x="551" y="779"
-          width="880" height="133"
+    <rect x="610" y="779"
+          width="825" height="133"
           rx="24"
           fill="url(#panelGradient)"
           stroke="url(#accentGradient)"
           stroke-width="1.5"/>
 
-    <circle cx="619" cy="845"
+    <circle cx="678" cy="845"
             r="38"
             fill="#081426"
             stroke="url(#accentGradient)"
@@ -769,36 +783,34 @@ async function renderRankCard(guild, member, periodKey) {
     <line x1="635" y1="845" x2="645" y2="845"
           stroke="#668cff" stroke-width="4"/>
 
-    <text x="688" y="829"
+    <text x="738" y="829"
           font-family="Arial, Helvetica, sans-serif"
           font-size="28"
           font-weight="800"
           fill="#ffffff">SCORING MODEL</text>
 
-    <text x="688" y="868"
+    <text x="738" y="868"
           font-family="Arial, Helvetica, sans-serif"
           font-size="25"
           fill="#aeb9c9">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}</text>
 
     <!-- footer -->
     <line x1="84" y1="958"
-          x2="516" y2="958"
+          x2="650" y2="958"
           stroke="#728096"
           stroke-opacity=".45"/>
 
-    <line x1="1000" y1="958"
+    <line x1="886" y1="958"
           x2="1432" y2="958"
           stroke="#728096"
           stroke-opacity=".45"/>
 
-    <!-- small brand mark -->
-    <path d="M604 939l23-14 22 0-22 14-23 0zm0 0v22l23 0 22-14h-22v-8z"
-          fill="url(#accentGradient)"/>
-
-    <text x="668" y="966"
+    <text x="768" y="966"
+          text-anchor="middle"
           font-family="Arial, Helvetica, sans-serif"
-          font-size="25"
-          fill="#8996aa">Snay.io Staff Rank Poster</text>
+          font-size="28"
+          font-weight="700"
+          fill="#8f9db1">Snay.io</text>
 
   </svg>`;
 
