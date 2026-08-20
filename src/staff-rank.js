@@ -417,8 +417,6 @@ async function renderRankCard(guild, member, periodKey) {
           fill="url(#rightGlow)"/>
 
     <!-- subtle diagonal background geometry -->
-    <path d="M0 0L240 0L0 250z"
-          fill="#0c2132" opacity=".42"/>
     <path d="M1210 18H1517V340L1118 724L980 724L1450 245z"
           fill="#16154a" opacity=".16"/>
     <path d="M1010 1002L1518 494V1002z"
@@ -768,19 +766,24 @@ async function renderRankCard(guild, member, periodKey) {
             fill="#081426"
             stroke="url(#accentGradient)"
             stroke-width="2"/>
+    <circle cx="678" cy="845"
+            r="27"
+            fill="#07111f"
+            stroke="#24425f"
+            stroke-width="1.5"/>
 
     <!-- target icon -->
-    <circle cx="619" cy="845" r="18"
+    <circle cx="678" cy="845" r="18"
             fill="none" stroke="#668cff" stroke-width="4"/>
-    <circle cx="619" cy="845" r="7"
+    <circle cx="678" cy="845" r="7"
             fill="none" stroke="#32d9d5" stroke-width="4"/>
-    <line x1="619" y1="819" x2="619" y2="829"
+    <line x1="678" y1="819" x2="678" y2="829"
           stroke="#668cff" stroke-width="4"/>
-    <line x1="619" y1="861" x2="619" y2="871"
+    <line x1="678" y1="861" x2="678" y2="871"
           stroke="#668cff" stroke-width="4"/>
-    <line x1="593" y1="845" x2="603" y2="845"
+    <line x1="652" y1="845" x2="662" y2="845"
           stroke="#668cff" stroke-width="4"/>
-    <line x1="635" y1="845" x2="645" y2="845"
+    <line x1="694" y1="845" x2="704" y2="845"
           stroke="#668cff" stroke-width="4"/>
 
     <text x="738" y="829"
