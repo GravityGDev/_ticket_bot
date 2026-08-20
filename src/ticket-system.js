@@ -155,6 +155,65 @@ const YOUTUBE_RANGES = {
 // Prevent two button presses at the same moment from receiving the same ticket number.
 const ticketCreationQueues = new Map();
 
+async function runTicketCreationQueued(
+  guildId,
+  task,
+) {
+  const key =
+    String(
+      guildId,
+    );
+
+  const previous =
+    ticketCreationQueues.get(
+      key,
+    ) ||
+    Promise.resolve();
+
+  let releaseCurrent;
+
+  const current =
+    new Promise(
+      (resolve) => {
+        releaseCurrent =
+          resolve;
+      },
+    );
+
+  const chain =
+    previous
+      .catch(() => {})
+      .then(
+        () =>
+          current,
+      );
+
+  ticketCreationQueues.set(
+    key,
+    chain,
+  );
+
+  await previous
+    .catch(() => {});
+
+  try {
+    return await task();
+  } finally {
+    releaseCurrent();
+
+    if (
+      ticketCreationQueues.get(
+        key,
+      ) ===
+      chain
+    ) {
+      ticketCreationQueues.delete(
+        key,
+      );
+    }
+  }
+}
+
 // Serialize claim/takeover interactions per ticket. This keeps claim history
 // ordered and guarantees the first eligible staff claim is resolved before a
 // takeover is processed.
@@ -2776,8 +2835,11 @@ async function createTicket(interaction, typeKey) {
     configuredCategoryId = config.categoryId;
   }
 
-  await runTicketCreationQueued(guild.id, async () => {
-    const existingTicket = await findExistingTicketForCreator(
+  try {
+    await runTicketCreationQueued(
+      guild.id,
+      async () => {
+        const existingTicket = await findExistingTicketForCreator(
       guild,
       interaction.user.id,
     );
@@ -2989,16 +3051,45 @@ async function createTicket(interaction, typeKey) {
       console.error('[TICKET WELCOME ERROR]', error);
     }
 
-    await interaction.editReply({
-      content:
-        `✅ Your **${TICKET_TYPES[typeKey].label}** ticket has been created.\n` +
-        `🎫 **Ticket:** <#${channel.id}>`,
-      components: [],
-      allowedMentions: {
-        parse: [],
+        await interaction.editReply({
+          content:
+            `✅ Your **${TICKET_TYPES[typeKey].label}** ticket has been created.\n` +
+            `🎫 **Ticket:** <#${channel.id}>`,
+          components: [],
+          allowedMentions: {
+            parse: [],
+          },
+        });
       },
-    });
-  });
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET CREATE UNEXPECTED ERROR]',
+      error,
+    );
+
+    const errorId =
+      Date.now()
+        .toString(36)
+        .toUpperCase();
+
+    await interaction
+      .editReply({
+        content:
+          `❌ I could not create that ticket due to an unexpected error. ` +
+          `Please try again. Error reference: \`${errorId}\``,
+        components: [],
+        allowedMentions: {
+          parse: [],
+        },
+      })
+      .catch((responseError) => {
+        console.error(
+          '[TICKET CREATE ERROR RESPONSE FAILED]',
+          responseError,
+        );
+      });
+  }
 }
 
 function messageHasButton(message, customId) {
