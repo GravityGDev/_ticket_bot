@@ -11,7 +11,8 @@ const {
 const { getMongoDb } = require('./database');
 
 const SKIN_REVIEW_CHANNEL_ID = '1193625435796422657';
-const PROTECTED_REACTION_BOT_ID = '891220330817912852';
+const SOURCE_MEDIA_BOT_ID = '891220330817912852';
+const PROTECTED_REACTION_BOT_ID = SOURCE_MEDIA_BOT_ID;
 const PAGE_SIZE = 5;
 const APPROVE_EMOJI = '✔️';
 const REJECT_EMOJI = '❌';
@@ -21,6 +22,14 @@ const BLACKLIST_COLLECTION = 'skin_blacklist';
 const META_COLLECTION = 'skin_review_meta';
 
 let initializationPromise = null;
+
+function isSourceMediaMessage(message) {
+  return Boolean(
+    message &&
+      String(message.channelId) === SKIN_REVIEW_CHANNEL_ID &&
+      String(message.author?.id || '') === SOURCE_MEDIA_BOT_ID,
+  );
+}
 
 function normalizeMediaId(value) {
   const id = String(value || '').trim().toLowerCase();
@@ -146,6 +155,20 @@ async function collections() {
 async function ensureIndexes() {
   const { media, blacklist } = await collections();
 
+  // Older versions indexed any valid ID|URL record in the source channel.
+  // Purge those historical rows so only media posted by the designated source
+  // bot can ever appear in /search.
+  const cleanup = await media.deleteMany({
+    authorId: { $ne: SOURCE_MEDIA_BOT_ID },
+  });
+
+  if (cleanup.deletedCount) {
+    console.log(
+      `[SKIN REVIEW] Removed ${cleanup.deletedCount} indexed media record(s) ` +
+        `that were not posted by source bot ${SOURCE_MEDIA_BOT_ID}.`,
+    );
+  }
+
   await Promise.all([
     media.createIndex({ mediaId: 1, createdAt: -1 }),
     media.createIndex({ messageId: 1 }),
@@ -164,7 +187,7 @@ function compareSnowflakes(left, right) {
 }
 
 async function indexMediaMessage(message) {
-  if (!message || message.channelId !== SKIN_REVIEW_CHANNEL_ID) {
+  if (!isSourceMediaMessage(message)) {
     return [];
   }
 
@@ -390,6 +413,146 @@ async function getReviewChannel(client) {
   return channel;
 }
 
+async function reconcileBlacklistedMediaOnStartup(client) {
+  const {
+    blacklist,
+    media,
+  } = await collections();
+
+  const blacklistedRecords =
+    await blacklist
+      .find({})
+      .project({ _id: 1 })
+      .toArray();
+
+  const blacklistedIds =
+    blacklistedRecords
+      .map((record) =>
+        String(record._id || '').toLowerCase(),
+      )
+      .filter(Boolean);
+
+  if (!blacklistedIds.length) {
+    console.log(
+      '[SKIN REVIEW] Startup blacklist reconciliation: no blacklisted IDs.',
+    );
+    return {
+      blacklistedIds: 0,
+      messagesChecked: 0,
+      messagesUpdated: 0,
+      missingMessages: 0,
+    };
+  }
+
+  const indexedRecords =
+    await media
+      .find({
+        mediaId: {
+          $in: blacklistedIds,
+        },
+        channelId:
+          SKIN_REVIEW_CHANNEL_ID,
+        authorId:
+          SOURCE_MEDIA_BOT_ID,
+      })
+      .project({
+        messageId: 1,
+        mediaId: 1,
+      })
+      .toArray();
+
+  const messageIds =
+    [
+      ...new Set(
+        indexedRecords.map((record) =>
+          String(record.messageId),
+        ),
+      ),
+    ];
+
+  let messagesChecked = 0;
+  let messagesUpdated = 0;
+  let missingMessages = 0;
+
+  console.log(
+    `[SKIN REVIEW] Startup blacklist reconciliation: ` +
+      `${blacklistedIds.length} blacklisted ID(s), ` +
+      `${messageIds.length} indexed source message(s) to check.`,
+  );
+
+  for (const messageId of messageIds) {
+    const message =
+      await fetchSourceMessage(
+        client,
+        messageId,
+      );
+
+    if (!message) {
+      missingMessages += 1;
+
+      // Keep the index safe and tidy if the original Discord message is gone.
+      await media.deleteMany({
+        messageId,
+        channelId:
+          SKIN_REVIEW_CHANNEL_ID,
+        authorId:
+          SOURCE_MEDIA_BOT_ID,
+      });
+
+      continue;
+    }
+
+    messagesChecked += 1;
+
+    const ids =
+      await getMediaIdsForMessage(
+        message,
+      );
+
+    const hasBlacklistedId =
+      ids.some((id) =>
+        blacklistedIds.includes(
+          String(id).toLowerCase(),
+        ),
+      );
+
+    if (!hasBlacklistedId) {
+      continue;
+    }
+
+    // rejectMessage does exactly what startup reconciliation needs:
+    // - removes all approve/check reactions
+    // - preserves the protected source bot's initial ✔️
+    // - ensures this bot has added ❌
+    await rejectMessage(
+      message,
+    );
+
+    messagesUpdated += 1;
+
+    // Small delay keeps the startup sweep from hammering Discord's reaction
+    // endpoints if a blacklisted clan/user has lots of historical media.
+    await new Promise((resolve) =>
+      setTimeout(resolve, 250),
+    );
+  }
+
+  console.log(
+    `[SKIN REVIEW] Startup blacklist reconciliation complete: ` +
+      `${messagesChecked} checked, ` +
+      `${messagesUpdated} enforced, ` +
+      `${missingMessages} missing/cleaned.`,
+  );
+
+  return {
+    blacklistedIds:
+      blacklistedIds.length,
+    messagesChecked,
+    messagesUpdated,
+    missingMessages,
+  };
+}
+
 async function initializeSkinReview(client) {
   if (initializationPromise) return initializationPromise;
 
@@ -401,6 +564,9 @@ async function initializeSkinReview(client) {
     console.log('[SKIN REVIEW] Synchronising media index...');
     await syncRecentMessages(channel);
     await backfillHistory(channel);
+
+    console.log('[SKIN REVIEW] Reconciling blacklisted media...');
+    await reconcileBlacklistedMediaOnStartup(client);
 
     console.log('[SKIN REVIEW] Media index ready.');
   })().catch((error) => {
@@ -493,7 +659,13 @@ async function removeReactionUsers(reaction, preserveUserIds = new Set()) {
 async function fetchSourceMessage(client, messageId) {
   const channel = await getReviewChannel(client);
 
-  return channel.messages.fetch(String(messageId)).catch(() => null);
+  const message = await channel.messages
+    .fetch(String(messageId))
+    .catch(() => null);
+
+  return isSourceMediaMessage(message)
+    ? message
+    : null;
 }
 
 async function rejectMessage(message) {
@@ -524,6 +696,8 @@ async function approveMessage(message) {
 }
 
 async function enforceBlacklistOnMessage(message, mediaIds = null) {
+  if (!isSourceMediaMessage(message)) return false;
+
   const ids = mediaIds || parseMediaEntries(message.content).map((entry) => entry.mediaId);
   if (!ids.length) return false;
 
@@ -535,7 +709,7 @@ async function enforceBlacklistOnMessage(message, mediaIds = null) {
 }
 
 async function handleSkinReviewMessageCreate(message) {
-  if (message.channelId !== SKIN_REVIEW_CHANNEL_ID) return;
+  if (!isSourceMediaMessage(message)) return;
 
   const documents = await indexMediaMessage(message);
   if (!documents.length) return;
@@ -555,7 +729,7 @@ async function handleSkinReviewMessageUpdate(oldMessage, newMessage) {
     message = await message.fetch().catch(() => null);
   }
 
-  if (!message || message.channelId !== SKIN_REVIEW_CHANNEL_ID) return;
+  if (!isSourceMediaMessage(message)) return;
 
   const documents = await indexMediaMessage(message);
 
@@ -580,7 +754,10 @@ async function handleSkinReviewMessageDelete(message) {
 async function getMediaIdsForMessage(message) {
   const { media } = await collections();
   let records = await media
-    .find({ messageId: String(message.id) })
+    .find({
+      messageId: String(message.id),
+      authorId: SOURCE_MEDIA_BOT_ID,
+    })
     .project({ mediaId: 1 })
     .toArray();
 
@@ -606,7 +783,7 @@ async function handleSkinReviewReactionAdd(reaction, user) {
     message = await message.fetch().catch(() => null);
   }
 
-  if (!message || message.channelId !== SKIN_REVIEW_CHANNEL_ID) return;
+  if (!isSourceMediaMessage(message)) return;
   if (!isApproveReactionName(reaction.emoji.name)) return;
 
   // The designated bot's initial ✔️ must always remain.
@@ -696,7 +873,11 @@ async function getRecords(mediaId) {
   const { media } = await collections();
 
   return media
-    .find({ mediaId: id })
+    .find({
+      mediaId: id,
+      channelId: SKIN_REVIEW_CHANNEL_ID,
+      authorId: SOURCE_MEDIA_BOT_ID,
+    })
     .sort({ createdAt: -1, messageId: -1, entryIndex: 1 })
     .toArray();
 }
@@ -723,6 +904,8 @@ async function getRecordByKey(mediaId, key) {
 
   return media.findOne({
     mediaId: normalizeMediaId(mediaId),
+    channelId: SKIN_REVIEW_CHANNEL_ID,
+    authorId: SOURCE_MEDIA_BOT_ID,
     messageId: parsed.messageId,
     entryIndex: parsed.entryIndex,
   });
