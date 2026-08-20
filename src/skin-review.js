@@ -816,6 +816,64 @@ async function rejectBlacklistedMessage(message) {
   }
 }
 
+async function restoreUnblacklistedMessage(
+  message,
+) {
+  if (!message) {
+    throw new Error(
+      'The source media message no longer exists.',
+    );
+  }
+
+  // Restore = remove ALL reject reactions, then ensure ✔️ exists again.
+  for (
+    const reaction of
+    message.reactions.cache.values()
+  ) {
+    if (
+      !isRejectReactionName(
+        reaction.emoji.name,
+      )
+    ) {
+      continue;
+    }
+
+    await reaction
+      .remove()
+      .catch(
+        async (error) => {
+          console.error(
+            `[SKIN RESTORE] Could not remove entire ${reaction.emoji.name} reaction; ` +
+              'falling back to removing reaction users:',
+            error,
+          );
+
+          await removeReactionUsers(
+            reaction,
+          );
+        },
+      );
+  }
+
+  const botApproveReaction =
+    [
+      ...message.reactions.cache.values(),
+    ].find(
+      (reaction) =>
+        isApproveReactionName(
+          reaction.emoji.name,
+        ) &&
+        reaction.me,
+    );
+
+  if (!botApproveReaction) {
+    await message.react(
+      APPROVE_EMOJI,
+    );
+  }
+}
+
+
 async function approveMessage(message) {
   if (!message) throw new Error('The source media message no longer exists.');
 
@@ -2365,9 +2423,17 @@ async function buildSearchPanel(
     )
     .setFooter({
       text:
-        isStatusFilter(activeFilter)
-          ? `${filterLabel(activeFilter)} browser • arrows stay inside this filter`
-          : 'Select a media item, choose a filter if needed, then Approve or Reject it.',
+        canManageBlacklist
+          ? (
+              isStatusFilter(activeFilter)
+                ? `${filterLabel(activeFilter)} browser • arrows stay inside this filter • Restore repairs all associated media`
+                : 'Approve/Reject selected media • Restore repairs all associated media for this ID'
+            )
+          : (
+              isStatusFilter(activeFilter)
+                ? `${filterLabel(activeFilter)} browser • arrows stay inside this filter`
+                : 'Select a media item, choose a filter if needed, then Approve or Reject it.'
+            ),
     });
 
   const embeds = [header];
@@ -2512,6 +2578,20 @@ async function buildSearchPanel(
           blacklisted
             ? ButtonStyle.Secondary
             : ButtonStyle.Danger,
+        ),
+      new ButtonBuilder()
+        .setCustomId(
+          searchCustomId(
+            'restore',
+            id,
+            page,
+            activeFilter,
+          ),
+        )
+        .setLabel('Restore')
+        .setEmoji('♻️')
+        .setStyle(
+          ButtonStyle.Secondary,
         ),
     );
   }
@@ -3317,11 +3397,180 @@ async function blacklistMediaId(
   return updated;
 }
 
-async function unblacklistMediaId(mediaId) {
-  const id = normalizeMediaId(mediaId);
-  const { blacklist } = await collections();
+async function restoreMediaId(
+  client,
+  mediaId,
+  restoredById = null,
+) {
+  const id =
+    normalizeMediaId(
+      mediaId,
+    );
 
-  await blacklist.deleteOne({ _id: id });
+  let records = [];
+
+  try {
+    records =
+      await getRecordsUsingDiscordSearch(
+        client,
+        id,
+      );
+  } catch (error) {
+    console.error(
+      '[SKIN RESTORE DISCORD SEARCH ERROR]',
+      error,
+    );
+
+    records =
+      await getRecordsFromMongo(
+        id,
+      );
+  }
+
+  const messageIds =
+    [
+      ...new Set(
+        records.map(
+          (record) =>
+            String(
+              record.messageId,
+            ),
+        ),
+      ),
+    ];
+
+  let restored = 0;
+  let missing = 0;
+  let failed = 0;
+  let cursor = 0;
+
+  // Restore a few at once so large IDs do not take ages, while still avoiding
+  // an uncontrolled burst of Discord REST requests.
+  async function worker() {
+    while (true) {
+      const index =
+        cursor++;
+
+      if (
+        index >=
+        messageIds.length
+      ) {
+        return;
+      }
+
+      const messageId =
+        messageIds[index];
+
+      const message =
+        await fetchSourceMessage(
+          client,
+          messageId,
+        );
+
+      if (!message) {
+        missing += 1;
+        continue;
+      }
+
+      try {
+        await restoreUnblacklistedMessage(
+          message,
+        );
+
+        restored += 1;
+      } catch (error) {
+        failed += 1;
+
+        console.error(
+          `[SKIN RESTORE ERROR] ${id} -> ${messageId}`,
+          error,
+        );
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      {
+        length:
+          Math.min(
+            Math.max(
+              messageIds.length,
+              1,
+            ),
+            5,
+          ),
+      },
+      () => worker(),
+    ),
+  );
+
+  invalidateStatusFilterCache(
+    id,
+  );
+
+  console.log(
+    `[SKIN RESTORE] ${id}: restored=${restored}, missing=${missing}, failed=${failed}` +
+      (
+        restoredById
+          ? `, requestedBy=${restoredById}`
+          : ''
+      ),
+  );
+
+  return {
+    mediaId:
+      id,
+    total:
+      messageIds.length,
+    restored,
+    missing,
+    failed,
+  };
+}
+
+async function unblacklistMediaId(
+  mediaId,
+  {
+    client = null,
+    restoredById = null,
+    restore = false,
+  } = {},
+) {
+  const id =
+    normalizeMediaId(
+      mediaId,
+    );
+
+  const { blacklist } =
+    await collections();
+
+  const result =
+    await blacklist.deleteOne({
+      _id:
+        id,
+    });
+
+  let restoreResult = null;
+
+  if (
+    restore &&
+    client
+  ) {
+    restoreResult =
+      await restoreMediaId(
+        client,
+        id,
+        restoredById,
+      );
+  }
+
+  return {
+    removed:
+      result.deletedCount >
+      0,
+    restoreResult,
+  };
 }
 
 async function showApplyingFilterState(
@@ -3673,9 +3922,17 @@ async function handleSkinReviewInteraction(interaction, client) {
 
         await interaction.deferUpdate();
 
-        await unblacklistMediaId(
-          selectedId,
-        );
+        const unblacklistResult =
+          await unblacklistMediaId(
+            selectedId,
+            {
+              client,
+              restoredById:
+                interaction.user.id,
+              restore:
+                true,
+            },
+          );
 
         invalidateStatusFilterCache(
           selectedId,
@@ -3688,12 +3945,17 @@ async function handleSkinReviewInteraction(interaction, client) {
               'Unnamed',
           );
 
+        const restoreResult =
+          unblacklistResult.restoreResult;
+
         const manager =
           await buildBlacklistManagerPanel(
             managerPage,
             {
               notice:
-                `✅ UnBlacklisted **${name}** | \`${selectedId}\`.`,
+                `✅ UnBlacklisted **${name}** | \`${selectedId}\`.\n` +
+                `♻️ Restored **${restoreResult?.restored ?? 0}/${restoreResult?.total ?? 0}** associated media item(s). ` +
+                'Removed ❌ and added ✔️ back.',
             },
           );
 
@@ -4033,7 +4295,18 @@ async function handleSkinReviewInteraction(interaction, client) {
       }
 
       await interaction.deferUpdate();
-      await unblacklistMediaId(mediaId);
+
+      const unblacklistResult =
+        await unblacklistMediaId(
+          mediaId,
+          {
+            client,
+            restoredById:
+              interaction.user.id,
+            restore:
+              true,
+          },
+        );
 
       invalidateStatusFilterCache(
         mediaId,
@@ -4043,7 +4316,119 @@ async function handleSkinReviewInteraction(interaction, client) {
         `[SKIN REVIEW] ${mediaId} unblacklisted by ${interaction.user.id}.`,
       );
 
-      await rerenderInteraction(interaction, client, mediaId, page, null, filterValue);
+      await rerenderInteraction(
+        interaction,
+        client,
+        mediaId,
+        page,
+        null,
+        filterValue,
+      );
+
+      const restoreResult =
+        unblacklistResult.restoreResult;
+
+      await interaction.followUp({
+        content:
+          `♻️ **${mediaId} restored** — ` +
+          `**${restoreResult?.restored ?? 0}/${restoreResult?.total ?? 0}** associated media item(s) repaired. ` +
+          'All available ❌ reactions were removed and ✔️ was added back.',
+        flags:
+          MessageFlags.Ephemeral,
+        allowedMentions: {
+          parse: [],
+        },
+      }).catch(() => {});
+
+      return true;
+    }
+
+    if (
+      action === 'restore' &&
+      interaction.isButton()
+    ) {
+      if (
+        !(await requireBlacklistAdministrator(
+          interaction,
+          member,
+        ))
+      ) {
+        return true;
+      }
+
+      const blacklistRecord =
+        await getBlacklistRecord(
+          mediaId,
+        );
+
+      if (blacklistRecord) {
+        await interaction.reply({
+          content:
+            `🚫 \`${mediaId}\` is still blacklisted. Use **UnBlacklist** first; ` +
+            'otherwise blacklist enforcement would immediately reject the restored media again.',
+          flags:
+            MessageFlags.Ephemeral,
+          allowedMentions: {
+            parse: [],
+          },
+        });
+
+        return true;
+      }
+
+      await interaction.deferUpdate();
+
+      try {
+        const restoreResult =
+          await restoreMediaId(
+            client,
+            mediaId,
+            interaction.user.id,
+          );
+
+        await rerenderInteraction(
+          interaction,
+          client,
+          mediaId,
+          page,
+          null,
+          filterValue,
+        );
+
+        await interaction.followUp({
+          content:
+            `♻️ **Restore complete** for \`${mediaId}\`\n` +
+            `• Associated media: **${restoreResult.total}**\n` +
+            `• Restored: **${restoreResult.restored}**\n` +
+            `• Missing/deleted: **${restoreResult.missing}**\n` +
+            `• Failed: **${restoreResult.failed}**\n\n` +
+            'Every available ❌ reaction was removed and ✔️ was added back where required.',
+          flags:
+            MessageFlags.Ephemeral,
+          allowedMentions: {
+            parse: [],
+          },
+        });
+      } catch (error) {
+        console.error(
+          '[SKIN MANUAL RESTORE ERROR]',
+          error,
+        );
+
+        await interaction.followUp({
+          content:
+            `I could not restore media for \`${mediaId}\`: ${
+              error?.message ||
+              'Unknown error'
+            }`,
+          flags:
+            MessageFlags.Ephemeral,
+          allowedMentions: {
+            parse: [],
+          },
+        });
+      }
+
       return true;
     }
 
