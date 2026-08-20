@@ -1307,6 +1307,7 @@ async function getRecordsUsingDiscordSearch(
   mediaId,
 ) {
   const id = normalizeMediaId(mediaId);
+  const searchStartedAt = Date.now();
   const all = [];
   const seenKeys = new Set();
   let offset = 0;
@@ -1382,6 +1383,11 @@ async function getRecordsUsingDiscordSearch(
         a.messageId,
       );
     },
+  );
+
+  console.log(
+    `[SKIN SEARCH] Discord search for ${id} returned ${all.length} media item(s) ` +
+      `in ${Date.now() - searchStartedAt}ms.`,
   );
 
   return all;
@@ -1542,6 +1548,7 @@ async function buildSearchPanel(
   canManageBlacklist = false,
 ) {
   const id = normalizeMediaId(mediaId);
+  const panelStartedAt = Date.now();
   const activeFilter = normalizeSearchFilter(requestedFilter);
   let records = [];
   let searchSource = 'Discord Search';
@@ -1870,6 +1877,11 @@ async function buildSearchPanel(
 
   assertUniqueComponentCustomIds(
     components,
+  );
+
+  console.log(
+    `[SKIN SEARCH] Panel for ${id} page ${page + 1}/${pageCount} built in ` +
+      `${Date.now() - panelStartedAt}ms using ${searchSource}.`,
   );
 
   return {
@@ -2285,10 +2297,8 @@ async function executeSkinSearch(interaction, client) {
       client,
     );
 
-    await initializeSkinReview(
-      client,
-    );
-
+    // Do not await the full startup/backfill job here.
+    // Interactive searches go directly to Discord Search API.
     if (!rawMediaId) {
       if (canManageBlacklist) {
         const manager =
@@ -2424,10 +2434,8 @@ async function executeSkinContextSearch(
       client,
     );
 
-    await initializeSkinReview(
-      client,
-    );
-
+    // Do not await the full startup/backfill job here.
+    // Interactive searches go directly to Discord Search API.
     const canManageBlacklist =
       isSkinAdministrator(
         member,
@@ -2673,8 +2681,8 @@ async function handleSkinReviewInteraction(interaction, client) {
 
   try {
     await assertSourceChannelPermissions(client);
-    await initializeSkinReview(client);
-
+    // Do not await the full startup/backfill job here.
+    // Interactive searches go directly to Discord Search API.
     if (
       action === 'context-pick' &&
       interaction.isStringSelectMenu()
