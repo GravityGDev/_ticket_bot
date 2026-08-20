@@ -1378,6 +1378,34 @@ function searchCustomId(action, mediaId, page, filterValue = FILTER_ALL, extra =
   ].join(':');
 }
 
+function assertUniqueComponentCustomIds(components) {
+  const seen = new Set();
+
+  for (const row of components || []) {
+    const json =
+      typeof row?.toJSON === 'function'
+        ? row.toJSON()
+        : row;
+
+    for (const component of json?.components || []) {
+      const customId =
+        component?.custom_id ||
+        component?.customId ||
+        null;
+
+      if (!customId) continue;
+
+      if (seen.has(customId)) {
+        throw new Error(
+          `Duplicate Discord component custom_id generated: ${customId}`,
+        );
+      }
+
+      seen.add(customId);
+    }
+  }
+}
+
 async function buildSearchPanel(
   client,
   mediaId,
@@ -1541,7 +1569,14 @@ async function buildSearchPanel(
   });
 
   const select = new StringSelectMenuBuilder()
-    .setCustomId(searchCustomId('select', id, page))
+    .setCustomId(
+      searchCustomId(
+        'select',
+        id,
+        page,
+        activeFilter,
+      ),
+    )
     .setPlaceholder('Select a skin / badge on this page')
     .setMinValues(1)
     .setMaxValues(1)
@@ -1624,20 +1659,52 @@ async function buildSearchPanel(
 
   const pageRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(searchCustomId('page', id, Math.max(0, page - 1), activeFilter))
+      .setCustomId(
+        searchCustomId(
+          'page-prev',
+          id,
+          Math.max(0, page - 1),
+          activeFilter,
+        ),
+      )
       .setEmoji('⬅️')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 0),
     new ButtonBuilder()
-      .setCustomId(searchCustomId('noop', id, page, activeFilter))
+      .setCustomId(
+        searchCustomId(
+          'page-label',
+          id,
+          page,
+          activeFilter,
+        ),
+      )
       .setLabel(`Page ${page + 1}/${pageCount}`)
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(true),
     new ButtonBuilder()
-      .setCustomId(searchCustomId('page', id, Math.min(pageCount - 1, page + 1), activeFilter))
+      .setCustomId(
+        searchCustomId(
+          'page-next',
+          id,
+          Math.min(pageCount - 1, page + 1),
+          activeFilter,
+        ),
+      )
       .setEmoji('➡️')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page >= pageCount - 1),
+  );
+
+  const components = [
+    new ActionRowBuilder().addComponents(select),
+    new ActionRowBuilder().addComponents(filterMenu),
+    actionRow,
+    pageRow,
+  ];
+
+  assertUniqueComponentCustomIds(
+    components,
   );
 
   return {
@@ -1647,12 +1714,7 @@ async function buildSearchPanel(
     payload: {
       content: '',
       embeds,
-      components: [
-        new ActionRowBuilder().addComponents(select),
-        new ActionRowBuilder().addComponents(filterMenu),
-        actionRow,
-        pageRow,
-      ],
+      components,
       allowedMentions: { parse: [] },
     },
   };
@@ -2442,6 +2504,35 @@ async function handleSkinReviewInteraction(interaction, client) {
     const extra =
       parts[5] || null;
 
+    if (
+      action === 'page-label' &&
+      interaction.isButton()
+    ) {
+      await interaction.deferUpdate();
+      return true;
+    }
+
+    if (
+      (action === 'page-prev' ||
+        action === 'page-next') &&
+      interaction.isButton()
+    ) {
+      await interaction.deferUpdate();
+
+      await rerenderInteraction(
+        interaction,
+        client,
+        mediaId,
+        page,
+        null,
+        filterValue,
+      );
+
+      return true;
+    }
+
+    // Backwards compatibility for panels sent by the immediately previous
+    // build. Once they are refreshed, they use page-prev/page-next.
     if (action === 'noop' && interaction.isButton()) {
       await interaction.deferUpdate();
       return true;
@@ -2449,7 +2540,16 @@ async function handleSkinReviewInteraction(interaction, client) {
 
     if (action === 'page' && interaction.isButton()) {
       await interaction.deferUpdate();
-      await rerenderInteraction(interaction, client, mediaId, page, null, filterValue);
+
+      await rerenderInteraction(
+        interaction,
+        client,
+        mediaId,
+        page,
+        null,
+        filterValue,
+      );
+
       return true;
     }
 
