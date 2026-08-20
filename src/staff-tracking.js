@@ -160,19 +160,6 @@ function applyFilter(rows, filterKey) {
   }
 }
 
-function sortLeaderboard(rows) {
-  return [...rows].sort((a, b) => {
-    if (b.claims !== a.claims) return b.claims - a.claims;
-    if (b.messages !== a.messages) return b.messages - a.messages;
-
-    return (a.member.displayName || a.member.user.username).localeCompare(
-      b.member.displayName || b.member.user.username,
-      undefined,
-      { sensitivity: 'base' },
-    );
-  });
-}
-
 function getActivityScore(row, pointSettings) {
   return (
     row.claims * pointSettings.ticketClaimPoints +
@@ -180,15 +167,95 @@ function getActivityScore(row, pointSettings) {
   );
 }
 
+function withActivityPoints(row, pointSettings) {
+  const ticketPoints =
+    row.claims *
+    pointSettings.ticketClaimPoints;
+
+  const messagePoints =
+    row.messages *
+    pointSettings.trackedMessagePoints;
+
+  return {
+    ...row,
+    ticketPoints,
+    messagePoints,
+    activityScore:
+      ticketPoints +
+      messagePoints,
+  };
+}
+
+function sortLeaderboard(rows, pointSettings) {
+  return rows
+    .map((row) =>
+      row.activityScore !== undefined
+        ? row
+        : withActivityPoints(
+            row,
+            pointSettings,
+          ),
+    )
+    .sort((a, b) => {
+      // Primary ranking: TOTAL configured activity points.
+      if (
+        b.activityScore !==
+        a.activityScore
+      ) {
+        return (
+          b.activityScore -
+          a.activityScore
+        );
+      }
+
+      // Tie-breakers only apply when total points are exactly equal.
+      if (
+        b.ticketPoints !==
+        a.ticketPoints
+      ) {
+        return (
+          b.ticketPoints -
+          a.ticketPoints
+        );
+      }
+
+      if (
+        b.messagePoints !==
+        a.messagePoints
+      ) {
+        return (
+          b.messagePoints -
+          a.messagePoints
+        );
+      }
+
+      return (
+        a.member.displayName ||
+        a.member.user.username
+      ).localeCompare(
+        b.member.displayName ||
+          b.member.user.username,
+        undefined,
+        {
+          sensitivity: 'base',
+        },
+      );
+    });
+}
+
 function getBestActiveStaff(allRows, pointSettings) {
   // Consider EVERY active staff member, not just ⭐ / ⭐⭐ management.
   // Star roles are displayed as badges only and do not affect eligibility.
   const activeStaff = allRows
     .filter((row) => row.active)
-    .map((row) => ({
-      ...row,
-      activityScore: getActivityScore(row, pointSettings),
-    }))
+    .map((row) =>
+      row.activityScore !== undefined
+        ? row
+        : withActivityPoints(
+            row,
+            pointSettings,
+          ),
+    )
     .sort((a, b) => {
       if (b.activityScore !== a.activityScore) {
         return b.activityScore - a.activityScore;
@@ -330,7 +397,7 @@ function buildStaffSelectRow(periodKey, filterKey, page, visibleRows) {
               0,
               100,
             ),
-            description: `${row.claims} claimed • ${row.messages} messages${
+            description: `${row.activityScore.toLocaleString()} pts • ${row.claims} claimed • ${row.messages} messages${
               badges ? ` • ${badges}` : ''
             }`.slice(0, 100),
             value: row.member.id,
@@ -366,9 +433,12 @@ function buildLeaderboardEmbed({
             .join('');
 
           return (
-            `**${rank}.** <@${row.member.id}>${badges ? ` ${badges}` : ''}\n` +
-            `└ **${row.claims}** ticket${row.claims === 1 ? '' : 's'} claimed • ` +
-            `**${row.messages}** tracked message${row.messages === 1 ? '' : 's'}`
+            `**${rank}.** <@${row.member.id}>${badges ? ` ${badges}` : ''} — ` +
+            `**${row.activityScore.toLocaleString()} pts**\n` +
+            `└ **${row.claims}** ticket${row.claims === 1 ? '' : 's'} claimed ` +
+            `(${row.ticketPoints.toLocaleString()} pts) • ` +
+            `**${row.messages}** tracked message${row.messages === 1 ? '' : 's'} ` +
+            `(${row.messagePoints.toLocaleString()} pts)`
           );
         })
         .join('\n\n')
@@ -376,8 +446,9 @@ function buildLeaderboardEmbed({
 
   const bestActiveText = bestActive
     ? `${bestActive.hasStar ? `${getStarBadge(bestActive.starLevel)} ` : ''}<@${bestActive.member.id}> — ` +
-      `**${bestActive.claims}** claimed • **${bestActive.messages}** messages • ` +
-      `**${bestActive.activityScore.toLocaleString()} activity points**`
+      `**${bestActive.activityScore.toLocaleString()} activity points**\n` +
+      `└ ${bestActive.claims} claimed = ${bestActive.ticketPoints.toLocaleString()} pts • ` +
+      `${bestActive.messages} messages = ${bestActive.messagePoints.toLocaleString()} pts`
     : 'No active staff in this period.';
 
   const trackedCategories = trackingRules.trackedCategoryIds.map((id) => {
@@ -408,7 +479,14 @@ function buildLeaderboardEmbed({
         value: bestActiveText,
       },
       {
-        name: `🏆 Leaderboard • Page ${pageInfo.page + 1}/${pageInfo.pageCount}`,
+        name: '🎯 Scoring Model',
+        value:
+          `**${pointSettings.ticketClaimPoints}** point${pointSettings.ticketClaimPoints === 1 ? '' : 's'} per ticket claim • ` +
+          `**${pointSettings.trackedMessagePoints}** point${pointSettings.trackedMessagePoints === 1 ? '' : 's'} per tracked message\n` +
+          '**Leaderboard order:** Total activity points',
+      },
+      {
+        name: `🏆 Leaderboard by Points • Page ${pageInfo.page + 1}/${pageInfo.pageCount}`,
         value: rankingText.slice(0, 1024),
       },
       {
@@ -418,7 +496,7 @@ function buildLeaderboardEmbed({
     )
     .setFooter({
       text:
-        '⭐ = Star Management • ⭐⭐ = Senior Star Management • ⚠️ = Warning role • Activity tracking starts from this update',
+        'Ranked by total activity points • ⭐ = Star Management • ⭐⭐ = Senior Star Management • ⚠️ = Warning role',
     })
     .setTimestamp();
 }
@@ -450,8 +528,16 @@ async function buildLeaderboardPayload(guild, state = {}) {
     enrichStaff(members, snapshot).filter(
       (row) => !hiddenStaffIds.has(row.member.id),
     ),
+    pointSettings,
   );
-  const filteredRows = sortLeaderboard(applyFilter(allRows, filterKey));
+
+  const filteredRows = sortLeaderboard(
+    applyFilter(
+      allRows,
+      filterKey,
+    ),
+    pointSettings,
+  );
   const pageInfo = pageSlice(filteredRows, state.page);
 
   const components = [
@@ -548,6 +634,7 @@ function buildDetailEmbed({
   periodKey,
   filterKey,
   trackingRules,
+  pointSettings,
 }) {
   const member = row.member;
   const warningRoles = getRoleMentions(member, WARNING_ROLE_IDS);
@@ -636,6 +723,14 @@ function buildDetailEmbed({
         inline: true,
       },
       {
+        name: '🎯 Activity Points',
+        value:
+          `**${row.activityScore.toLocaleString()} total**\n` +
+          `${row.claims} claim${row.claims === 1 ? '' : 's'} × ${pointSettings.ticketClaimPoints} = **${row.ticketPoints.toLocaleString()}**\n` +
+          `${row.messages} message${row.messages === 1 ? '' : 's'} × ${pointSettings.trackedMessagePoints} = **${row.messagePoints.toLocaleString()}**`,
+        inline: false,
+      },
+      {
         name: '⭐ Star Management Roles',
         value: starRoles,
       },
@@ -661,7 +756,8 @@ function buildDetailEmbed({
       },
     )
     .setFooter({
-      text: `Filter: ${FILTERS[filterKey].label} • Staff are identified by View Audit Log`,
+      text:
+        `Filter: ${FILTERS[filterKey].label} • Ranked by total activity points`,
     })
     .setTimestamp();
 }
@@ -700,8 +796,16 @@ async function buildDetailPayload(
     enrichStaff(members, snapshot).filter(
       (row) => !hiddenStaffIds.has(row.member.id),
     ),
+    pointSettings,
   );
-  const filteredRows = sortLeaderboard(applyFilter(allRows, filterKey));
+
+  const filteredRows = sortLeaderboard(
+    applyFilter(
+      allRows,
+      filterKey,
+    ),
+    pointSettings,
+  );
   const row =
     filteredRows.find((item) => item.member.id === memberId) ||
     allRows.find((item) => item.member.id === memberId);
@@ -761,6 +865,7 @@ async function buildDetailPayload(
         periodKey,
         filterKey,
         trackingRules,
+        pointSettings,
       }),
     ],
     components,

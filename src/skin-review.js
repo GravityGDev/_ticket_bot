@@ -37,6 +37,12 @@ const BLACKLIST_MANAGER_PAGE_SIZE = 15;
 const STATUS_FILTER_CACHE_TTL_MS = 2 * 60 * 1000;
 const statusFilterCache = new Map();
 
+// Keep the user's selected filter independently from component custom IDs.
+// This prevents an older button from an All panel from switching the user back
+// to All while an Approved/Rejected panel is being rebuilt.
+const SEARCH_BROWSE_SESSION_TTL_MS = 15 * 60 * 1000;
+const searchBrowseSessions = new Map();
+
 const FILTER_OPTIONS = [
   {
     value: FILTER_ALL,
@@ -1124,6 +1130,53 @@ function flattenDiscordSearchMessages(response) {
   return messages;
 }
 
+function reactionCountsFromDiscordSearchMessage(
+  rawMessage,
+) {
+  if (
+    !Array.isArray(
+      rawMessage?.reactions,
+    )
+  ) {
+    return null;
+  }
+
+  let approve = 0;
+  let reject = 0;
+
+  for (
+    const reaction of
+    rawMessage.reactions
+  ) {
+    const name =
+      reaction?.emoji?.name;
+
+    const count =
+      Number(
+        reaction?.count,
+      ) || 0;
+
+    if (
+      isApproveReactionName(
+        name,
+      )
+    ) {
+      approve += count;
+    } else if (
+      isRejectReactionName(
+        name,
+      )
+    ) {
+      reject += count;
+    }
+  }
+
+  return {
+    approve,
+    reject,
+  };
+}
+
 async function searchDiscordMediaById(
   client,
   mediaId,
@@ -1226,6 +1279,11 @@ async function searchDiscordMediaById(
     const entries =
       parseMediaEntries(raw.content);
 
+    const searchReactionCounts =
+      reactionCountsFromDiscordSearchMessage(
+        raw,
+      );
+
     for (
       let entryIndex = 0;
       entryIndex < entries.length;
@@ -1269,13 +1327,20 @@ async function searchDiscordMediaById(
           new Date(),
         source:
           'discord_search',
+        _searchReactionCounts:
+          searchReactionCounts,
+        _searchReactionSnapshotAt:
+          searchReactionCounts
+            ? Date.now()
+            : null,
       });
     }
   }
 
-  // Search results do not contain reaction data, so each result is hydrated
-  // later with Get Channel Message. Upsert the lightweight record into MongoDB
-  // at the same time so blacklist/startup reconciliation still has an index.
+  // Discord Search commonly includes the message reaction summary. Preserve
+  // it when available so Approved/Rejected filtering can be instant. Individual
+  // Get Channel Message calls remain the fallback when reaction data is absent.
+  // Upsert the record so blacklist/startup reconciliation still has an index.
   if (parsedRecords.length) {
     const { media } =
       await collections();
@@ -1536,6 +1601,54 @@ async function hydrateRecordsForStatusFilter(
       const record =
         records[index];
 
+      const searchCounts =
+        record?._searchReactionCounts;
+
+      // Fast path: use the reaction totals that arrived with Discord Search.
+      // This avoids dozens of per-message REST fetches just to choose a filter.
+      if (
+        searchCounts &&
+        Number.isFinite(
+          Number(
+            searchCounts.approve,
+          ),
+        ) &&
+        Number.isFinite(
+          Number(
+            searchCounts.reject,
+          ),
+        )
+      ) {
+        const counts = {
+          approve:
+            Number(
+              searchCounts.approve,
+            ) || 0,
+          reject:
+            Number(
+              searchCounts.reject,
+            ) || 0,
+        };
+
+        const status =
+          reactionStatusFromCounts(
+            counts,
+          );
+
+        hydrated[index] = {
+          ...record,
+          _reactionCounts:
+            counts,
+          _reactionStatus:
+            status.key,
+          _reactionStatusLabel:
+            status.label,
+        };
+
+        continue;
+      }
+
+      // Fallback for Discord responses that omit reactions.
       const message =
         await fetchSourceMessage(
           client,
@@ -1623,6 +1736,105 @@ function isStatusFilter(value) {
   return (
     filter === FILTER_APPROVED ||
     filter === FILTER_REJECTED
+  );
+}
+
+function browseSessionKey(
+  interaction,
+  mediaId,
+) {
+  return [
+    String(
+      interaction.guildId ||
+      interaction.guild?.id ||
+      'dm',
+    ),
+    String(
+      interaction.user?.id ||
+      'unknown',
+    ),
+    normalizeMediaId(
+      mediaId,
+    ),
+  ].join(':');
+}
+
+function setBrowseSessionFilter(
+  interaction,
+  mediaId,
+  filterValue,
+) {
+  const key =
+    browseSessionKey(
+      interaction,
+      mediaId,
+    );
+
+  searchBrowseSessions.set(
+    key,
+    {
+      filter:
+        normalizeSearchFilter(
+          filterValue,
+        ),
+      touchedAt:
+        Date.now(),
+    },
+  );
+}
+
+function getBrowseSessionFilter(
+  interaction,
+  mediaId,
+) {
+  const key =
+    browseSessionKey(
+      interaction,
+      mediaId,
+    );
+
+  const session =
+    searchBrowseSessions.get(
+      key,
+    );
+
+  if (!session) {
+    return null;
+  }
+
+  if (
+    Date.now() -
+      session.touchedAt >
+    SEARCH_BROWSE_SESSION_TTL_MS
+  ) {
+    searchBrowseSessions.delete(
+      key,
+    );
+
+    return null;
+  }
+
+  session.touchedAt =
+    Date.now();
+
+  return normalizeSearchFilter(
+    session.filter,
+  );
+}
+
+function resolveBrowseFilter(
+  interaction,
+  mediaId,
+  customIdFilter,
+) {
+  return (
+    getBrowseSessionFilter(
+      interaction,
+      mediaId,
+    ) ||
+    normalizeSearchFilter(
+      customIdFilter,
+    )
   );
 }
 
@@ -2076,10 +2288,12 @@ async function buildSearchPanel(
         embeds: [
           new EmbedBuilder()
             .setColor(0x5865f2)
-            .setTitle('🔎 Skin / Badge Search')
+            .setTitle(
+              `🔎 Skin / Badge Search • ${filterLabel(activeFilter)}`,
+            )
             .setDescription(
               `**ID:** \`${id}\`\n` +
-                `**Filtering:** ${FILTER_OPTIONS.find((option) => option.value === activeFilter)?.emoji || '🔎'} **${filterLabel(activeFilter)}**\n` +
+                `**Active Filter:** ${FILTER_OPTIONS.find((option) => option.value === activeFilter)?.emoji || '🔎'} **${filterLabel(activeFilter)}**\n` +
                 `**Results:** 0 matching / ${allRecordCount} total\n` +
                 `**Source:** ${searchSource}\n` +
                 `**Blacklist:** ${
@@ -2138,7 +2352,7 @@ async function buildSearchPanel(
     )
     .setDescription(
       `**ID:** \`${id}\`\n` +
-        `**Filtering:** ${activeFilterEmoji} **${filterLabel(activeFilter)}**\n` +
+        `**Active Filter:** ${activeFilterEmoji} **${filterLabel(activeFilter)}**\n` +
         `**Results:** ${records.length} matching / ${allRecordCount} total\n` +
         `**Page:** ${page + 1}/${pageCount}\n` +
         `**Source:** ${searchSource}\n` +
@@ -2150,7 +2364,10 @@ async function buildSearchPanel(
         (selectedKey ? `\n**Selected:** \`${selectedKey}\`` : ''),
     )
     .setFooter({
-      text: 'Select a media item, choose a filter if needed, then Approve or Reject it.',
+      text:
+        isStatusFilter(activeFilter)
+          ? `${filterLabel(activeFilter)} browser • arrows stay inside this filter`
+          : 'Select a media item, choose a filter if needed, then Approve or Reject it.',
     });
 
   const embeds = [header];
@@ -2801,6 +3018,12 @@ async function executeSkinSearch(interaction, client) {
         rawMediaId,
       );
 
+    setBrowseSessionFilter(
+      interaction,
+      mediaId,
+      FILTER_ALL,
+    );
+
     const result =
       await buildSearchPanel(
         client,
@@ -3101,6 +3324,104 @@ async function unblacklistMediaId(mediaId) {
   await blacklist.deleteOne({ _id: id });
 }
 
+async function showApplyingFilterState(
+  interaction,
+  filterValue,
+) {
+  const activeFilter =
+    normalizeSearchFilter(
+      filterValue,
+    );
+
+  const option =
+    FILTER_OPTIONS.find(
+      (item) =>
+        item.value ===
+        activeFilter,
+    );
+
+  const currentEmbeds =
+    interaction.message?.embeds ||
+    [];
+
+  if (!currentEmbeds.length) {
+    return;
+  }
+
+  const firstEmbed =
+    EmbedBuilder.from(
+      currentEmbeds[0],
+    );
+
+  firstEmbed.setTitle(
+    `🔎 Skin / Badge Search • ${filterLabel(activeFilter)}`,
+  );
+
+  let description =
+    String(
+      currentEmbeds[0]?.description ||
+      '',
+    );
+
+  const filteringLine =
+    `**Filtering:** ${option?.emoji || '🔎'} **${filterLabel(activeFilter)}**`;
+
+  if (
+    /\*\*(?:Active Filter|Filtering):\*\*[^\n]*/.test(
+      description,
+    )
+  ) {
+    description =
+      description.replace(
+        /\*\*(?:Active Filter|Filtering):\*\*[^\n]*/,
+        `**Active Filter:** ${option?.emoji || '🔎'} **${filterLabel(activeFilter)}**`,
+      );
+  } else if (
+    /\*\*Filter:\*\*[^\n]*/.test(
+      description,
+    )
+  ) {
+    description =
+      description.replace(
+        /\*\*Filter:\*\*[^\n]*/,
+        filteringLine,
+      );
+  } else {
+    description =
+      `${filteringLine}\n${description}`;
+  }
+
+  // The exact filtered count/page count is calculated next. Make it explicit
+  // that the browser is applying the new filter instead of leaving stale All.
+  if (
+    /\*\*Page:\*\*[^\n]*/.test(
+      description,
+    )
+  ) {
+    description =
+      description.replace(
+        /\*\*Page:\*\*[^\n]*/,
+        '**Page:** Calculating filtered pages…',
+      );
+  }
+
+  firstEmbed.setDescription(
+    description,
+  );
+
+  await interaction.editReply({
+    content:
+      `🔄 Applying **${filterLabel(activeFilter)}** filter…`,
+    embeds: [
+      firstEmbed,
+    ],
+    components: [],
+    allowedMentions: {
+      parse: [],
+    },
+  });
+}
+
 async function rerenderInteraction(
   interaction,
   client,
@@ -3109,6 +3430,17 @@ async function rerenderInteraction(
   selectedKey = null,
   filterValue = FILTER_ALL,
 ) {
+  const activeFilter =
+    normalizeSearchFilter(
+      filterValue,
+    );
+
+  setBrowseSessionFilter(
+    interaction,
+    mediaId,
+    activeFilter,
+  );
+
   const member =
     interaction.guild
       ? await interaction.guild.members
@@ -3124,7 +3456,7 @@ async function rerenderInteraction(
       mediaId,
       page,
       selectedKey,
-      filterValue,
+      activeFilter,
       isSkinAdministrator(
         member,
       ),
@@ -3171,6 +3503,12 @@ async function handleSkinReviewInteraction(interaction, client) {
         );
 
       await interaction.deferUpdate();
+
+      setBrowseSessionFilter(
+        interaction,
+        mediaId,
+        FILTER_ALL,
+      );
 
       const result =
         await buildSearchPanel(
@@ -3476,11 +3814,26 @@ async function handleSkinReviewInteraction(interaction, client) {
     const page =
       Number(parts[3]) || 0;
 
-    const filterValue =
+    const customIdFilter =
       normalizeSearchFilter(
         parts[4] ||
           FILTER_ALL,
       );
+
+    let filterValue =
+      resolveBrowseFilter(
+        interaction,
+        mediaId,
+        customIdFilter,
+      );
+
+    // Persist the resolved value. This means every subsequent component is
+    // anchored to the user's active browser filter, not an older custom ID.
+    setBrowseSessionFilter(
+      interaction,
+      mediaId,
+      filterValue,
+    );
 
     const extra =
       parts[5] || null;
@@ -3553,9 +3906,31 @@ async function handleSkinReviewInteraction(interaction, client) {
     }
 
     if (action === 'filter' && interaction.isStringSelectMenu()) {
-      const selectedFilter = normalizeSearchFilter(interaction.values[0]);
+      const selectedFilter =
+        normalizeSearchFilter(
+          interaction.values[0],
+        );
+
+      // Save first. Even if the filtered panel takes a moment to build, any
+      // older page/select button still resolves to this selected filter.
+      setBrowseSessionFilter(
+        interaction,
+        mediaId,
+        selectedFilter,
+      );
+
+      filterValue =
+        selectedFilter;
 
       await interaction.deferUpdate();
+
+      // Update the visible panel immediately so Discord never sits showing
+      // "Filter: All" while Approved/Rejected reaction state is being built.
+      await showApplyingFilterState(
+        interaction,
+        selectedFilter,
+      );
+
       await rerenderInteraction(
         interaction,
         client,
