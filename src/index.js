@@ -12,7 +12,10 @@ const {
   REST,
   Routes,
 } = require('discord.js');
-const { handleTicketInteraction } = require('./ticket-system');
+const {
+  handleTicketInteraction,
+  handleTicketMessageCreate,
+} = require('./ticket-system');
 const {
   backfillOpenReportStaffTickets,
   trackReportStaffChannelCreate,
@@ -241,16 +244,34 @@ client.on(Events.MessageCreate, (message) => {
   });
 });
 
-client.on(Events.MessageCreate, (message) => {
-  recordStaffActivityMessage(message)
-    .then((recorded) => {
-      if (recorded) {
-        queueStaffGoalEvaluation(message.guild, message.author.id);
-      }
-    })
-    .catch((error) => {
-      console.error('[STAFF ACTIVITY TRACKER ERROR]', error);
-    });
+client.on(Events.MessageCreate, async (message) => {
+  try {
+    const blocked =
+      await handleTicketMessageCreate(
+        message,
+      );
+
+    if (blocked) {
+      return;
+    }
+
+    const recorded =
+      await recordStaffActivityMessage(
+        message,
+      );
+
+    if (recorded) {
+      queueStaffGoalEvaluation(
+        message.guild,
+        message.author.id,
+      );
+    }
+  } catch (error) {
+    console.error(
+      '[STAFF ACTIVITY / TICKET TALK GUARD ERROR]',
+      error,
+    );
+  }
 });
 
 client.on(Events.MessageUpdate, (oldMessage, newMessage) => {

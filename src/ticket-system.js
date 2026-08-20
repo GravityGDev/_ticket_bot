@@ -27,6 +27,10 @@ const { getNextTicketNumber } = require('./ticket-counter-store');
 const { recordTicketClaim } = require('./staff-tracking-store');
 const { evaluateStaffGoalsForMember } = require('./staff-settings');
 const {
+  getHighestStaffRoleIndex,
+  isStaffMember,
+} = require('./staff-role-hierarchy');
+const {
   TRANSCRIPT_INTEGRITY_SLOT,
   signAndStoreTranscript,
 } = require('./transcript-integrity');
@@ -39,6 +43,7 @@ const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
 const REPORT_STAFF_PAGE_SIZE = 23;
 // 22 leaves room for Back + Next + Skip/Not sure inside Discord's 25-option limit.
 const MUTED_STAFF_PAGE_SIZE = 22;
+const ASSIST_STAFF_PAGE_SIZE = 23;
 const REPORT_STAFF_SECURITY_LOG_CHANNEL_ID =
   process.env.REPORT_STAFF_SECURITY_LOG_CHANNEL_ID || '1150135578378125383';
 const TRANSCRIPT_LOG_CHANNEL_ID =
@@ -165,51 +170,105 @@ async function runTicketClaimQueued(channelId, task) {
 }
 
 
-function getTicketButtons(typeKey = null, unmuteDecision = null) {
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('ticket_close')
-      .setLabel('Close')
-      .setEmoji('🔒')
-      .setStyle(ButtonStyle.Secondary),
-  );
+function getTicketButtons(
+  typeKey = null,
+  unmuteDecision = null,
+  claimedById = null,
+) {
+  const row =
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            'ticket_close',
+          )
+          .setLabel('Close')
+          .setEmoji('🔒')
+          .setStyle(
+            ButtonStyle.Secondary,
+          ),
+      );
 
-  // Muted-without-reason tickets have their own resolution controls.
-  if (typeKey === 'muted_without_reason') {
-    row.addComponents(
-      new ButtonBuilder()
-        .setCustomId('ticket_unmute_approve')
-        .setLabel('Approved Unmute')
-        .setEmoji('✅')
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(Boolean(unmuteDecision)),
-      new ButtonBuilder()
-        .setCustomId('ticket_unmute_reject')
-        .setLabel('Reject Unmute')
-        .setEmoji('❌')
-        .setStyle(ButtonStyle.Danger)
-        .setDisabled(Boolean(unmuteDecision)),
-    );
-
+  // Report Staff is intentionally left unchanged: Close only.
+  if (
+    typeKey ===
+    'report_staff'
+  ) {
     return row;
   }
 
-  // Staff reports are intentionally restricted to Close only. They do not
-  // expose Claim/Role because only administrators should handle these tickets.
-  if (typeKey === 'report_staff') return row;
-
   row.addComponents(
     new ButtonBuilder()
-      .setCustomId('ticket_claim')
-      .setLabel('Claim')
-      .setEmoji('🙋')
-      .setStyle(ButtonStyle.Primary),
+      .setCustomId(
+        claimedById
+          ? 'ticket_assist'
+          : 'ticket_claim',
+      )
+      .setLabel(
+        claimedById
+          ? 'Assist'
+          : 'Claim',
+      )
+      .setEmoji(
+        claimedById
+          ? '🤝'
+          : '🙋',
+      )
+      .setStyle(
+        ButtonStyle.Primary,
+      ),
     new ButtonBuilder()
-      .setCustomId('ticket_role')
+      .setCustomId(
+        'ticket_role',
+      )
       .setLabel('Role')
       .setEmoji('🏷️')
-      .setStyle(ButtonStyle.Success),
+      .setStyle(
+        ButtonStyle.Success,
+      ),
   );
+
+  // Muted-without-reason still keeps its approve/reject resolution controls,
+  // but now also follows the same Claim -> Assist ownership workflow.
+  if (
+    typeKey ===
+    'muted_without_reason'
+  ) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(
+          'ticket_unmute_approve',
+        )
+        .setLabel(
+          'Approved Unmute',
+        )
+        .setEmoji('✅')
+        .setStyle(
+          ButtonStyle.Success,
+        )
+        .setDisabled(
+          Boolean(
+            unmuteDecision,
+          ),
+        ),
+      new ButtonBuilder()
+        .setCustomId(
+          'ticket_unmute_reject',
+        )
+        .setLabel(
+          'Reject Unmute',
+        )
+        .setEmoji('❌')
+        .setStyle(
+          ButtonStyle.Danger,
+        )
+        .setDisabled(
+          Boolean(
+            unmuteDecision,
+          ),
+        ),
+    );
+  }
 
   return row;
 }
@@ -567,6 +626,371 @@ function buildReportStaffPermissionOverwrites(guild, creatorId, botId) {
   ];
 }
 
+function isTicketStaffMember(member) {
+  return Boolean(
+    member &&
+    !member.user?.bot &&
+    (
+      isStaffMember(
+        member,
+      ) ||
+      member.permissions.has(
+        PermissionFlagsBits.Administrator,
+      )
+    )
+  );
+}
+
+async function getTicketStaffMembers(
+  guild,
+  creatorId = null,
+) {
+  await guild.members
+    .fetch()
+    .catch((error) => {
+      console.error(
+        '[TICKET STAFF FETCH ERROR]',
+        error,
+      );
+    });
+
+  return [
+    ...guild.members.cache.values(),
+  ]
+    .filter(
+      (member) =>
+        isTicketStaffMember(
+          member,
+        ) &&
+        String(member.id) !==
+          String(creatorId || ''),
+    )
+    .sort((a, b) => {
+      const levelDifference =
+        getHighestStaffRoleIndex(
+          b,
+        ) -
+        getHighestStaffRoleIndex(
+          a,
+        );
+
+      if (levelDifference) {
+        return levelDifference;
+      }
+
+      return (
+        a.displayName ||
+        a.user.username
+      ).localeCompare(
+        b.displayName ||
+          b.user.username,
+        undefined,
+        {
+          sensitivity:
+            'base',
+        },
+      );
+    });
+}
+
+async function setTicketStaffTyping(
+  channel,
+  staffId,
+  enabled,
+  reason,
+) {
+  await channel.permissionOverwrites.edit(
+    String(staffId),
+    {
+      ViewChannel: true,
+      ReadMessageHistory: true,
+      AttachFiles: true,
+      EmbedLinks: true,
+      SendMessages:
+        Boolean(enabled),
+    },
+    reason,
+  );
+}
+
+async function applyTicketStaffTypingState(
+  channel,
+  data,
+  reason =
+    'Ticket staff typing state synchronized',
+) {
+  if (
+    !data ||
+    data.typeKey ===
+      'report_staff'
+  ) {
+    return;
+  }
+
+  const staffMembers =
+    await getTicketStaffMembers(
+      channel.guild,
+      data.creatorId,
+    );
+
+  const assistants =
+    new Set(
+      Array.isArray(
+        data.assistStaffIds,
+      )
+        ? data.assistStaffIds.map(
+            String,
+          )
+        : [],
+    );
+
+  for (
+    const member of
+    staffMembers
+  ) {
+    const canTalk =
+      String(member.id) ===
+        String(
+          data.claimedById ||
+            '',
+        ) ||
+      assistants.has(
+        String(member.id),
+      );
+
+    await setTicketStaffTyping(
+      channel,
+      member.id,
+      canTalk,
+      reason,
+    ).catch((error) => {
+      console.error(
+        `[TICKET STAFF PERMISSION SYNC ERROR] ${member.id}`,
+        error,
+      );
+    });
+  }
+}
+
+async function deletePinNotification(
+  channel,
+  pinnedMessage,
+  pinStartedAt,
+) {
+  // Discord can create a ChannelPinnedMessage system message after pin().
+  // Remove only the fresh system event associated with this control message.
+  await new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        450,
+      ),
+  );
+
+  const recent =
+    await channel.messages
+      .fetch({
+        limit: 10,
+      })
+      .catch(() => null);
+
+  if (!recent) {
+    return;
+  }
+
+  for (
+    const message of
+    recent.values()
+  ) {
+    if (
+      message.id ===
+        pinnedMessage.id ||
+      message.type !==
+        MessageType.ChannelPinnedMessage ||
+      message.createdTimestamp <
+        pinStartedAt - 1500
+    ) {
+      continue;
+    }
+
+    const referencedId =
+      message.reference?.messageId ||
+      message.messageSnapshots
+        ?.first?.()
+        ?.id ||
+      null;
+
+    if (
+      referencedId &&
+      String(
+        referencedId,
+      ) !==
+        String(
+          pinnedMessage.id,
+        )
+    ) {
+      continue;
+    }
+
+    await message
+      .delete()
+      .catch((error) => {
+        console.error(
+          '[TICKET PIN NOTICE DELETE ERROR]',
+          error,
+        );
+      });
+
+    break;
+  }
+}
+
+async function pinTicketControlMessage(
+  message,
+) {
+  const pinStartedAt =
+    Date.now();
+
+  try {
+    await message.pin(
+      'Pinned ticket controls',
+    );
+
+    await deletePinNotification(
+      message.channel,
+      message,
+      pinStartedAt,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET CONTROL PIN ERROR]',
+      error,
+    );
+  }
+}
+
+async function findTicketControlMessage(
+  channel,
+  data,
+) {
+  if (
+    data?.controlMessageId
+  ) {
+    const stored =
+      await channel.messages
+        .fetch(
+          data.controlMessageId,
+        )
+        .catch(() => null);
+
+    if (stored) {
+      return stored;
+    }
+  }
+
+  const pinned =
+    await channel.messages
+      .fetchPinned()
+      .catch(() => null);
+
+  if (pinned) {
+    const match =
+      pinned.find(
+        (message) =>
+          message.author?.id ===
+            channel.client.user.id &&
+          (
+            messageHasButton(
+              message,
+              'ticket_claim',
+            ) ||
+            messageHasButton(
+              message,
+              'ticket_assist',
+            ) ||
+            (
+              data?.typeKey ===
+                'report_staff' &&
+              messageHasButton(
+                message,
+                'ticket_close',
+              )
+            )
+          ),
+      );
+
+    if (match) {
+      return match;
+    }
+  }
+
+  const recent =
+    await channel.messages
+      .fetch({
+        limit: 50,
+      })
+      .catch(() => null);
+
+  return (
+    recent?.find(
+      (message) =>
+        message.author?.id ===
+          channel.client.user.id &&
+        (
+          messageHasButton(
+            message,
+            'ticket_claim',
+          ) ||
+          messageHasButton(
+            message,
+            'ticket_assist',
+          )
+        ),
+    ) ||
+    null
+  );
+}
+
+async function refreshTicketControlMessage(
+  channel,
+  data,
+) {
+  if (
+    !data ||
+    data.typeKey ===
+      'report_staff'
+  ) {
+    return;
+  }
+
+  const message =
+    await findTicketControlMessage(
+      channel,
+      data,
+    );
+
+  if (!message) {
+    console.warn(
+      `[TICKET CONTROL] Could not find control message in ${channel.id}.`,
+    );
+    return;
+  }
+
+  const remainingRows =
+    message.components.slice(1);
+
+  await message.edit({
+    components: [
+      getTicketButtons(
+        data.typeKey,
+        data.unmuteDecision,
+        data.claimedById,
+      ),
+      ...remainingRows,
+    ],
+  });
+}
+
 function getBottomPositionForCategory(category) {
   const positions = [
     category.rawPosition,
@@ -587,7 +1011,13 @@ function buildTicketWelcome(ticketNumber, creator, typeKey, options = {}) {
       iconURL: creator.displayAvatarURL(),
     });
 
-  const components = [getTicketButtons(typeKey)];
+  const components = [
+    getTicketButtons(
+      typeKey,
+      options.unmuteDecision || null,
+      options.claimedById || null,
+    ),
+  ];
 
   if (TICKET_TYPES[typeKey]?.requiresInGameId) {
     components.push(buildInGameIdActionRow(creator.id));
@@ -917,6 +1347,11 @@ function initialSubmissionState(typeKey) {
     closedById: null,
     closedAt: null,
     claimHistory: [],
+    assistStaffIds: [],
+    assistHistory: [],
+    handoverHistory: [],
+    pendingHandover: null,
+    controlMessageId: null,
   };
 }
 
@@ -967,6 +1402,11 @@ function getTicketData(channel) {
     closedAt: fallbackState.closedAt,
     claimedById: claimedMatch ? claimedMatch[1] : null,
     claimHistory: [],
+    assistStaffIds: fallbackState.assistStaffIds,
+    assistHistory: fallbackState.assistHistory,
+    handoverHistory: fallbackState.handoverHistory,
+    pendingHandover: fallbackState.pendingHandover,
+    controlMessageId: fallbackState.controlMessageId,
   };
 }
 
@@ -985,6 +1425,17 @@ async function updateTicketTopic(channel, data, patch = {}, reason = 'Ticket dat
     claimHistory: Array.isArray(next.claimHistory)
       ? next.claimHistory
       : [],
+    assistStaffIds: Array.isArray(next.assistStaffIds)
+      ? [...new Set(next.assistStaffIds.map(String))]
+      : [],
+    assistHistory: Array.isArray(next.assistHistory)
+      ? next.assistHistory
+      : [],
+    handoverHistory: Array.isArray(next.handoverHistory)
+      ? next.handoverHistory
+      : [],
+    pendingHandover: next.pendingHandover || null,
+    controlMessageId: next.controlMessageId || null,
     inGameIdStatus: next.inGameIdStatus,
     youtubeStatus: next.youtubeStatus,
     staffSelectionStatus: next.staffSelectionStatus,
@@ -1015,6 +1466,22 @@ async function getLiveTicketData(channel) {
         Array.isArray(stored.claimHistory) && stored.claimHistory.length
           ? stored.claimHistory
           : base.claimHistory,
+      assistStaffIds:
+        Array.isArray(stored.assistStaffIds)
+          ? stored.assistStaffIds.map(String)
+          : base.assistStaffIds,
+      assistHistory:
+        Array.isArray(stored.assistHistory)
+          ? stored.assistHistory
+          : base.assistHistory,
+      handoverHistory:
+        Array.isArray(stored.handoverHistory)
+          ? stored.handoverHistory
+          : base.handoverHistory,
+      pendingHandover:
+        stored.pendingHandover || base.pendingHandover,
+      controlMessageId:
+        stored.controlMessageId || base.controlMessageId,
       inGameIdStatus: stored.inGameIdStatus || base.inGameIdStatus,
       youtubeStatus: stored.youtubeStatus || base.youtubeStatus,
       staffSelectionStatus:
@@ -1062,7 +1529,14 @@ function mergeOverwrite(map, id, type, allowBits = 0n, denyBits = 0n) {
   map.set(id, existing);
 }
 
-function buildTicketPermissionOverwrites(guild, category, creatorId, botId, creatorCanSend) {
+function buildTicketPermissionOverwrites(
+  guild,
+  category,
+  creatorId,
+  botId,
+  creatorCanSend,
+  staffMembers = [],
+) {
   const overwriteMap = new Map();
 
   for (const overwrite of category.permissionOverwrites.cache.values()) {
@@ -1103,18 +1577,29 @@ function buildTicketPermissionOverwrites(guild, category, creatorId, botId, crea
     PermissionFlagsBits.PinMessages;
   mergeOverwrite(overwriteMap, botId, 1, botPermissions, 0n);
 
-  const staffPermissions = baseTicketMemberPermissions | PermissionFlagsBits.SendMessages;
-  for (const role of guild.roles.cache.values()) {
-    if (role.id === guild.roles.everyone.id) continue;
+  // Staff may see the ticket immediately, but every individual staff member is
+  // explicitly denied SendMessages until they are the claimer or an assistant.
+  //
+  // A member overwrite is deliberate: it overrides category/role SendMessages
+  // grants. Discord Administrator still bypasses overwrites, so messageCreate
+  // enforcement below provides the second enforcement layer for admins.
+  for (const member of staffMembers) {
     if (
-      !role.permissions.has(PermissionFlagsBits.ManageMessages) &&
-      !role.permissions.has(PermissionFlagsBits.ManageRoles) &&
-      !role.permissions.has(PermissionFlagsBits.Administrator)
+      String(member.id) ===
+        String(creatorId) ||
+      String(member.id) ===
+        String(botId)
     ) {
       continue;
     }
 
-    mergeOverwrite(overwriteMap, role.id, 0, staffPermissions, 0n);
+    mergeOverwrite(
+      overwriteMap,
+      member.id,
+      1,
+      baseTicketMemberPermissions,
+      PermissionFlagsBits.SendMessages,
+    );
   }
 
   return [...overwriteMap.values()];
@@ -1318,6 +1803,15 @@ async function createTicket(interaction, typeKey) {
     }
     const state = initialSubmissionState(typeKey);
     const creatorCanSend = shouldCreatorBeUnlocked({ typeKey, ...state });
+
+    const ticketStaffMembers =
+      isReportStaff
+        ? []
+        : await getTicketStaffMembers(
+            guild,
+            interaction.user.id,
+          );
+
     const permissionOverwrites = isReportStaff
       ? buildReportStaffPermissionOverwrites(
           guild,
@@ -1330,6 +1824,7 @@ async function createTicket(interaction, typeKey) {
           interaction.user.id,
           botMember.id,
           creatorCanSend,
+          ticketStaffMembers,
         );
 
     let channel;
@@ -1362,6 +1857,11 @@ async function createTicket(interaction, typeKey) {
         creatorId: interaction.user.id,
         claimedById: null,
         claimHistory: [],
+        assistStaffIds: [],
+        assistHistory: [],
+        handoverHistory: [],
+        pendingHandover: null,
+        controlMessageId: null,
         closedById: null,
         closedAt: null,
         inGameIdStatus: state.inGameIdStatus,
@@ -1378,10 +1878,69 @@ async function createTicket(interaction, typeKey) {
     }
 
     try {
-      await channel.send(
-        buildTicketWelcome(ticketNumber, interaction.user, typeKey, {
-          reportStaffMembers,
-        }),
+      const controlMessage =
+        await channel.send(
+          buildTicketWelcome(
+            ticketNumber,
+            interaction.user,
+            typeKey,
+            {
+              reportStaffMembers,
+              claimedById: null,
+            },
+          ),
+        );
+
+      await setTicketState(
+        channel.id,
+        {
+          guildId:
+            guild.id,
+          number:
+            ticketNumber,
+          typeKey,
+          creatorId:
+            interaction.user.id,
+          claimedById:
+            null,
+          claimHistory: [],
+          assistStaffIds: [],
+          assistHistory: [],
+          handoverHistory: [],
+          pendingHandover:
+            null,
+          controlMessageId:
+            controlMessage.id,
+          closedById:
+            null,
+          closedAt:
+            null,
+          inGameIdStatus:
+            state.inGameIdStatus,
+          youtubeStatus:
+            state.youtubeStatus,
+          staffSelectionStatus:
+            state.staffSelectionStatus,
+          reportedStaffId:
+            state.reportedStaffId,
+          unmuteDecision:
+            state.unmuteDecision,
+          unmuteDecisionBy:
+            state.unmuteDecisionBy,
+          updatedAt:
+            new Date().toISOString(),
+          updateReason:
+            'Ticket control message created',
+        },
+      ).catch((error) => {
+        console.error(
+          '[TICKET CONTROL STATE SAVE ERROR]',
+          error,
+        );
+      });
+
+      await pinTicketControlMessage(
+        controlMessage,
       );
     } catch (error) {
       console.error('[TICKET WELCOME ERROR]', error);
@@ -1766,6 +2325,32 @@ async function reopenTicket(interaction) {
       'I could not restore the ticket creator\'s access. The staff controls have been left in place so you can try again.',
     ).catch(() => {});
     return;
+  }
+
+  if (
+    data.typeKey !==
+    'report_staff'
+  ) {
+    await applyTicketStaffTypingState(
+      interaction.channel,
+      data,
+      `Ticket reopened by ${interaction.user.tag}`,
+    ).catch((error) => {
+      console.error(
+        '[TICKET REOPEN STAFF PERMISSION ERROR]',
+        error,
+      );
+    });
+
+    await refreshTicketControlMessage(
+      interaction.channel,
+      data,
+    ).catch((error) => {
+      console.error(
+        '[TICKET REOPEN CONTROL REFRESH ERROR]',
+        error,
+      );
+    });
   }
 
   // Step 2: notify the creator. Do this before removing the staff controls so a
@@ -3212,7 +3797,12 @@ function normalizedClaimHistory(data) {
           previousClaimedById: entry?.previousClaimedById
             ? String(entry.previousClaimedById)
             : null,
-          action: entry?.action === 'takeover' ? 'takeover' : 'claim',
+          action:
+            entry?.action === 'handover'
+              ? 'handover'
+              : entry?.action === 'takeover'
+                ? 'takeover'
+                : 'claim',
         }))
         .filter((entry) => entry.userId)
     : [];
@@ -3228,6 +3818,88 @@ function normalizedClaimHistory(data) {
   }
 
   return history;
+}
+
+function normalizedAssistHistory(data) {
+  return Array.isArray(
+    data?.assistHistory,
+  )
+    ? data.assistHistory
+        .map((entry) => ({
+          staffId:
+            entry?.staffId
+              ? String(
+                  entry.staffId,
+                )
+              : null,
+          addedById:
+            entry?.addedById
+              ? String(
+                  entry.addedById,
+                )
+              : null,
+          addedAt:
+            entry?.addedAt
+              ? String(
+                  entry.addedAt,
+                )
+              : null,
+        }))
+        .filter(
+          (entry) =>
+            entry.staffId,
+        )
+    : [];
+}
+
+function normalizedHandoverHistory(data) {
+  return Array.isArray(
+    data?.handoverHistory,
+  )
+    ? data.handoverHistory
+        .map((entry) => ({
+          requestId:
+            entry?.requestId
+              ? String(
+                  entry.requestId,
+                )
+              : null,
+          fromStaffId:
+            entry?.fromStaffId
+              ? String(
+                  entry.fromStaffId,
+                )
+              : null,
+          toStaffId:
+            entry?.toStaffId
+              ? String(
+                  entry.toStaffId,
+                )
+              : null,
+          requestedAt:
+            entry?.requestedAt
+              ? String(
+                  entry.requestedAt,
+                )
+              : null,
+          acceptedAt:
+            entry?.acceptedAt
+              ? String(
+                  entry.acceptedAt,
+                )
+              : null,
+          status:
+            entry?.status ===
+              'accepted'
+              ? 'accepted'
+              : 'pending',
+        }))
+        .filter(
+          (entry) =>
+            entry.fromStaffId &&
+            entry.toStaffId,
+        )
+    : [];
 }
 
 async function getTranscriptUserLabel(guild, userId) {
@@ -3270,107 +3942,286 @@ async function buildTranscriptAuditData(
     closedAt = null,
   } = {},
 ) {
-  const claimHistory = normalizedClaimHistory(data);
+  const claimHistory =
+    normalizedClaimHistory(
+      data,
+    );
 
-  const ids = new Set(
+  const assistHistory =
+    normalizedAssistHistory(
+      data,
+    );
+
+  const handoverHistory =
+    normalizedHandoverHistory(
+      data,
+    );
+
+  const currentAssistants =
+    Array.isArray(
+      data?.assistStaffIds,
+    )
+      ? [
+          ...new Set(
+            data.assistStaffIds.map(
+              String,
+            ),
+          ),
+        ]
+      : [];
+
+  const ids =
+    new Set();
+
+  for (
+    const entry of
     claimHistory
-      .flatMap((entry) => [
+  ) {
+    if (entry.userId) {
+      ids.add(
         entry.userId,
+      );
+    }
+    if (
+      entry.previousClaimedById
+    ) {
+      ids.add(
         entry.previousClaimedById,
-      ])
-      .filter(Boolean),
-  );
-
-  if (data?.claimedById) ids.add(String(data.claimedById));
-  if (closedById) ids.add(String(closedById));
-  if (transcriptCreatedByUser?.id) {
-    ids.add(String(transcriptCreatedByUser.id));
+      );
+    }
   }
 
-  const labels = new Map();
+  for (
+    const entry of
+    assistHistory
+  ) {
+    if (entry.staffId) {
+      ids.add(
+        entry.staffId,
+      );
+    }
+    if (entry.addedById) {
+      ids.add(
+        entry.addedById,
+      );
+    }
+  }
+
+  for (
+    const entry of
+    handoverHistory
+  ) {
+    ids.add(
+      entry.fromStaffId,
+    );
+    ids.add(
+      entry.toStaffId,
+    );
+  }
+
+  for (
+    const assistantId of
+    currentAssistants
+  ) {
+    ids.add(
+      assistantId,
+    );
+  }
+
+  if (data?.claimedById) {
+    ids.add(
+      String(
+        data.claimedById,
+      ),
+    );
+  }
+
+  if (closedById) {
+    ids.add(
+      String(
+        closedById,
+      ),
+    );
+  }
+
+  if (
+    transcriptCreatedByUser?.id
+  ) {
+    ids.add(
+      String(
+        transcriptCreatedByUser.id,
+      ),
+    );
+  }
+
+  const labels =
+    new Map();
 
   await Promise.all(
-    [...ids].map(async (userId) => {
-      labels.set(
-        String(userId),
-        await getTranscriptUserLabel(channel.guild, userId),
-      );
-    }),
+    [...ids].map(
+      async (userId) => {
+        labels.set(
+          String(userId),
+          await getTranscriptUserLabel(
+            channel.guild,
+            userId,
+          ),
+        );
+      },
+    ),
   );
 
-  const firstClaim = claimHistory[0] || null;
-  const finalClaim = claimHistory[claimHistory.length - 1] || null;
+  const firstClaim =
+    claimHistory.find(
+      (entry) =>
+        entry.action ===
+          'claim',
+    ) ||
+    claimHistory[0] ||
+    null;
+
+  const finalClaim =
+    claimHistory[
+      claimHistory.length - 1
+    ] ||
+    null;
 
   return {
     firstClaim,
     finalClaim,
-    currentClaimedById: data?.claimedById || finalClaim?.userId || null,
+    currentClaimedById:
+      data?.claimedById ||
+      finalClaim?.userId ||
+      null,
     claimHistory,
-    closedById: closedById || data?.closedById || null,
-    closedAt: closedAt || data?.closedAt || null,
-    transcriptCreatedById: transcriptCreatedByUser?.id || null,
+    assistHistory,
+    handoverHistory,
+    currentAssistants,
+    closedById:
+      closedById ||
+      data?.closedById ||
+      null,
+    closedAt:
+      closedAt ||
+      data?.closedAt ||
+      null,
+    transcriptCreatedById:
+      transcriptCreatedByUser?.id ||
+      null,
     labels,
   };
 }
 
-function renderTranscriptAuditHtml(audit, data) {
+function renderTranscriptAuditHtml(
+  audit,
+  data,
+) {
   const isClaimNotApplicable =
-    data.typeKey === 'report_staff' ||
-    data.typeKey === 'muted_without_reason';
+    data.typeKey ===
+    'report_staff';
 
-  const label = (userId) =>
-    userId
-      ? audit.labels.get(String(userId)) || `User ${userId}`
-      : 'Unclaimed';
+  const label =
+    (userId) =>
+      userId
+        ? audit.labels.get(
+            String(
+              userId,
+            ),
+          ) ||
+          `User ${userId}`
+        : 'Unclaimed';
 
-  const firstClaimedBy = isClaimNotApplicable
-    ? 'Not applicable'
-    : audit.firstClaim
-      ? label(audit.firstClaim.userId)
-      : 'Unclaimed';
+  const firstClaimedBy =
+    isClaimNotApplicable
+      ? 'Not applicable'
+      : audit.firstClaim
+        ? label(
+            audit.firstClaim
+              .userId,
+          )
+        : 'Unclaimed';
 
-  const firstClaimedAt = isClaimNotApplicable
-    ? 'Not applicable'
-    : audit.firstClaim
-      ? formatAuditDate(audit.firstClaim.claimedAt)
-      : 'Not claimed';
+  const firstClaimedAt =
+    isClaimNotApplicable
+      ? 'Not applicable'
+      : audit.firstClaim
+        ? formatAuditDate(
+            audit.firstClaim
+              .claimedAt,
+          )
+        : 'Not claimed';
 
-  const currentClaimer = isClaimNotApplicable
-    ? 'Not applicable'
-    : audit.currentClaimedById
-      ? label(audit.currentClaimedById)
-      : 'Unclaimed';
+  const currentClaimer =
+    isClaimNotApplicable
+      ? 'Not applicable'
+      : audit.currentClaimedById
+        ? label(
+            audit.currentClaimedById,
+          )
+        : 'Unclaimed';
 
-  const transcriptCreatedBy = audit.transcriptCreatedById
-    ? label(audit.transcriptCreatedById)
-    : 'Unknown';
+  const currentAssistants =
+    isClaimNotApplicable
+      ? 'Not applicable'
+      : audit.currentAssistants
+          .length
+        ? audit.currentAssistants
+            .map(
+              (id) =>
+                label(id),
+            )
+            .join(', ')
+        : 'None';
 
-  const closedBy = audit.closedById
-    ? label(audit.closedById)
-    : 'Unknown';
+  const transcriptCreatedBy =
+    audit.transcriptCreatedById
+      ? label(
+          audit.transcriptCreatedById,
+        )
+      : 'Unknown';
 
-  const closedAt = audit.closedAt
-    ? formatAuditDate(audit.closedAt)
-    : 'Time unavailable';
+  const closedBy =
+    audit.closedById
+      ? label(
+          audit.closedById,
+        )
+      : 'Unknown';
 
-  const historyHtml = isClaimNotApplicable
-    ? '<div class="claim-empty">Claiming is not used for this ticket type.</div>'
-    : audit.claimHistory.length
-      ? audit.claimHistory
-          .map((entry, index) => {
-            const actionLabel =
-              index === 0 || entry.action !== 'takeover'
-                ? 'First claim'
-                : 'Takeover';
+  const closedAt =
+    audit.closedAt
+      ? formatAuditDate(
+          audit.closedAt,
+        )
+      : 'Time unavailable';
 
-            const previous =
-              entry.previousClaimedById
-                ? `<span class="claim-from">from ${escapeHtml(
-                    label(entry.previousClaimedById),
-                  )}</span>`
-                : '';
+  const ownershipHtml =
+    isClaimNotApplicable
+      ? '<div class="claim-empty">Claiming / handover is not used for this ticket type.</div>'
+      : audit.claimHistory.length
+        ? audit.claimHistory
+            .map(
+              (entry, index) => {
+                const actionLabel =
+                  entry.action ===
+                    'handover'
+                    ? 'Handover accepted'
+                    : entry.action ===
+                        'takeover'
+                      ? 'Legacy takeover'
+                      : index === 0
+                        ? 'First claim'
+                        : 'Claim';
 
-            return `
+                const previous =
+                  entry.previousClaimedById
+                    ? `<span class="claim-from">from ${escapeHtml(
+                        label(
+                          entry.previousClaimedById,
+                        ),
+                      )}</span>`
+                    : '';
+
+                return `
               <div class="claim-row">
                 <div class="claim-index">${index + 1}</div>
                 <div class="claim-main">
@@ -3381,29 +4232,89 @@ function renderTranscriptAuditHtml(audit, data) {
                   <span>${escapeHtml(formatAuditDate(entry.claimedAt))}</span>
                 </div>
               </div>`;
-          })
-          .join('\n')
-      : '<div class="claim-empty">This ticket was never claimed.</div>';
+              },
+            )
+            .join('\n')
+        : '<div class="claim-empty">This ticket was never claimed.</div>';
+
+  const assistHtml =
+    isClaimNotApplicable
+      ? '<div class="claim-empty">Assist is not used for this ticket type.</div>'
+      : audit.assistHistory
+          .length
+        ? audit.assistHistory
+            .map(
+              (entry, index) => `
+              <div class="claim-row">
+                <div class="claim-index">${index + 1}</div>
+                <div class="claim-main">
+                  <b>Assistant added — ${escapeHtml(label(entry.staffId))}</b>
+                  <span>by ${escapeHtml(label(entry.addedById))}</span>
+                  <span>${escapeHtml(formatAuditDate(entry.addedAt))}</span>
+                </div>
+              </div>`,
+            )
+            .join('\n')
+        : '<div class="claim-empty">No assistants were added.</div>';
+
+  const handoverHtml =
+    isClaimNotApplicable
+      ? '<div class="claim-empty">Handover is not used for this ticket type.</div>'
+      : audit.handoverHistory
+          .length
+        ? audit.handoverHistory
+            .map(
+              (entry, index) => `
+              <div class="claim-row">
+                <div class="claim-index">${index + 1}</div>
+                <div class="claim-main">
+                  <b>Handover ${escapeHtml(entry.status)} — ${escapeHtml(
+                    label(entry.fromStaffId),
+                  )} → ${escapeHtml(label(entry.toStaffId))}</b>
+                  <span>Requested ${escapeHtml(formatAuditDate(entry.requestedAt))}</span>
+                  ${
+                    entry.acceptedAt
+                      ? `<span>Accepted ${escapeHtml(formatAuditDate(entry.acceptedAt))}</span>`
+                      : ''
+                  }
+                </div>
+              </div>`,
+            )
+            .join('\n')
+        : '<div class="claim-empty">No handover requests were made.</div>';
 
   return `
   <section class="audit-card">
     <h2>Ticket Audit</h2>
     <div class="audit-grid">
       <div class="audit-item"><span>Claimed By (First)</span><b>${escapeHtml(firstClaimedBy)}</b></div>
-      <div class="audit-item"><span>Claimed At</span><b>${escapeHtml(firstClaimedAt)}</b></div>
-      <div class="audit-item"><span>Current / Final Claimer</span><b>${escapeHtml(currentClaimer)}</b></div>
+      <div class="audit-item"><span>First Claimed At</span><b>${escapeHtml(firstClaimedAt)}</b></div>
+      <div class="audit-item"><span>Current / Final Owner</span><b>${escapeHtml(currentClaimer)}</b></div>
+      <div class="audit-item"><span>Current Assistants</span><b>${escapeHtml(currentAssistants)}</b></div>
       <div class="audit-item"><span>Transcript Created By</span><b>${escapeHtml(transcriptCreatedBy)}</b></div>
       <div class="audit-item">
         <span>Ticket Closed By</span>
         <b>${escapeHtml(closedBy)}</b>
         <div class="audit-date">${escapeHtml(closedAt)}</div>
       </div>
-      <div class="audit-item"><span>Total Claims / Takeovers</span><b>${isClaimNotApplicable ? 'N/A' : audit.claimHistory.length}</b></div>
+      <div class="audit-item"><span>Ownership Events</span><b>${isClaimNotApplicable ? 'N/A' : audit.claimHistory.length}</b></div>
+      <div class="audit-item"><span>Assist Additions</span><b>${isClaimNotApplicable ? 'N/A' : audit.assistHistory.length}</b></div>
+      <div class="audit-item"><span>Handover Requests</span><b>${isClaimNotApplicable ? 'N/A' : audit.handoverHistory.length}</b></div>
     </div>
 
-    <h3>Claim / Takeover History</h3>
+    <h3>Claim / Handover Ownership History</h3>
     <div class="claim-history">
-      ${historyHtml}
+      ${ownershipHtml}
+    </div>
+
+    <h3>Assistant History</h3>
+    <div class="claim-history">
+      ${assistHtml}
+    </div>
+
+    <h3>Handover Requests</h3>
+    <div class="claim-history">
+      ${handoverHtml}
     </div>
   </section>`;
 }
@@ -4094,8 +5005,7 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
       {
         name: 'First Claimed By',
         value:
-          data.typeKey === 'report_staff' ||
-          data.typeKey === 'muted_without_reason'
+          data.typeKey === 'report_staff'
             ? 'Not applicable'
             : artifact.audit.firstClaim
               ? `<@${artifact.audit.firstClaim.userId}>`
@@ -4104,20 +5014,38 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
       {
         name: 'Current / Final Claimer',
         value:
-          data.typeKey === 'report_staff' ||
-          data.typeKey === 'muted_without_reason'
+          data.typeKey === 'report_staff'
             ? 'Not applicable'
             : artifact.audit.currentClaimedById
               ? `<@${artifact.audit.currentClaimedById}>`
               : 'Unclaimed',
       },
       {
-        name: 'Claim / Takeover Count',
+        name: 'Claim / Handover Events',
         value:
-          data.typeKey === 'report_staff' ||
-          data.typeKey === 'muted_without_reason'
+          data.typeKey === 'report_staff'
             ? 'Not applicable'
             : String(artifact.audit.claimHistory.length),
+      },
+      {
+        name: 'Current Assistants',
+        value:
+          data.typeKey === 'report_staff'
+            ? 'Not applicable'
+            : artifact.audit.currentAssistants.length
+              ? artifact.audit.currentAssistants
+                  .map((id) => `<@${id}>`)
+                  .join(', ')
+                  .slice(0, 1024)
+              : 'None',
+      },
+      {
+        name: 'Handover Requests',
+        value:
+          data.typeKey === 'report_staff'
+            ? 'Not applicable'
+            : String(artifact.audit.handoverHistory.length),
+        inline: true,
       },
       {
         name: 'Ticket Name',
@@ -4694,775 +5622,1244 @@ async function deleteTicket(interaction) {
 async function claimTicket(interaction) {
   return runTicketClaimQueued(
     interaction.channelId,
-    () => claimTicketUnlocked(interaction),
+    () =>
+      claimTicketUnlocked(
+        interaction,
+      ),
   );
 }
 
 async function claimTicketUnlocked(interaction) {
-  const data = await getLiveTicketData(interaction.channel);
+  const data =
+    await getLiveTicketData(
+      interaction.channel,
+    );
+
   if (!data) {
     await interaction.reply({
-      content: 'This button can only be used inside a ticket channel.',
-      flags: MessageFlags.Ephemeral,
+      content:
+        'This button can only be used inside a ticket channel.',
+      flags:
+        MessageFlags.Ephemeral,
     });
     return;
   }
-
-  const member = await interaction.guild.members
-    .fetch(interaction.user.id)
-    .catch(() => null);
 
   if (
-    !member ||
-    !interaction.channel
-      .permissionsFor(member)
-      ?.has(PermissionFlagsBits.ManageMessages)
+    data.typeKey ===
+    'report_staff'
   ) {
     await interaction.reply({
-      content: 'You need **Manage Messages** to claim tickets.',
-      flags: MessageFlags.Ephemeral,
+      content:
+        'Claiming is not used for Report Staff tickets.',
+      flags:
+        MessageFlags.Ephemeral,
     });
     return;
   }
 
-  // The current claimer cannot create duplicate consecutive claim entries.
-  // A DIFFERENT staff member may press Claim at any time to take over.
-  if (data.claimedById === interaction.user.id) {
+  if (data.closedAt) {
     await interaction.reply({
-      content: 'You are already the current claimer for this ticket.',
-      flags: MessageFlags.Ephemeral,
+      content:
+        'This ticket is currently closed.',
+      flags:
+        MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const claimedAt = new Date();
-  const previousClaimedById = data.claimedById || null;
-  const action = previousClaimedById ? 'takeover' : 'claim';
-
-  const existingHistory = Array.isArray(data.claimHistory)
-    ? data.claimHistory
-    : [];
-
-  // Backward compatibility for tickets that were already claimed before this
-  // update. We preserve the legacy claimer as the first history entry, although
-  // its original timestamp cannot be recovered.
-  const claimHistory = [...existingHistory];
+  const member =
+    await interaction.guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null);
 
   if (
-    !claimHistory.length &&
-    previousClaimedById &&
-    previousClaimedById !== interaction.user.id
+    !isTicketStaffMember(
+      member,
+    )
   ) {
-    claimHistory.push({
-      userId: previousClaimedById,
-      claimedAt: null,
-      previousClaimedById: null,
-      action: 'claim',
+    await interaction.reply({
+      content:
+        'Only a member of the staff team can claim tickets.',
+      flags:
+        MessageFlags.Ephemeral,
     });
+    return;
   }
+
+  if (data.claimedById) {
+    await interaction.reply({
+      content:
+        `This ticket is already claimed by <@${data.claimedById}>. ` +
+        'The current claimer can use **Assist → Handover** if ownership needs to change.',
+      flags:
+        MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
+    });
+    return;
+  }
+
+  const claimedAt =
+    new Date();
+
+  const claimHistory =
+    Array.isArray(
+      data.claimHistory,
+    )
+      ? [
+          ...data.claimHistory,
+        ]
+      : [];
 
   claimHistory.push({
-    userId: interaction.user.id,
-    claimedAt: claimedAt.toISOString(),
-    previousClaimedById,
-    action,
+    userId:
+      interaction.user.id,
+    claimedAt:
+      claimedAt.toISOString(),
+    previousClaimedById:
+      null,
+    action:
+      'claim',
   });
+
+  let nextData;
+
+  try {
+    nextData =
+      await updateTicketTopic(
+        interaction.channel,
+        data,
+        {
+          claimedById:
+            interaction.user.id,
+          claimHistory,
+          pendingHandover:
+            null,
+        },
+        `Ticket claimed by ${interaction.user.tag}`,
+      );
+
+    await setTicketStaffTyping(
+      interaction.channel,
+      interaction.user.id,
+      true,
+      `Ticket claimed by ${interaction.user.tag}`,
+    );
+
+    // First eligible non-creator claim gets the ticket stat. Handover never
+    // awards another claim point.
+    if (
+      String(
+        interaction.user.id,
+      ) !==
+      String(
+        data.creatorId,
+      )
+    ) {
+      const counted =
+        await recordTicketClaim({
+          guildId:
+            interaction.guild.id,
+          staffId:
+            interaction.user.id,
+          ticketNumber:
+            data.number,
+          typeKey:
+            data.typeKey,
+          channelId:
+            interaction.channel.id,
+          claimedAt,
+        }).catch((error) => {
+          console.error(
+            '[STAFF TRACKING CLAIM ERROR]',
+            error,
+          );
+          return false;
+        });
+
+      if (counted) {
+        await evaluateStaffGoalsForMember(
+          interaction.guild,
+          interaction.user.id,
+        ).catch((error) => {
+          console.error(
+            '[STAFF GOAL CLAIM EVALUATION ERROR]',
+            error,
+          );
+        });
+      }
+    }
+
+    await refreshTicketControlMessage(
+      interaction.channel,
+      nextData,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET CLAIM ERROR]',
+      error,
+    );
+
+    await interaction.reply({
+      content:
+        'I could not claim this ticket. Please try again.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.reply({
+    content:
+      `🎫 Ticket claimed by <@${interaction.user.id}>.\n` +
+      'The **Claim** button is now **Assist**. Only the claimer and added assistants can talk as staff.',
+    allowedMentions: {
+      users: [
+        interaction.user.id,
+      ],
+    },
+  });
+}
+
+function buildAssistActionMenu() {
+  const menu =
+    new StringSelectMenuBuilder()
+      .setCustomId(
+        'ticket_assist_action',
+      )
+      .setPlaceholder(
+        'Choose an Assist action',
+      )
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        {
+          label:
+            'Add Staff',
+          value:
+            'add_staff',
+          description:
+            'Add one or more staff members who can talk in this ticket.',
+          emoji:
+            '➕',
+        },
+        {
+          label:
+            'Handover',
+          value:
+            'handover',
+          description:
+            'Transfer ownership after the selected staff member accepts.',
+          emoji:
+            '🔄',
+        },
+      );
+
+  return {
+    content:
+      '**Assist** — choose what you want to do.',
+    components: [
+      new ActionRowBuilder()
+        .addComponents(
+          menu,
+        ),
+    ],
+    flags:
+      MessageFlags.Ephemeral,
+  };
+}
+
+async function assertCurrentTicketOwner(
+  interaction,
+) {
+  const data =
+    await getLiveTicketData(
+      interaction.channel,
+    );
+
+  if (
+    !data ||
+    data.typeKey ===
+      'report_staff'
+  ) {
+    await interaction.reply({
+      content:
+        'This Assist control is not available here.',
+      flags:
+        MessageFlags.Ephemeral,
+    }).catch(() => {});
+
+    return null;
+  }
+
+  if (data.closedAt) {
+    await interaction.reply({
+      content:
+        'This ticket is currently closed.',
+      flags:
+        MessageFlags.Ephemeral,
+    }).catch(() => {});
+
+    return null;
+  }
+
+  if (
+    String(
+      data.claimedById ||
+      '',
+    ) !==
+    String(
+      interaction.user.id,
+    )
+  ) {
+    await interaction.reply({
+      content:
+        data.claimedById
+          ? `Only the current claimer <@${data.claimedById}> can manage **Assist**.`
+          : 'This ticket must be claimed before Assist can be used.',
+      flags:
+        MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
+    }).catch(() => {});
+
+    return null;
+  }
+
+  return data;
+}
+
+async function openAssistMenu(
+  interaction,
+) {
+  const data =
+    await assertCurrentTicketOwner(
+      interaction,
+    );
+
+  if (!data) {
+    return;
+  }
+
+  await interaction.reply(
+    buildAssistActionMenu(),
+  );
+}
+
+async function getEligibleAssistStaff(
+  guild,
+  data,
+  mode,
+) {
+  const all =
+    await getTicketStaffMembers(
+      guild,
+      data.creatorId,
+    );
+
+  const assistants =
+    new Set(
+      Array.isArray(
+        data.assistStaffIds,
+      )
+        ? data.assistStaffIds.map(
+            String,
+          )
+        : [],
+    );
+
+  return all.filter(
+    (member) => {
+      if (
+        String(member.id) ===
+        String(
+          data.claimedById ||
+            '',
+        )
+      ) {
+        return false;
+      }
+
+      if (
+        mode ===
+          'add_staff' &&
+        assistants.has(
+          String(member.id),
+        )
+      ) {
+        return false;
+      }
+
+      return true;
+    },
+  );
+}
+
+function buildAssistStaffPicker(
+  mode,
+  staffMembers,
+  requestedPage = 0,
+) {
+  const pageCount =
+    Math.max(
+      1,
+      Math.ceil(
+        staffMembers.length /
+        ASSIST_STAFF_PAGE_SIZE,
+      ),
+    );
+
+  const page =
+    Math.min(
+      Math.max(
+        Number(
+          requestedPage,
+        ) || 0,
+        0,
+      ),
+      pageCount - 1,
+    );
+
+  const pageMembers =
+    staffMembers.slice(
+      page *
+        ASSIST_STAFF_PAGE_SIZE,
+      page *
+        ASSIST_STAFF_PAGE_SIZE +
+        ASSIST_STAFF_PAGE_SIZE,
+    );
+
+  if (!pageMembers.length) {
+    return {
+      content:
+        mode === 'add_staff'
+          ? 'There are no additional staff members available to add.'
+          : 'There are no staff members available for handover.',
+      components: [],
+    };
+  }
+
+  const isAdd =
+    mode ===
+    'add_staff';
+
+  const select =
+    new StringSelectMenuBuilder()
+      .setCustomId(
+        `${
+          isAdd
+            ? 'ticket_assist_staff_select'
+            : 'ticket_handover_staff_select'
+        }:${page}`,
+      )
+      .setPlaceholder(
+        isAdd
+          ? 'Select staff to add'
+          : 'Select staff for handover',
+      )
+      .setMinValues(1)
+      .setMaxValues(
+        isAdd
+          ? pageMembers.length
+          : 1,
+      )
+      .addOptions(
+        pageMembers.map(
+          (member) => ({
+            label:
+              (
+                member.displayName ||
+                member.user.username
+              ).slice(
+                0,
+                100,
+              ),
+            description:
+              `Staff level ${
+                Math.max(
+                  0,
+                  getHighestStaffRoleIndex(
+                    member,
+                  ),
+                ) + 1
+              }`.slice(
+                0,
+                100,
+              ),
+            value:
+              member.id,
+          }),
+        ),
+      );
+
+  const components = [
+    new ActionRowBuilder()
+      .addComponents(
+        select,
+      ),
+  ];
+
+  if (pageCount > 1) {
+    components.push(
+      new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(
+              `${
+                isAdd
+                  ? 'ticket_assist_staff_page'
+                  : 'ticket_handover_staff_page'
+              }:${Math.max(
+                0,
+                page - 1,
+              )}`,
+            )
+            .setEmoji('⬅️')
+            .setStyle(
+              ButtonStyle.Secondary,
+            )
+            .setDisabled(
+              page <= 0,
+            ),
+          new ButtonBuilder()
+            .setCustomId(
+              'ticket_assist_page_label',
+            )
+            .setLabel(
+              `Page ${page + 1}/${pageCount}`,
+            )
+            .setStyle(
+              ButtonStyle.Secondary,
+            )
+            .setDisabled(true),
+          new ButtonBuilder()
+            .setCustomId(
+              `${
+                isAdd
+                  ? 'ticket_assist_staff_page'
+                  : 'ticket_handover_staff_page'
+              }:${Math.min(
+                pageCount - 1,
+                page + 1,
+              )}`,
+            )
+            .setEmoji('➡️')
+            .setStyle(
+              ButtonStyle.Secondary,
+            )
+            .setDisabled(
+              page >=
+                pageCount - 1,
+            ),
+        ),
+    );
+  }
+
+  return {
+    content:
+      isAdd
+        ? '**Add Staff** — select one or more staff members. They will be allowed to talk in this ticket.'
+        : '**Handover** — select one staff member. They must accept before ownership changes.',
+    components,
+  };
+}
+
+async function handleAssistAction(
+  interaction,
+) {
+  const data =
+    await assertCurrentTicketOwner(
+      interaction,
+    );
+
+  if (!data) {
+    return;
+  }
+
+  const mode =
+    interaction.values[0];
+
+  if (
+    mode !==
+      'add_staff' &&
+    mode !==
+      'handover'
+  ) {
+    await interaction.reply({
+      content:
+        'That Assist action is no longer valid.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const staffMembers =
+    await getEligibleAssistStaff(
+      interaction.guild,
+      data,
+      mode,
+    );
+
+  await interaction.update(
+    buildAssistStaffPicker(
+      mode,
+      staffMembers,
+      0,
+    ),
+  );
+}
+
+async function changeAssistStaffPage(
+  interaction,
+  mode,
+) {
+  const data =
+    await assertCurrentTicketOwner(
+      interaction,
+    );
+
+  if (!data) {
+    return;
+  }
+
+  const page =
+    Number(
+      interaction.customId.split(
+        ':',
+      )[1],
+    ) || 0;
+
+  const staffMembers =
+    await getEligibleAssistStaff(
+      interaction.guild,
+      data,
+      mode,
+    );
+
+  await interaction.update(
+    buildAssistStaffPicker(
+      mode,
+      staffMembers,
+      page,
+    ),
+  );
+}
+
+async function addAssistStaff(
+  interaction,
+) {
+  const data =
+    await assertCurrentTicketOwner(
+      interaction,
+    );
+
+  if (!data) {
+    return;
+  }
+
+  const selectedIds =
+    [
+      ...new Set(
+        interaction.values.map(
+          String,
+        ),
+      ),
+    ];
+
+  const eligible =
+    await getEligibleAssistStaff(
+      interaction.guild,
+      data,
+      'add_staff',
+    );
+
+  const eligibleIds =
+    new Set(
+      eligible.map(
+        (member) =>
+          String(
+            member.id,
+          ),
+      ),
+    );
+
+  const validIds =
+    selectedIds.filter(
+      (id) =>
+        eligibleIds.has(
+          id,
+        ),
+    );
+
+  if (!validIds.length) {
+    await interaction.reply({
+      content:
+        'None of the selected members are currently eligible to assist.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const now =
+    new Date().toISOString();
+
+  const assistStaffIds =
+    [
+      ...new Set([
+        ...(
+          Array.isArray(
+            data.assistStaffIds,
+          )
+            ? data.assistStaffIds.map(
+                String,
+              )
+            : []
+        ),
+        ...validIds,
+      ]),
+    ];
+
+  const assistHistory = [
+    ...(
+      Array.isArray(
+        data.assistHistory,
+      )
+        ? data.assistHistory
+        : []
+    ),
+    ...validIds.map(
+      (staffId) => ({
+        staffId,
+        addedById:
+          interaction.user.id,
+        addedAt:
+          now,
+      }),
+    ),
+  ];
+
+  let nextData;
+
+  try {
+    for (
+      const staffId of
+      validIds
+    ) {
+      await setTicketStaffTyping(
+        interaction.channel,
+        staffId,
+        true,
+        `Added as ticket assistant by ${interaction.user.tag}`,
+      );
+    }
+
+    nextData =
+      await updateTicketTopic(
+        interaction.channel,
+        data,
+        {
+          assistStaffIds,
+          assistHistory,
+        },
+        `Ticket assistants added by ${interaction.user.tag}`,
+      );
+
+    await refreshTicketControlMessage(
+      interaction.channel,
+      nextData,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET ASSIST ADD ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        'I could not add the selected staff members.',
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.editReply({
+    content:
+      `✅ Added ${validIds
+        .map(
+          (id) =>
+            `<@${id}>`,
+        )
+        .join(', ')} as ticket assistants. They can now talk in this ticket.`,
+    components: [],
+    allowedMentions: {
+      users:
+        validIds,
+    },
+  });
+
+  await interaction.channel
+    .send({
+      content:
+        `🤝 ${validIds
+          .map(
+            (id) =>
+              `<@${id}>`,
+          )
+          .join(' ')} ${
+            validIds.length === 1
+              ? 'has'
+              : 'have'
+          } been added to assist <@${data.claimedById}> on this ticket.`,
+      allowedMentions: {
+        users: [
+          ...new Set([
+            ...validIds,
+            data.claimedById,
+          ]),
+        ],
+      },
+    })
+    .catch(() => {});
+}
+
+function newHandoverRequestId() {
+  return (
+    `${Date.now().toString(36)}-` +
+    `${Math.random()
+      .toString(36)
+      .slice(
+        2,
+        8,
+      )}`
+  );
+}
+
+async function requestTicketHandover(
+  interaction,
+) {
+  const data =
+    await assertCurrentTicketOwner(
+      interaction,
+    );
+
+  if (!data) {
+    return;
+  }
+
+  const selectedId =
+    String(
+      interaction.values[0] ||
+      '',
+    );
+
+  const eligible =
+    await getEligibleAssistStaff(
+      interaction.guild,
+      data,
+      'handover',
+    );
+
+  const selectedMember =
+    eligible.find(
+      (member) =>
+        String(
+          member.id,
+        ) ===
+        selectedId,
+    );
+
+  if (!selectedMember) {
+    await interaction.reply({
+      content:
+        'That staff member is no longer eligible for handover.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const requestId =
+    newHandoverRequestId();
+
+  const requestedAt =
+    new Date().toISOString();
+
+  const handoverHistory = [
+    ...(
+      Array.isArray(
+        data.handoverHistory,
+      )
+        ? data.handoverHistory
+        : []
+    ),
+    {
+      requestId,
+      fromStaffId:
+        data.claimedById,
+      toStaffId:
+        selectedId,
+      requestedAt,
+      acceptedAt:
+        null,
+      status:
+        'pending',
+    },
+  ];
+
+  const pendingHandover = {
+    requestId,
+    fromStaffId:
+      data.claimedById,
+    toStaffId:
+      selectedId,
+    requestedAt,
+  };
 
   try {
     await updateTicketTopic(
       interaction.channel,
       data,
       {
-        claimedById: interaction.user.id,
-        claimHistory,
+        pendingHandover,
+        handoverHistory,
       },
-      previousClaimedById
-        ? `Ticket taken over by ${interaction.user.tag}`
-        : `Ticket claimed by ${interaction.user.tag}`,
+      `Handover requested by ${interaction.user.tag}`,
     );
 
-    let claimCountedForStats = false;
-
-    // Claim abuse protection:
-    //
-    // 1. Claiming your OWN ticket never gives staff stats / rank points.
-    // 2. The staff_ticket_claims document is keyed by channel ID, so only the
-    //    first eligible non-creator staff member can ever insert it.
-    // 3. Later takeovers remain in claimHistory but receive no claim points.
-    if (String(interaction.user.id) !== String(data.creatorId)) {
-      claimCountedForStats = await recordTicketClaim({
-        guildId: interaction.guild.id,
-        staffId: interaction.user.id,
-        ticketNumber: data.number,
-        typeKey: data.typeKey,
-        channelId: interaction.channel.id,
-        claimedAt,
-      }).catch((statsError) => {
-        console.error(
-          '[STAFF TRACKING CLAIM ERROR]',
-          statsError,
-        );
-        return false;
-      });
-
-      if (claimCountedForStats) {
-        await evaluateStaffGoalsForMember(
-          interaction.guild,
-          interaction.user.id,
-        ).catch((goalError) => {
-          console.error(
-            '[STAFF GOAL CLAIM EVALUATION ERROR]',
-            goalError,
-          );
+    const embed =
+      new EmbedBuilder()
+        .setColor(
+          0xfee75c,
+        )
+        .setTitle(
+          '🔄 Ticket Handover Requested',
+        )
+        .setDescription(
+          `<@${data.claimedById}> wants to hand this ticket over to <@${selectedId}>.\n\n` +
+          `<@${selectedId}> press **Accept Handover** below to become the new ticket owner.`,
+        )
+        .setFooter({
+          text:
+            'The current claimer keeps access until the handover is accepted.',
         });
-      }
-    } else {
-      console.log(
-        `[STAFF TRACKING] Claim stats skipped: ${interaction.user.id} ` +
-          `claimed their own ticket #${data.number ?? '?'}.`,
-      );
-    }
-  } catch (error) {
-    console.error('[TICKET CLAIM STATE ERROR]', error);
-    await interaction.reply({
-      content: 'I could not save the claim/takeover state. Please try again.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
 
-  if (previousClaimedById) {
-    await interaction.reply({
+    await interaction.channel.send({
       content:
-        `🔄 Ticket taken over by <@${interaction.user.id}> ` +
-        `from <@${previousClaimedById}>.`,
+        `<@${selectedId}>`,
+      embeds: [
+        embed,
+      ],
+      components: [
+        new ActionRowBuilder()
+          .addComponents(
+            new ButtonBuilder()
+              .setCustomId(
+                `ticket_handover_accept:${requestId}`,
+              )
+              .setLabel(
+                'Accept Handover',
+              )
+              .setEmoji('✅')
+              .setStyle(
+                ButtonStyle.Success,
+              ),
+          ),
+      ],
       allowedMentions: {
-        users: [...new Set([
-          interaction.user.id,
-          previousClaimedById,
-        ])],
+        users: [
+          selectedId,
+        ],
       },
     });
-    return;
-  }
 
-  await interaction.reply({
-    content: `🎫 Ticket claimed by <@${interaction.user.id}>.`,
-    allowedMentions: {
-      users: [interaction.user.id],
-    },
-  });
-}
-
-function sanitizeCodeBlock(value) {
-  return String(value).replace(/```/g, '``\u200b`').trim();
-}
-
-async function deletePinSystemNotice(channel, pinnedMessageId) {
-  await delay(700);
-
-  try {
-    const recent = await channel.messages.fetch({ limit: 8, cache: false });
-    const notices = recent.filter(
-      (message) =>
-        message.type === MessageType.ChannelPinnedMessage &&
-        message.reference?.messageId === pinnedMessageId,
+    await interaction.editReply({
+      content:
+        `✅ Handover requested from <@${data.claimedById}> to <@${selectedId}>. ` +
+        'Ownership will not change until they accept.',
+      components: [],
+      allowedMentions: {
+        users: [
+          selectedId,
+        ],
+      },
+    });
+  } catch (error) {
+    console.error(
+      '[TICKET HANDOVER REQUEST ERROR]',
+      error,
     );
 
-    for (const notice of notices.values()) {
-      await notice.delete().catch(() => {});
-    }
-  } catch (error) {
-    console.error('[TICKET PIN NOTICE CLEANUP ERROR]', error);
+    await interaction.editReply({
+      content:
+        'I could not create the handover request.',
+      components: [],
+    });
   }
 }
 
-async function sendAndPinInGameId(channel, creatorId, inGameId) {
-  const message = await channel.send({
-    content: `**In-game User ID — <@${creatorId}>**\n\`\`\`\n${sanitizeCodeBlock(inGameId)}\n\`\`\``,
-    allowedMentions: { parse: [] },
-  });
-
-  const pinned = await message.pin('In-game user ID submitted for ticket')
-    .then(() => true)
-    .catch((error) => {
-      console.error('[TICKET PIN ID ERROR]', error);
-      return false;
-    });
-
-  if (pinned) {
-    void deletePinSystemNotice(channel, message.id);
-  }
-
-  return message;
-}
-
-async function openInGameIdModal(interaction) {
-  const [, creatorId] = interaction.customId.split(':');
-  const data = await getLiveTicketData(interaction.channel);
-
-  if (!data || data.creatorId !== creatorId || interaction.user.id !== creatorId) {
-    await interaction.reply({
-      content: 'Only the user who created this ticket can submit the in-game ID.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (!TICKET_TYPES[data.typeKey]?.requiresInGameId) {
-    await interaction.reply({
-      content: 'This ticket does not require an in-game ID.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (data.inGameIdStatus === 'done') {
-    await interaction.reply({
-      content: 'Your in-game ID has already been submitted.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const modal = new ModalBuilder()
-    .setCustomId(`ticket_ingame_id_modal:${creatorId}`)
-    .setTitle('Submit In-game ID');
-
-  const input = new TextInputBuilder()
-    .setCustomId('ingame_id')
-    .setLabel('In-game user ID')
-    .setPlaceholder('Enter your in-game user ID')
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMinLength(1)
-    .setMaxLength(100);
-
-  modal.addComponents(new ActionRowBuilder().addComponents(input));
-  await interaction.showModal(modal);
-}
-
-async function handleInGameIdModal(interaction) {
-  const [, creatorId] = interaction.customId.split(':');
-  const data = await getLiveTicketData(interaction.channel);
-
-  if (!data || data.creatorId !== creatorId || interaction.user.id !== creatorId) {
-    await interaction.reply({
-      content: 'This form is no longer valid for this ticket.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (data.inGameIdStatus === 'done') {
-    await interaction.reply({
-      content: 'Your in-game ID has already been submitted.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const inGameId = interaction.fields.getTextInputValue('ingame_id').trim();
-  if (!inGameId) {
-    await interaction.reply({
-      content: 'Please enter a valid in-game user ID.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-  try {
-    await sendAndPinInGameId(interaction.channel, creatorId, inGameId);
-    const nextData = await updateTicketTopic(
+async function acceptTicketHandover(
+  interaction,
+) {
+  const data =
+    await getLiveTicketData(
       interaction.channel,
-      data,
-      { inGameIdStatus: 'done' },
-      `In-game ID submitted by ${interaction.user.tag}`,
     );
-
-    if (shouldCreatorBeUnlocked(nextData)) {
-      await setCreatorTyping(
-        interaction.channel,
-        creatorId,
-        true,
-        `Ticket requirements completed by ${interaction.user.tag}`,
-      );
-      if (data.typeKey === 'muted_without_reason') {
-        const evidenceEmbed = new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle('🔇 Mute appeal evidence')
-          .setDescription(
-            'Your in-game ID has been received and you can now type.\n\n' +
-              'Please explain why you believe the mute was not justified and provide any evidence you have, such as screenshots, videos, message links, dates/times, or other relevant context.\n\n' +
-              'If you know who muted you, the staff selector on the ticket message is optional — you can select the person you suspect or choose **Skip / Not sure**.',
-          );
-
-        await interaction.channel.send({
-          content: `<@${creatorId}>`,
-          embeds: [evidenceEmbed],
-          allowedMentions: { users: [creatorId] },
-        });
-      } else {
-        await interaction.channel.send({
-          content: `<@${creatorId}> ✅ Your required details are submitted. You can now type in this ticket.`,
-          allowedMentions: { users: [creatorId] },
-        });
-      }
-    } else if (data.typeKey === 'youtuber_submission') {
-      await interaction.channel.send({
-        content: `<@${creatorId}> ✅ In-game ID received. Now choose your subscriber range and submit your YouTube channel link.`,
-        allowedMentions: { users: [creatorId] },
-      });
-    }
-
-    await interaction.editReply('✅ Your in-game ID has been submitted and pinned for staff.');
-  } catch (error) {
-    console.error('[TICKET IN-GAME ID ERROR]', error);
-    await interaction.editReply('I could not save your in-game ID. Please try again or wait for staff.');
-  }
-}
-
-async function openYouTubeLinkModal(interaction) {
-  const [, creatorId] = interaction.customId.split(':');
-  const rangeKey = interaction.values[0];
-  const data = await getLiveTicketData(interaction.channel);
-
-  if (!data || data.typeKey !== 'youtuber_submission' || data.creatorId !== creatorId) {
-    await interaction.reply({
-      content: 'This YouTube menu is no longer valid for this ticket.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (interaction.user.id !== creatorId) {
-    await interaction.reply({
-      content: 'Only the user who created this ticket can submit the YouTube channel.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (data.youtubeStatus === 'done') {
-    await interaction.reply({
-      content: 'Your YouTube submission has already been sent.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (!YOUTUBE_RANGES[rangeKey]) {
-    await interaction.reply({
-      content: 'That subscriber range is no longer valid. Please try again.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const modal = new ModalBuilder()
-    .setCustomId(`ticket_youtube_link:${creatorId}:${rangeKey}`)
-    .setTitle('YouTube Channel Submission');
-
-  const linkInput = new TextInputBuilder()
-    .setCustomId('youtube_link')
-    .setLabel('YouTube channel link')
-    .setPlaceholder('https://youtube.com/@yourchannel')
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMinLength(5)
-    .setMaxLength(300);
-
-  modal.addComponents(new ActionRowBuilder().addComponents(linkInput));
-  await interaction.showModal(modal);
-}
-
-function parseYouTubeIdentifier(rawInput) {
-  const input = String(rawInput).trim();
-
-  if (/^UC[\w-]{20,}$/i.test(input)) {
-    return { kind: 'id', value: input };
-  }
-
-  if (/^@[\w.-]+$/i.test(input)) {
-    return { kind: 'handle', value: input };
-  }
-
-  let url;
-  try {
-    url = new URL(input.startsWith('http') ? input : `https://${input}`);
-  } catch {
-    return null;
-  }
-
-  const host = url.hostname.replace(/^www\./, '').toLowerCase();
-  if (!['youtube.com', 'm.youtube.com'].includes(host)) return null;
-
-  const parts = url.pathname.split('/').filter(Boolean);
-  if (!parts.length) return null;
-
-  if (parts[0] === 'channel' && parts[1]) return { kind: 'id', value: parts[1] };
-  if (parts[0].startsWith('@')) return { kind: 'handle', value: parts[0] };
-  if (parts[0] === 'user' && parts[1]) return { kind: 'username', value: parts[1] };
-  if (parts[0] === 'c' && parts[1]) return { kind: 'search', value: parts[1] };
-
-  return null;
-}
-
-async function youtubeApiGet(path, params, apiKey) {
-  const url = new URL(`https://www.googleapis.com/youtube/v3/${path}`);
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
-  }
-  url.searchParams.set('key', apiKey);
-
-  const response = await fetch(url);
-  const body = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    const message = body?.error?.message || `YouTube API returned HTTP ${response.status}`;
-    throw new Error(message);
-  }
-
-  return body;
-}
-
-async function fetchYouTubeChannelById(channelId, apiKey) {
-  const body = await youtubeApiGet(
-    'channels',
-    { part: 'snippet,statistics', id: channelId, maxResults: 1 },
-    apiKey,
-  );
-  return body.items?.[0] || null;
-}
-
-async function resolveYouTubeChannel(rawInput, apiKey) {
-  if (!apiKey) return { status: 'no_api_key' };
-
-  const identifier = parseYouTubeIdentifier(rawInput);
-  if (!identifier) return { status: 'invalid_link' };
-
-  let item = null;
-
-  if (identifier.kind === 'id') {
-    item = await fetchYouTubeChannelById(identifier.value, apiKey);
-  } else if (identifier.kind === 'handle' || identifier.kind === 'username') {
-    const filterName = identifier.kind === 'handle' ? 'forHandle' : 'forUsername';
-    const body = await youtubeApiGet(
-      'channels',
-      { part: 'snippet,statistics', [filterName]: identifier.value, maxResults: 1 },
-      apiKey,
-    );
-    item = body.items?.[0] || null;
-  } else if (identifier.kind === 'search') {
-    const search = await youtubeApiGet(
-      'search',
-      { part: 'snippet', type: 'channel', maxResults: 5, q: identifier.value },
-      apiKey,
-    );
-    const channelId = search.items?.[0]?.snippet?.channelId;
-    if (channelId) item = await fetchYouTubeChannelById(channelId, apiKey);
-  }
-
-  if (!item) return { status: 'not_found' };
-
-  return {
-    status: 'found',
-    id: item.id,
-    title: item.snippet?.title || 'Unknown channel',
-    customUrl: item.snippet?.customUrl || null,
-    thumbnail: item.snippet?.thumbnails?.default?.url || null,
-    hiddenSubscriberCount: Boolean(item.statistics?.hiddenSubscriberCount),
-    subscriberCount: item.statistics?.subscriberCount !== undefined
-      ? Number(item.statistics.subscriberCount)
-      : null,
-  };
-}
-
-function rangeMatches(rangeKey, subscriberCount) {
-  const range = YOUTUBE_RANGES[rangeKey];
-  if (!range || !Number.isFinite(subscriberCount)) return null;
-  return subscriberCount >= range.min && subscriberCount <= range.max;
-}
-
-function buildYouTubeResultEmbed(result, rangeKey, submittedLink) {
-  const selectedRange = YOUTUBE_RANGES[rangeKey]?.label || 'Unknown';
-
-  if (result.status !== 'found') {
-    const reasons = {
-      no_api_key: 'Automatic YouTube checking is not configured. Staff will need to review this submission manually.',
-      invalid_link: 'The submitted link could not be recognised as a YouTube channel link.',
-      not_found: 'The bot could not find the submitted YouTube channel. Staff will need to review it manually.',
-      error: 'The YouTube lookup failed. Staff will need to review this submission manually.',
-    };
-
-    return new EmbedBuilder()
-      .setColor(0xfee75c)
-      .setTitle('▶️ YouTube Submission')
-      .addFields(
-        { name: 'Submitted link', value: submittedLink.slice(0, 1024) },
-        { name: 'Selected subscribers', value: selectedRange, inline: true },
-        { name: 'Staff note', value: reasons[result.status] || reasons.error },
-      );
-  }
-
-  const subscribers = result.hiddenSubscriberCount
-    ? 'Hidden'
-    : Number.isFinite(result.subscriberCount)
-      ? result.subscriberCount.toLocaleString('en-GB')
-      : 'Unavailable';
-
-  const embed = new EmbedBuilder()
-    .setColor(0xff0000)
-    .setTitle('▶️ YouTube Submission')
-    .addFields(
-      { name: 'Channel', value: `[${result.title}](https://www.youtube.com/channel/${result.id})` },
-      { name: 'Subscribers', value: subscribers, inline: true },
-      { name: 'Selected subscribers', value: selectedRange, inline: true },
-      { name: 'Submitted link', value: submittedLink.slice(0, 1024) },
-    )
-    .setFooter({ text: `YouTube channel ID: ${result.id}` });
-
-  if (result.thumbnail) embed.setThumbnail(result.thumbnail);
-  return embed;
-}
-
-async function handleYouTubeLinkModal(interaction) {
-  const [, creatorId, rangeKey] = interaction.customId.split(':');
-  const data = await getLiveTicketData(interaction.channel);
 
   if (
     !data ||
-    data.typeKey !== 'youtuber_submission' ||
-    data.creatorId !== creatorId ||
-    interaction.user.id !== creatorId
+    data.typeKey ===
+      'report_staff'
   ) {
     await interaction.reply({
-      content: 'This YouTube form is no longer valid for this ticket.',
-      flags: MessageFlags.Ephemeral,
+      content:
+        'This handover request is no longer valid.',
+      flags:
+        MessageFlags.Ephemeral,
     });
     return;
   }
 
-  if (data.youtubeStatus === 'done') {
-    await interaction.reply({
-      content: 'Your YouTube submission has already been sent.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const submittedLink = interaction.fields.getTextInputValue('youtube_link').trim();
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-  const progressMessage = await interaction.channel.send({
-    content: `🔎 Checking the YouTube submission from <@${creatorId}>…`,
-    allowedMentions: { parse: [] },
-  }).catch(() => null);
-
-  let result;
-  try {
-    result = await resolveYouTubeChannel(submittedLink, process.env.YOUTUBE_API_KEY);
-  } catch (error) {
-    console.error('[YOUTUBE LOOKUP ERROR]', error);
-    result = { status: 'error' };
-  }
-
-  const resultEmbed = buildYouTubeResultEmbed(result, rangeKey, submittedLink);
-
-  if (progressMessage) {
-    await progressMessage.delete().catch(() => null);
-  }
-
-  await interaction.channel.send({
-    content: `<@${creatorId}>`,
-    embeds: [resultEmbed],
-    allowedMentions: { users: [creatorId] },
-  }).catch(() => null);
-
-  let nextData = data;
-  try {
-    nextData = await updateTicketTopic(
-      interaction.channel,
-      data,
-      { youtubeStatus: 'done' },
-      `YouTube submission completed by ${interaction.user.tag}`,
-    );
-  } catch (error) {
-    console.error('[YOUTUBE TOPIC UPDATE ERROR]', error);
-  }
-
-  if (shouldCreatorBeUnlocked(nextData)) {
-    await setCreatorTyping(
-      interaction.channel,
-      creatorId,
-      true,
-      `YouTube ticket requirements completed by ${interaction.user.tag}`,
-    ).catch((error) => console.error('[YOUTUBE UNLOCK ERROR]', error));
-
-    await interaction.channel.send({
-      content: `<@${creatorId}> ✅ Your YouTube submission steps are complete. You can now type in this ticket while staff review it.`,
-      allowedMentions: { users: [creatorId] },
-    }).catch(() => null);
-  } else {
-    await interaction.channel.send({
-      content: `<@${creatorId}> ✅ YouTube submission received. You still need to submit your **in-game ID** using the button above.`,
-      allowedMentions: { users: [creatorId] },
-    }).catch(() => null);
-  }
-
-  await interaction.editReply(
-    result.status === 'found'
-      ? '✅ Your YouTube channel has been checked and the result was posted in the ticket.'
-      : '✅ Your YouTube link was submitted. Automatic verification was not complete, so staff will verify it manually.',
-  );
-}
-
-async function getRoleContext(interaction, creatorId) {
-  const guild = interaction.guild;
-  const actor = await guild.members.fetch(interaction.user.id).catch(() => null);
-  const creator = await guild.members.fetch(creatorId).catch(() => null);
-  const botMember = guild.members.me || (await guild.members.fetchMe());
-
-  return { guild, actor, creator, botMember };
-}
-
-function canActorManageMember(guild, actor, target) {
-  if (guild.ownerId === actor.id) return true;
-  if (actor.id === target.id) return false;
-  return actor.roles.highest.comparePositionTo(target.roles.highest) > 0;
-}
-
-function getAssignableRoles(guild, actor, creator, botMember, allowedRoleIds) {
-  if (!canActorManageMember(guild, actor, creator)) return guild.roles.cache.filter(() => false);
-
-  const allowed = new Set(allowedRoleIds);
-
-  return guild.roles.cache
-    .filter((role) => {
-      if (!allowed.has(role.id)) return false;
-      if (role.id === guild.roles.everyone.id) return false;
-      if (role.managed) return false;
-      if (creator.roles.cache.has(role.id)) return false;
-      if (!canActorGiveRole(guild, actor, role)) return false;
-      if (!canBotGiveRole(botMember, role)) return false;
-      return true;
-    })
-    .sort((a, b) => b.position - a.position);
-}
-
-function buildRolePage(assignableRoles, creatorId, page) {
-  const totalPages = Math.max(1, Math.ceil(assignableRoles.size / ROLE_PAGE_SIZE));
-  const safePage = Math.max(0, Math.min(page, totalPages - 1));
-  const roles = [...assignableRoles.values()].slice(
-    safePage * ROLE_PAGE_SIZE,
-    safePage * ROLE_PAGE_SIZE + ROLE_PAGE_SIZE,
-  );
-
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`ticket_role_select:${creatorId}:${safePage}`)
-    .setPlaceholder('Select a role to give')
-    .setMinValues(1)
-    .setMaxValues(1)
-    .addOptions(
-      roles.map((role) => ({
-        label: role.name.slice(0, 100),
-        value: role.id,
-        description: 'Allowed ticket role',
-      })),
-    );
-
-  const components = [new ActionRowBuilder().addComponents(menu)];
-
-  if (totalPages > 1) {
-    components.push(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`ticket_role_page:${creatorId}:${safePage - 1}`)
-          .setLabel('Previous')
-          .setStyle(ButtonStyle.Secondary)
-          .setDisabled(safePage === 0),
-        new ButtonBuilder()
-          .setCustomId(`ticket_role_page:${creatorId}:${safePage + 1}`)
-          .setLabel('Next')
-          .setStyle(ButtonStyle.Secondary)
-          .setDisabled(safePage >= totalPages - 1),
-      ),
-    );
-  }
-
-  const first = safePage * ROLE_PAGE_SIZE + 1;
-  const last = Math.min((safePage + 1) * ROLE_PAGE_SIZE, assignableRoles.size);
-
-  return {
-    content: `Select a role to give to <@${creatorId}>. Showing ${first}-${last} of ${assignableRoles.size}.`,
-    components,
-    allowedMentions: { parse: [] },
-  };
-}
-
-async function showRoleMenu(interaction, creatorId, page = 0, update = false) {
-  const { guild, actor, creator, botMember } = await getRoleContext(interaction, creatorId);
-
-  if (!actor?.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    await interaction.reply({
-      content: 'You need **Manage Roles** to use this button.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    await interaction.reply({
-      content: 'I need **Manage Roles** before I can give roles.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  if (!creator) {
-    await interaction.reply({
-      content: 'The user who created this ticket is no longer in the server.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const config = await getGuildConfig(guild);
-  if (!config || !config.roleIds.length) {
-    await interaction.reply({
-      content: 'No ticket roles are configured. Run `/ticket-panel reconfigure:true` to choose them.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const assignableRoles = getAssignableRoles(
-    guild,
-    actor,
-    creator,
-    botMember,
-    config.roleIds,
-  );
-
-  if (!assignableRoles.size) {
+  if (data.closedAt) {
     await interaction.reply({
       content:
-        'None of the configured ticket roles can currently be given by you. The user may already have them, or your/bot role hierarchy may be too low.',
-      flags: MessageFlags.Ephemeral,
+        'This ticket is currently closed.',
+      flags:
+        MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const payload = buildRolePage(assignableRoles, creatorId, page);
+  const requestId =
+    interaction.customId.split(
+      ':',
+    )[1];
 
-  if (update) {
-    await interaction.update(payload);
-  } else {
-    await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+  const pending =
+    data.pendingHandover;
+
+  if (
+    !pending ||
+    String(
+      pending.requestId,
+    ) !==
+      String(
+        requestId,
+      ) ||
+    String(
+      pending.toStaffId,
+    ) !==
+      String(
+        interaction.user.id,
+      ) ||
+    String(
+      pending.fromStaffId,
+    ) !==
+      String(
+        data.claimedById,
+      )
+  ) {
+    await interaction.reply({
+      content:
+        'This handover request has expired or was replaced by a newer request.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
   }
+
+  const member =
+    await interaction.guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null);
+
+  if (
+    !isTicketStaffMember(
+      member,
+    )
+  ) {
+    await interaction.reply({
+      content:
+        'You are no longer an eligible staff member for this handover.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const acceptedAt =
+    new Date().toISOString();
+
+  const oldOwnerId =
+    String(
+      data.claimedById,
+    );
+
+  const newOwnerId =
+    String(
+      interaction.user.id,
+    );
+
+  const assistStaffIds =
+    (
+      Array.isArray(
+        data.assistStaffIds,
+      )
+        ? data.assistStaffIds
+        : []
+    )
+      .map(
+        String,
+      )
+      .filter(
+        (id) =>
+          id !==
+            oldOwnerId &&
+          id !==
+            newOwnerId,
+      );
+
+  const claimHistory = [
+    ...(
+      Array.isArray(
+        data.claimHistory,
+      )
+        ? data.claimHistory
+        : []
+    ),
+    {
+      userId:
+        newOwnerId,
+      claimedAt:
+        acceptedAt,
+      previousClaimedById:
+        oldOwnerId,
+      action:
+        'handover',
+    },
+  ];
+
+  const handoverHistory =
+    (
+      Array.isArray(
+        data.handoverHistory,
+      )
+        ? data.handoverHistory
+        : []
+    ).map(
+      (entry) =>
+        String(
+          entry?.requestId ||
+          '',
+        ) ===
+          String(
+            requestId,
+          )
+          ? {
+              ...entry,
+              acceptedAt,
+              status:
+                'accepted',
+            }
+          : entry,
+    );
+
+  try {
+    // Old owner must lose talking rights even if they were previously in the
+    // assistant list. New owner receives explicit member SendMessages access.
+    await setTicketStaffTyping(
+      interaction.channel,
+      oldOwnerId,
+      false,
+      `Ticket handed over to ${interaction.user.tag}`,
+    );
+
+    await setTicketStaffTyping(
+      interaction.channel,
+      newOwnerId,
+      true,
+      `Accepted ticket handover from ${oldOwnerId}`,
+    );
+
+    const nextData =
+      await updateTicketTopic(
+        interaction.channel,
+        data,
+        {
+          claimedById:
+            newOwnerId,
+          assistStaffIds,
+          claimHistory,
+          handoverHistory,
+          pendingHandover:
+            null,
+        },
+        `Ticket handover accepted by ${interaction.user.tag}`,
+      );
+
+    await refreshTicketControlMessage(
+      interaction.channel,
+      nextData,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET HANDOVER ACCEPT ERROR]',
+      error,
+    );
+
+    await interaction.followUp({
+      content:
+        'I could not complete the handover. The original owner still owns the ticket.',
+      flags:
+        MessageFlags.Ephemeral,
+    }).catch(() => {});
+
+    return;
+  }
+
+  await interaction.editReply({
+    content:
+      `✅ Handover accepted by <@${newOwnerId}>.\n` +
+      `<@${oldOwnerId}> is no longer allowed to talk as staff in this ticket.`,
+    embeds:
+      interaction.message.embeds,
+    components: [],
+    allowedMentions: {
+      users: [
+        oldOwnerId,
+        newOwnerId,
+      ],
+    },
+  });
+
+  await interaction.channel
+    .send({
+      content:
+        `🔄 Ticket ownership transferred from <@${oldOwnerId}> to <@${newOwnerId}>.`,
+      allowedMentions: {
+        users: [
+          oldOwnerId,
+          newOwnerId,
+        ],
+      },
+    })
+    .catch(() => {});
 }
+
 
 async function openRoleMenu(interaction) {
   const data = getTicketData(interaction.channel);
@@ -5769,6 +7166,7 @@ async function selectMutedSuspectedStaff(interaction) {
         getTicketButtons(
           'muted_without_reason',
           data.unmuteDecision,
+          data.claimedById,
         ),
         buildInGameIdActionRow(
           creatorId,
@@ -5801,6 +7199,7 @@ async function selectMutedSuspectedStaff(interaction) {
           getTicketButtons(
             'muted_without_reason',
             data.unmuteDecision,
+            data.claimedById,
           ),
           buildInGameIdActionRow(
             creatorId,
@@ -5858,6 +7257,7 @@ async function selectMutedSuspectedStaff(interaction) {
         getTicketButtons(
           'muted_without_reason',
           data.unmuteDecision,
+          data.claimedById,
         ),
         buildInGameIdActionRow(
           creatorId,
@@ -5960,7 +7360,11 @@ async function handleUnmuteDecision(interaction, decision) {
 
   await interaction.message.edit({
     components: [
-      getTicketButtons('muted_without_reason', nextData.unmuteDecision),
+      getTicketButtons(
+        'muted_without_reason',
+        nextData.unmuteDecision,
+        nextData.claimedById,
+      ),
       ...remainingRows,
     ],
   }).catch((error) => {
@@ -5992,6 +7396,111 @@ async function handleUnmuteDecision(interaction, decision) {
   }).catch(() => {});
 }
 
+async function handleTicketMessageCreate(
+  message,
+) {
+  if (
+    !message?.guild ||
+    !message.channel ||
+    message.author?.bot ||
+    message.system
+  ) {
+    return false;
+  }
+
+  const data =
+    await getLiveTicketData(
+      message.channel,
+    );
+
+  if (
+    !data ||
+    data.typeKey ===
+      'report_staff'
+  ) {
+    return false;
+  }
+
+  // The ticket creator is a customer in their own ticket even if they also
+  // happen to hold a staff role.
+  if (
+    String(
+      message.author.id,
+    ) ===
+    String(
+      data.creatorId,
+    )
+  ) {
+    return false;
+  }
+
+  const member =
+    message.member ||
+    (await message.guild.members
+      .fetch(
+        message.author.id,
+      )
+      .catch(() => null));
+
+  if (
+    !isTicketStaffMember(
+      member,
+    )
+  ) {
+    return false;
+  }
+
+  const assistants =
+    new Set(
+      Array.isArray(
+        data.assistStaffIds,
+      )
+        ? data.assistStaffIds.map(
+            String,
+          )
+        : [],
+    );
+
+  const allowed =
+    !data.closedAt &&
+    (
+      String(
+        data.claimedById ||
+        '',
+      ) ===
+        String(
+          message.author.id,
+        ) ||
+      assistants.has(
+        String(
+          message.author.id,
+        ),
+      )
+    );
+
+  if (allowed) {
+    return false;
+  }
+
+  await message
+    .delete()
+    .catch((error) => {
+      console.error(
+        '[TICKET STAFF MESSAGE BLOCK ERROR]',
+        error,
+      );
+    });
+
+  console.log(
+    `[TICKET STAFF LOCK] Removed unauthorized staff message from ` +
+      `${message.author.tag} (${message.author.id}) in ${message.channel.id}.`,
+  );
+
+  // true tells index.js not to award a tracked-message point for something
+  // that was not allowed to remain in the ticket.
+  return true;
+}
+
 async function handleTicketInteraction(interaction) {
   if (interaction.isButton()) {
     if (interaction.customId === 'ticket_create') {
@@ -6003,6 +7512,20 @@ async function handleTicketInteraction(interaction) {
     if (interaction.customId === 'ticket_reopen') return reopenTicket(interaction);
     if (interaction.customId === 'ticket_delete') return deleteTicket(interaction);
     if (interaction.customId === 'ticket_claim') return claimTicket(interaction);
+    if (interaction.customId === 'ticket_assist') return openAssistMenu(interaction);
+    if (interaction.customId.startsWith('ticket_assist_staff_page:')) {
+      return changeAssistStaffPage(interaction, 'add_staff');
+    }
+    if (interaction.customId.startsWith('ticket_handover_staff_page:')) {
+      return changeAssistStaffPage(interaction, 'handover');
+    }
+    if (interaction.customId === 'ticket_assist_page_label') {
+      await interaction.deferUpdate().catch(() => {});
+      return true;
+    }
+    if (interaction.customId.startsWith('ticket_handover_accept:')) {
+      return acceptTicketHandover(interaction);
+    }
     if (interaction.customId === 'ticket_role') return openRoleMenu(interaction);
     if (interaction.customId === 'ticket_unmute_approve') {
       return handleUnmuteDecision(interaction, 'approved');
@@ -6031,6 +7554,15 @@ async function handleTicketInteraction(interaction) {
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === 'ticket_create_type') {
       return createTicket(interaction, interaction.values[0]);
+    }
+    if (interaction.customId === 'ticket_assist_action') {
+      return handleAssistAction(interaction);
+    }
+    if (interaction.customId.startsWith('ticket_assist_staff_select:')) {
+      return addAssistStaff(interaction);
+    }
+    if (interaction.customId.startsWith('ticket_handover_staff_select:')) {
+      return requestTicketHandover(interaction);
     }
     if (interaction.customId.startsWith('ticket_role_select:')) {
       return giveSelectedRole(interaction);
@@ -6062,5 +7594,6 @@ module.exports = {
   buildPanelMessage,
   getGuildConfig,
   handleTicketInteraction,
+  handleTicketMessageCreate,
   sendTicketPanelCommand,
 };
