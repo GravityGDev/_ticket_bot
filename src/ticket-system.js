@@ -714,6 +714,22 @@ async function setTicketStaffTyping(
       )
       .catch(() => null));
 
+  const administrator =
+    Boolean(
+      member?.permissions.has(
+        PermissionFlagsBits.Administrator,
+      ),
+    );
+
+  // Discord Administrators are never ticket-locked. This deliberately wins
+  // over Claim / Assist / Handover ownership rules.
+  const shouldEnable =
+    administrator
+      ? true
+      : Boolean(
+          enabled,
+        );
+
   const overwrite = {
     ViewChannel: true,
     ReadMessageHistory: true,
@@ -722,9 +738,7 @@ async function setTicketStaffTyping(
     AddReactions: true,
     UseApplicationCommands: true,
     SendMessages:
-      Boolean(
-        enabled,
-      ),
+      shouldEnable,
   };
 
   // First try the normal overwrite edit. This should clear the old member-level
@@ -736,7 +750,7 @@ async function setTicketStaffTyping(
   );
 
   if (
-    !enabled ||
+    !shouldEnable ||
     !member
   ) {
     return;
@@ -832,6 +846,9 @@ async function applyTicketStaffTypingState(
     staffMembers
   ) {
     const canTalk =
+      member.permissions.has(
+        PermissionFlagsBits.Administrator,
+      ) ||
       String(member.id) ===
         String(
           data.claimedById ||
@@ -860,73 +877,91 @@ async function deletePinNotification(
   pinnedMessage,
   pinStartedAt,
 ) {
-  // Discord can create a ChannelPinnedMessage system message after pin().
-  // Remove only the fresh system event associated with this control message.
-  await new Promise(
-    (resolve) =>
-      setTimeout(
-        resolve,
-        450,
-      ),
-  );
+  const retryDelays = [
+    250,
+    700,
+    1400,
+    2500,
+    4000,
+  ];
 
-  const recent =
-    await channel.messages
-      .fetch({
-        limit: 10,
-      })
-      .catch(() => null);
-
-  if (!recent) {
-    return;
-  }
+  let deletedCount = 0;
 
   for (
-    const message of
-    recent.values()
+    const delay of
+    retryDelays
   ) {
-    if (
-      message.id ===
-        pinnedMessage.id ||
-      message.type !==
-        MessageType.ChannelPinnedMessage ||
-      message.createdTimestamp <
-        pinStartedAt - 1500
-    ) {
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          delay,
+        ),
+    );
+
+    const recent =
+      await channel.messages
+        .fetch({
+          limit: 25,
+        })
+        .catch(() => null);
+
+    if (!recent) {
       continue;
     }
 
-    const referencedId =
-      message.reference?.messageId ||
-      message.messageSnapshots
-        ?.first?.()
-        ?.id ||
-      null;
-
-    if (
-      referencedId &&
-      String(
-        referencedId,
-      ) !==
-        String(
-          pinnedMessage.id,
-        )
+    for (
+      const message of
+      recent.values()
     ) {
-      continue;
+      if (
+        message.id ===
+          pinnedMessage.id ||
+        message.type !==
+          MessageType.ChannelPinnedMessage ||
+        message.createdTimestamp <
+          pinStartedAt - 3000
+      ) {
+        continue;
+      }
+
+      const deleted =
+        await message
+          .delete()
+          .then(
+            () => true,
+          )
+          .catch((error) => {
+            console.error(
+              '[TICKET PIN NOTICE DELETE ERROR]',
+              error,
+            );
+
+            return false;
+          });
+
+      if (deleted) {
+        deletedCount += 1;
+      }
     }
 
-    await message
-      .delete()
-      .catch((error) => {
-        console.error(
-          '[TICKET PIN NOTICE DELETE ERROR]',
-          error,
-        );
-      });
+    if (
+      deletedCount >
+      0
+    ) {
+      break;
+    }
+  }
 
-    break;
+  if (
+    deletedCount === 0
+  ) {
+    console.warn(
+      `[TICKET PIN NOTICE] No pin system message found to delete for ${pinnedMessage.id} in ${channel.id}.`,
+    );
   }
 }
+
 
 async function pinTicketControlMessage(
   message,
@@ -1673,6 +1708,23 @@ function buildTicketPermissionOverwrites(
       String(member.id) ===
         String(botId)
     ) {
+      continue;
+    }
+
+    if (
+      member.permissions.has(
+        PermissionFlagsBits.Administrator,
+      )
+    ) {
+      mergeOverwrite(
+        overwriteMap,
+        member.id,
+        1,
+        baseTicketMemberPermissions |
+          PermissionFlagsBits.SendMessages,
+        0n,
+      );
+
       continue;
     }
 
@@ -5966,6 +6018,42 @@ function buildAssistActionMenu() {
   };
 }
 
+async function respondAssistAccessDenied(
+  interaction,
+  payload,
+) {
+  const safePayload = {
+    ...payload,
+    flags:
+      MessageFlags.Ephemeral,
+  };
+
+  if (
+    interaction.deferred ||
+    interaction.replied
+  ) {
+    const editPayload = {
+      ...safePayload,
+    };
+
+    delete editPayload.flags;
+
+    await interaction
+      .editReply(
+        editPayload,
+      )
+      .catch(() => {});
+
+    return;
+  }
+
+  await interaction
+    .reply(
+      safePayload,
+    )
+    .catch(() => {});
+}
+
 async function assertCurrentTicketOwner(
   interaction,
 ) {
@@ -5979,23 +6067,25 @@ async function assertCurrentTicketOwner(
     data.typeKey ===
       'report_staff'
   ) {
-    await interaction.reply({
-      content:
-        'This Assist control is not available here.',
-      flags:
-        MessageFlags.Ephemeral,
-    }).catch(() => {});
+    await respondAssistAccessDenied(
+      interaction,
+      {
+        content:
+          'This Assist control is not available here.',
+      },
+    );
 
     return null;
   }
 
   if (data.closedAt) {
-    await interaction.reply({
-      content:
-        'This ticket is currently closed.',
-      flags:
-        MessageFlags.Ephemeral,
-    }).catch(() => {});
+    await respondAssistAccessDenied(
+      interaction,
+      {
+        content:
+          'This ticket is currently closed.',
+      },
+    );
 
     return null;
   }
@@ -6009,17 +6099,18 @@ async function assertCurrentTicketOwner(
       interaction.user.id,
     )
   ) {
-    await interaction.reply({
-      content:
-        data.claimedById
-          ? `Only the current claimer <@${data.claimedById}> can manage **Assist**.`
-          : 'This ticket must be claimed before Assist can be used.',
-      flags:
-        MessageFlags.Ephemeral,
-      allowedMentions: {
-        parse: [],
+    await respondAssistAccessDenied(
+      interaction,
+      {
+        content:
+          data.claimedById
+            ? `Only the current claimer <@${data.claimedById}> can manage **Assist**.`
+            : 'This ticket must be claimed before Assist can be used.',
+        allowedMentions: {
+          parse: [],
+        },
       },
-    }).catch(() => {});
+    );
 
     return null;
   }
@@ -6030,6 +6121,13 @@ async function assertCurrentTicketOwner(
 async function openAssistMenu(
   interaction,
 ) {
+  // Acknowledge immediately. Permission reconciliation can involve many member
+  // overwrites and must not happen before Discord's 3-second interaction limit.
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
+
   const data =
     await assertCurrentTicketOwner(
       interaction,
@@ -6039,8 +6137,8 @@ async function openAssistMenu(
     return;
   }
 
-  // Repair/synchronise ownership overwrites whenever the owner opens Assist.
-  // This also fixes assistants added to tickets before this permission fix.
+  // Repair/synchronise ownership overwrites after the interaction is safely
+  // acknowledged. This also repairs assistants on older active tickets.
   await applyTicketStaffTypingState(
     interaction.channel,
     data,
@@ -6052,8 +6150,13 @@ async function openAssistMenu(
     );
   });
 
-  await interaction.reply(
-    buildAssistActionMenu(),
+  const payload =
+    buildAssistActionMenu();
+
+  delete payload.flags;
+
+  await interaction.editReply(
+    payload,
   );
 }
 
@@ -7549,7 +7652,35 @@ async function handleTicketMessageCreate(
 ) {
   if (
     !message?.guild ||
-    !message.channel ||
+    !message.channel
+  ) {
+    return false;
+  }
+
+  if (
+    message.type ===
+      MessageType.ChannelPinnedMessage
+  ) {
+    const ticketData =
+      await getLiveTicketData(
+        message.channel,
+      );
+
+    if (ticketData) {
+      await message
+        .delete()
+        .catch((error) => {
+          console.error(
+            '[TICKET LIVE PIN NOTICE DELETE ERROR]',
+            error,
+          );
+        });
+
+      return true;
+    }
+  }
+
+  if (
     message.author?.bot ||
     message.system
   ) {
@@ -7593,6 +7724,16 @@ async function handleTicketMessageCreate(
   if (
     !isTicketStaffMember(
       member,
+    )
+  ) {
+    return false;
+  }
+
+  // Administrators always retain talking access in normal tickets. Never
+  // delete their messages through the staff ownership guard.
+  if (
+    member.permissions.has(
+      PermissionFlagsBits.Administrator,
     )
   ) {
     return false;
