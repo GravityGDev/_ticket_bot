@@ -20,6 +20,7 @@ const { CONFIG_PATH, getServerConfig, setServerConfig } = require('./config-stor
 const {
   getTicketState,
   getTicketStatesForCreator,
+  getTicketStatesForGuild,
   setTicketState,
   deleteTicketState,
 } = require('./ticket-store');
@@ -1077,6 +1078,54 @@ async function setTicketStaffTyping(
   }
 }
 
+async function ensureTicketSpeakerPermission(
+  channel,
+  staffId,
+  reason,
+) {
+  const id =
+    String(
+      staffId ||
+      '',
+    );
+
+  if (!id) {
+    return false;
+  }
+
+  const currentOverwrite =
+    channel.permissionOverwrites.cache.get(
+      id,
+    );
+
+  const alreadyAllowed =
+    Boolean(
+      currentOverwrite
+        ?.allow
+        ?.has(
+          PermissionFlagsBits.SendMessages,
+        ) &&
+      !currentOverwrite
+        ?.deny
+        ?.has(
+          PermissionFlagsBits.SendMessages,
+        ),
+    );
+
+  if (alreadyAllowed) {
+    return false;
+  }
+
+  await setTicketStaffTyping(
+    channel,
+    id,
+    true,
+    reason,
+  );
+
+  return true;
+}
+
 async function applyTicketStaffTypingState(
   channel,
   data,
@@ -1128,6 +1177,514 @@ async function applyTicketStaffTypingState(
   );
 }
 
+
+function getLastClaimOwnerId(
+  data,
+) {
+  if (
+    data?.claimedById
+  ) {
+    return String(
+      data.claimedById,
+    );
+  }
+
+  const history =
+    Array.isArray(
+      data?.claimHistory,
+    )
+      ? data.claimHistory
+      : [];
+
+  for (
+    let index =
+      history.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    const userId =
+      history[index]
+        ?.userId;
+
+    if (userId) {
+      return String(
+        userId,
+      );
+    }
+  }
+
+  return null;
+}
+
+async function inferLegacyAssistantsFromOverwrites(
+  channel,
+  data,
+) {
+  const inferred =
+    new Set();
+
+  const ownerId =
+    getLastClaimOwnerId(
+      data,
+    );
+
+  const creatorId =
+    String(
+      data?.creatorId ||
+      '',
+    );
+
+  const botId =
+    String(
+      channel.client.user?.id ||
+      '',
+    );
+
+  for (
+    const overwrite of
+    channel.permissionOverwrites.cache.values()
+  ) {
+    // Discord permission overwrite type 1 = Member.
+    if (
+      Number(
+        overwrite.type,
+      ) !==
+        1 ||
+      !overwrite.allow.has(
+        PermissionFlagsBits.SendMessages,
+      ) ||
+      overwrite.deny.has(
+        PermissionFlagsBits.SendMessages,
+      )
+    ) {
+      continue;
+    }
+
+    const memberId =
+      String(
+        overwrite.id,
+      );
+
+    if (
+      memberId ===
+        creatorId ||
+      memberId ===
+        botId ||
+      memberId ===
+        String(
+          ownerId ||
+          '',
+        )
+    ) {
+      continue;
+    }
+
+    const member =
+      channel.guild.members.cache.get(
+        memberId,
+      ) ||
+      (await channel.guild.members
+        .fetch(
+          memberId,
+        )
+        .catch(() => null));
+
+    if (
+      !member ||
+      !isTicketStaffMember(
+        member,
+      ) ||
+      isTicketAdministrator(
+        member,
+      )
+    ) {
+      continue;
+    }
+
+    inferred.add(
+      memberId,
+    );
+  }
+
+  return [
+    ...inferred,
+  ];
+}
+
+async function restoreOneTicketRuntimeState(
+  channel,
+  storedState,
+) {
+  const base =
+    getTicketData(
+      channel,
+    );
+
+  if (
+    !base ||
+    base.typeKey ===
+      'report_staff'
+  ) {
+    return {
+      restored:
+        false,
+      repairedPermissions:
+        0,
+      recoveredAssistants:
+        0,
+    };
+  }
+
+  const live = {
+    ...base,
+    ...(storedState || {}),
+    claimedById:
+      storedState?.claimedById ||
+      base.claimedById ||
+      null,
+    claimHistory:
+      Array.isArray(
+        storedState?.claimHistory,
+      )
+        ? storedState.claimHistory
+        : base.claimHistory,
+    assistStaffIds:
+      Array.isArray(
+        storedState?.assistStaffIds,
+      )
+        ? storedState.assistStaffIds.map(
+            String,
+          )
+        : [],
+    assistHistory:
+      Array.isArray(
+        storedState?.assistHistory,
+      )
+        ? storedState.assistHistory
+        : [],
+    handoverHistory:
+      Array.isArray(
+        storedState?.handoverHistory,
+      )
+        ? storedState.handoverHistory
+        : [],
+    pendingHandover:
+      storedState?.pendingHandover ||
+      null,
+    controlMessageId:
+      storedState?.controlMessageId ||
+      base.controlMessageId ||
+      null,
+  };
+
+  let stateChanged =
+    false;
+
+  const recoveredOwnerId =
+    getLastClaimOwnerId(
+      live,
+    );
+
+  if (
+    !live.claimedById &&
+    recoveredOwnerId
+  ) {
+    live.claimedById =
+      recoveredOwnerId;
+
+    stateChanged =
+      true;
+  }
+
+  const assistants =
+    new Set(
+      Array.isArray(
+        live.assistStaffIds,
+      )
+        ? live.assistStaffIds.map(
+            String,
+          )
+        : [],
+    );
+
+  // Migration path for assistants that were added before ticket-store.js
+  // persisted assistStaffIds. Their Discord member overwrite survives a bot
+  // reboot, so recover those IDs and write them back to MongoDB.
+  const legacyAssistants =
+    await inferLegacyAssistantsFromOverwrites(
+      channel,
+      live,
+    );
+
+  let recoveredAssistants =
+    0;
+
+  for (
+    const staffId of
+    legacyAssistants
+  ) {
+    if (
+      assistants.has(
+        staffId,
+      )
+    ) {
+      continue;
+    }
+
+    assistants.add(
+      staffId,
+    );
+
+    recoveredAssistants +=
+      1;
+
+    stateChanged =
+      true;
+  }
+
+  live.assistStaffIds =
+    [
+      ...assistants,
+    ];
+
+  setLiveTicketStateCache(
+    channel.id,
+    live,
+  );
+
+  cacheTicketAssistants(
+    channel.id,
+    live.assistStaffIds,
+  );
+
+  if (stateChanged) {
+    await setTicketState(
+      channel.id,
+      {
+        ...live,
+        updatedAt:
+          new Date().toISOString(),
+        updateReason:
+          'Recovered ticket ownership/assistant state after bot restart',
+      },
+    ).catch((error) => {
+      console.error(
+        `[TICKET REBOOT STATE MIGRATION ERROR] ${channel.id}`,
+        error,
+      );
+    });
+  }
+
+  // Closed tickets stay closed. Their saved owner/assistant state remains in
+  // MongoDB and will be reapplied by the normal Reopen flow later.
+  const isClosed =
+    Boolean(
+      live.closedAt,
+    ) ||
+    channel.name.startsWith(
+      CLOSED_TICKET_NAME_PREFIX,
+    );
+
+  if (isClosed) {
+    return {
+      restored:
+        true,
+      repairedPermissions:
+        0,
+      recoveredAssistants,
+    };
+  }
+
+  const speakerIds =
+    [
+      ...new Set([
+        live.claimedById
+          ? String(
+              live.claimedById,
+            )
+          : null,
+        ...live.assistStaffIds,
+      ].filter(Boolean)),
+    ];
+
+  let repairedPermissions =
+    0;
+
+  // Keep the startup pass rate-limit friendly. Most tickets will need zero
+  // Discord API calls because member overwrites themselves survive a reboot.
+  for (
+    const staffId of
+    speakerIds
+  ) {
+    const changed =
+      await ensureTicketSpeakerPermission(
+        channel,
+        staffId,
+        'Restored ticket claimer/assistant access after bot restart',
+      ).catch((error) => {
+        console.error(
+          `[TICKET REBOOT PERMISSION RESTORE ERROR] ${channel.id}/${staffId}`,
+          error,
+        );
+
+        return false;
+      });
+
+    if (changed) {
+      repairedPermissions +=
+        1;
+    }
+  }
+
+  return {
+    restored:
+      true,
+    repairedPermissions,
+    recoveredAssistants,
+  };
+}
+
+async function restoreTicketRuntimeState(
+  client,
+) {
+  let ticketCount =
+    0;
+
+  let repairedPermissions =
+    0;
+
+  let recoveredAssistants =
+    0;
+
+  for (
+    const guild of
+    client.guilds.cache.values()
+  ) {
+    const storedStates =
+      await getTicketStatesForGuild(
+        guild.id,
+      ).catch((error) => {
+        console.error(
+          `[TICKET REBOOT STATE LOAD ERROR] ${guild.id}`,
+          error,
+        );
+
+        return [];
+      });
+
+    const stateByChannelId =
+      new Map(
+        storedStates.map(
+          (state) => [
+            String(
+              state.channelId,
+            ),
+            state,
+          ],
+        ),
+      );
+
+    const ticketChannels =
+      [
+        ...guild.channels.cache.values(),
+      ].filter(
+        (channel) =>
+          Boolean(
+            getTicketData(
+              channel,
+            ),
+          ),
+      );
+
+    // Small batches prevent a guild with many old tickets from creating a
+    // large burst of MongoDB/member/permission requests at startup.
+    const BATCH_SIZE =
+      4;
+
+    for (
+      let index =
+        0;
+      index <
+      ticketChannels.length;
+      index +=
+        BATCH_SIZE
+    ) {
+      const batch =
+        ticketChannels.slice(
+          index,
+          index +
+            BATCH_SIZE,
+        );
+
+      const results =
+        await Promise.all(
+          batch.map(
+            async (channel) => {
+              let stored =
+                stateByChannelId.get(
+                  String(
+                    channel.id,
+                  ),
+                ) ||
+                null;
+
+              if (!stored) {
+                stored =
+                  await getTicketState(
+                    channel.id,
+                  ).catch(
+                    () => null,
+                  );
+              }
+
+              return restoreOneTicketRuntimeState(
+                channel,
+                stored,
+              );
+            },
+          ),
+        );
+
+      for (
+        const result of
+        results
+      ) {
+        if (
+          !result?.restored
+        ) {
+          continue;
+        }
+
+        ticketCount +=
+          1;
+
+        repairedPermissions +=
+          Number(
+            result.repairedPermissions ||
+            0,
+          );
+
+        recoveredAssistants +=
+          Number(
+            result.recoveredAssistants ||
+            0,
+          );
+      }
+    }
+  }
+
+  console.log(
+    `[TICKET REBOOT RESTORE] Restored ${ticketCount} ticket(s), ` +
+      `repaired ${repairedPermissions} speaker permission(s), ` +
+      `recovered ${recoveredAssistants} legacy assistant(s).`,
+  );
+
+  return {
+    ticketCount,
+    repairedPermissions,
+    recoveredAssistants,
+  };
+}
 
 async function deletePinNotification(
   channel,
@@ -8212,15 +8769,16 @@ async function handleTicketMessageCreate(
     );
 
   if (allowed) {
-    // If Discord overwrite proves the assistant is valid but Mongo was briefly
-    // stale, keep the fast-path cache warm for subsequent messages.
-    if (
-      assistantAuthorized &&
+    const isCurrentOwner =
       String(
         data.claimedById ||
         '',
-      ) !==
-        authorId
+      ) ===
+        authorId;
+
+    if (
+      assistantAuthorized &&
+      !isCurrentOwner
     ) {
       cacheTicketAssistants(
         message.channel.id,
@@ -8228,6 +8786,72 @@ async function handleTicketMessageCreate(
           authorId,
         ],
       );
+    }
+
+    // If this member has a surviving Discord SendMessages allow from an older
+    // ticket but their assistant ID was never persisted by the old
+    // ticket-store.js, repair MongoDB in the background instead of deleting
+    // their message after a future reboot.
+    if (
+      explicitlyAllowedToSend &&
+      !isCurrentOwner &&
+      !assistants.has(
+        authorId,
+      ) &&
+      !isTicketAdministrator(
+        member,
+      )
+    ) {
+      const repairedAssistIds =
+        [
+          ...new Set([
+            ...assistants,
+            authorId,
+          ]),
+        ];
+
+      cacheTicketAssistants(
+        message.channel.id,
+        [
+          authorId,
+        ],
+      );
+
+      updateTicketTopic(
+        message.channel,
+        data,
+        {
+          assistStaffIds:
+            repairedAssistIds,
+        },
+        `Recovered legacy assistant access from Discord overwrite for ${message.author.tag}`,
+      ).catch((error) => {
+        console.error(
+          '[TICKET LEGACY ASSISTANT PERSIST ERROR]',
+          error,
+        );
+      });
+    }
+
+    // Saved owner/assistant state is authoritative. If an overwrite was lost
+    // or manually changed while the bot was offline, repair it without holding
+    // up or deleting the current message.
+    if (
+      isCurrentOwner ||
+      assistants.has(
+        authorId,
+      )
+    ) {
+      ensureTicketSpeakerPermission(
+        message.channel,
+        authorId,
+        `Self-healed saved ticket speaker access for ${message.author.tag}`,
+      ).catch((error) => {
+        console.error(
+          '[TICKET SPEAKER SELF-HEAL ERROR]',
+          error,
+        );
+      });
     }
 
     return false;
@@ -8358,5 +8982,6 @@ module.exports = {
   getGuildConfig,
   handleTicketInteraction,
   handleTicketMessageCreate,
+  restoreTicketRuntimeState,
   sendTicketPanelCommand,
 };
