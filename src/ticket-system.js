@@ -1603,9 +1603,56 @@ async function restoreOneTicketRuntimeState(
   };
 }
 
+function assertTicketRuntimeHelpers() {
+  const helpers = {
+    runTicketCreationQueued:
+      typeof runTicketCreationQueued,
+    mergeOverwrite:
+      typeof mergeOverwrite,
+    buildTicketPermissionOverwrites:
+      typeof buildTicketPermissionOverwrites,
+    createTicket:
+      typeof createTicket,
+    getLiveTicketData:
+      typeof getLiveTicketData,
+    setTicketStaffTyping:
+      typeof setTicketStaffTyping,
+  };
+
+  const missing =
+    Object.entries(
+      helpers,
+    )
+      .filter(
+        ([, type]) =>
+          type !==
+          'function',
+      )
+      .map(
+        ([name]) =>
+          name,
+      );
+
+  if (
+    missing.length
+  ) {
+    throw new Error(
+      `Ticket runtime helper self-check failed: ${missing.join(', ')}`,
+    );
+  }
+
+  console.log(
+    '[TICKET SELF CHECK] Critical ticket runtime helpers are available.',
+  );
+
+  return true;
+}
+
 async function restoreTicketRuntimeState(
   client,
 ) {
+  assertTicketRuntimeHelpers();
+
   let ticketCount =
     0;
 
@@ -2574,6 +2621,85 @@ async function getLiveTicketData(channel) {
 }
 
 
+function mergeOverwrite(
+  map,
+  id,
+  type,
+  allowBits = 0n,
+  denyBits = 0n,
+) {
+  const key =
+    String(
+      id,
+    );
+
+  const existing =
+    map.get(
+      key,
+    ) || {
+      id:
+        key,
+      type,
+      allow:
+        0n,
+      deny:
+        0n,
+    };
+
+  const existingAllow =
+    BigInt(
+      existing.allow ||
+      0n,
+    );
+
+  const existingDeny =
+    BigInt(
+      existing.deny ||
+      0n,
+    );
+
+  const allow =
+    BigInt(
+      allowBits ||
+      0n,
+    );
+
+  const deny =
+    BigInt(
+      denyBits ||
+      0n,
+    );
+
+  // Any permission explicitly allowed here must be removed from deny, and any
+  // permission explicitly denied here must be removed from allow.
+  existing.allow =
+    (
+      existingAllow |
+      allow
+    ) &
+    ~deny;
+
+  existing.deny =
+    (
+      existingDeny |
+      deny
+    ) &
+    ~allow;
+
+  existing.id =
+    key;
+
+  existing.type =
+    type;
+
+  map.set(
+    key,
+    existing,
+  );
+
+  return existing;
+}
+
 function buildTicketPermissionOverwrites(
   guild,
   category,
@@ -2588,12 +2714,20 @@ function buildTicketPermissionOverwrites(
     category.permissionOverwrites.cache.values()
   ) {
     overwriteMap.set(
-      overwrite.id,
+      String(
+        overwrite.id,
+      ),
       {
-        id: overwrite.id,
-        type: overwrite.type,
-        allow: overwrite.allow.bitfield,
-        deny: overwrite.deny.bitfield,
+        id:
+          String(
+            overwrite.id,
+          ),
+        type:
+          overwrite.type,
+        allow:
+          overwrite.allow.bitfield,
+        deny:
+          overwrite.deny.bitfield,
       },
     );
   }
@@ -2918,19 +3052,40 @@ async function createTicket(interaction, typeKey) {
     const state = initialSubmissionState(typeKey);
     const creatorCanSend = shouldCreatorBeUnlocked({ typeKey, ...state });
 
-    const permissionOverwrites = isReportStaff
-      ? buildReportStaffPermissionOverwrites(
-          guild,
-          interaction.user.id,
-          botMember.id,
-        )
-      : buildTicketPermissionOverwrites(
-          guild,
-          category,
-          interaction.user.id,
-          botMember.id,
-          creatorCanSend,
-        );
+    let permissionOverwrites;
+
+    try {
+      permissionOverwrites =
+        isReportStaff
+          ? buildReportStaffPermissionOverwrites(
+              guild,
+              interaction.user.id,
+              botMember.id,
+            )
+          : buildTicketPermissionOverwrites(
+              guild,
+              category,
+              interaction.user.id,
+              botMember.id,
+              creatorCanSend,
+            );
+    } catch (error) {
+      console.error(
+        '[TICKET PERMISSION BUILD ERROR]',
+        error,
+      );
+
+      await interaction.editReply({
+        content:
+          '❌ I could not prepare the ticket channel permissions. Please try again.',
+        components: [],
+        allowedMentions: {
+          parse: [],
+        },
+      });
+
+      return;
+    }
 
     let channel;
     try {
