@@ -29,6 +29,7 @@ const { evaluateStaffGoalsForMember } = require('./staff-settings');
 const {
   getHighestStaffRoleIndex,
   isStaffMember,
+  isBotDeveloper,
 } = require('./staff-role-hierarchy');
 const {
   TRANSCRIPT_INTEGRITY_SLOT,
@@ -44,6 +45,11 @@ const REPORT_STAFF_PAGE_SIZE = 23;
 // 22 leaves room for Back + Next + Skip/Not sure inside Discord's 25-option limit.
 const MUTED_STAFF_PAGE_SIZE = 22;
 const ASSIST_STAFF_PAGE_SIZE = 23;
+
+// Fast-path authorization for newly-added assistants. Mongo remains the source
+// of truth, but this prevents a just-added assistant's first message from being
+// deleted if the next state read is briefly stale.
+const ticketAssistantAccessCache = new Map();
 const REPORT_STAFF_SECURITY_LOG_CHANNEL_ID =
   process.env.REPORT_STAFF_SECURITY_LOG_CHANNEL_ID || '1150135578378125383';
 const TRANSCRIPT_LOG_CHANNEL_ID =
@@ -626,6 +632,140 @@ function buildReportStaffPermissionOverwrites(guild, creatorId, botId) {
   ];
 }
 
+function isTicketAdministrator(member) {
+  if (!member) {
+    return false;
+  }
+
+  // The bot developer and Discord server owner must never be ticket-locked,
+  // even if their current staff role does not expose Administrator as expected.
+  if (
+    isBotDeveloper(
+      member,
+    ) ||
+    String(member.id) ===
+      String(
+        member.guild?.ownerId ||
+        '',
+      )
+  ) {
+    return true;
+  }
+
+  if (
+    member.permissions.has(
+      PermissionFlagsBits.Administrator,
+    )
+  ) {
+    return true;
+  }
+
+  // Defensive role-level check in case GuildMember#permissions is stale while
+  // roles have already updated in cache.
+  return member.roles.cache.some(
+    (role) =>
+      role.permissions.has(
+        PermissionFlagsBits.Administrator,
+      ),
+  );
+}
+
+function assistantCacheForChannel(
+  channelId,
+) {
+  const key =
+    String(
+      channelId,
+    );
+
+  if (
+    !ticketAssistantAccessCache.has(
+      key,
+    )
+  ) {
+    ticketAssistantAccessCache.set(
+      key,
+      new Set(),
+    );
+  }
+
+  return ticketAssistantAccessCache.get(
+    key,
+  );
+}
+
+function cacheTicketAssistants(
+  channelId,
+  staffIds,
+) {
+  const cache =
+    assistantCacheForChannel(
+      channelId,
+    );
+
+  for (
+    const staffId of
+    staffIds || []
+  ) {
+    cache.add(
+      String(
+        staffId,
+      ),
+    );
+  }
+}
+
+function removeCachedTicketAssistant(
+  channelId,
+  staffId,
+) {
+  const cache =
+    ticketAssistantAccessCache.get(
+      String(
+        channelId,
+      ),
+    );
+
+  if (!cache) {
+    return;
+  }
+
+  cache.delete(
+    String(
+      staffId,
+    ),
+  );
+
+  if (
+    cache.size === 0
+  ) {
+    ticketAssistantAccessCache.delete(
+      String(
+        channelId,
+      ),
+    );
+  }
+}
+
+function hasCachedTicketAssistant(
+  channelId,
+  staffId,
+) {
+  return Boolean(
+    ticketAssistantAccessCache
+      .get(
+        String(
+          channelId,
+        ),
+      )
+      ?.has(
+        String(
+          staffId,
+        ),
+      ),
+  );
+}
+
 function isTicketStaffMember(member) {
   return Boolean(
     member &&
@@ -634,8 +774,8 @@ function isTicketStaffMember(member) {
       isStaffMember(
         member,
       ) ||
-      member.permissions.has(
-        PermissionFlagsBits.Administrator,
+      isTicketAdministrator(
+        member,
       )
     )
   );
@@ -715,10 +855,8 @@ async function setTicketStaffTyping(
       .catch(() => null));
 
   const administrator =
-    Boolean(
-      member?.permissions.has(
-        PermissionFlagsBits.Administrator,
-      ),
+    isTicketAdministrator(
+      member,
     );
 
   // Discord Administrators are never ticket-locked. This deliberately wins
@@ -846,8 +984,8 @@ async function applyTicketStaffTypingState(
     staffMembers
   ) {
     const canTalk =
-      member.permissions.has(
-        PermissionFlagsBits.Administrator,
+      isTicketAdministrator(
+        member,
       ) ||
       String(member.id) ===
         String(
@@ -869,6 +1007,37 @@ async function applyTicketStaffTypingState(
         error,
       );
     });
+
+    if (
+      assistants.has(
+        String(
+          member.id,
+        ),
+      )
+    ) {
+      cacheTicketAssistants(
+        channel.id,
+        [
+          member.id,
+        ],
+      );
+    } else if (
+      String(
+        member.id,
+      ) !==
+        String(
+          data.claimedById ||
+          '',
+        ) &&
+      !isTicketAdministrator(
+        member,
+      )
+    ) {
+      removeCachedTicketAssistant(
+        channel.id,
+        member.id,
+      );
+    }
   }
 }
 
@@ -1712,8 +1881,8 @@ function buildTicketPermissionOverwrites(
     }
 
     if (
-      member.permissions.has(
-        PermissionFlagsBits.Administrator,
+      isTicketAdministrator(
+        member,
       )
     ) {
       mergeOverwrite(
@@ -1836,7 +2005,12 @@ async function createTicket(interaction, typeKey) {
     return;
   }
 
-  await interaction.deferUpdate();
+  // Keep the public ticket panel/type menu untouched. The creator receives a
+  // private confirmation containing the newly-created channel mention.
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
 
   const guild = interaction.guild;
   if (!guild) {
@@ -2082,9 +2256,13 @@ async function createTicket(interaction, typeKey) {
     }
 
     await interaction.editReply({
-      content: `✅ Your **${TICKET_TYPES[typeKey].label}** ticket has been created: <#${channel.id}>`,
+      content:
+        `✅ Your **${TICKET_TYPES[typeKey].label}** ticket has been created.\n` +
+        `🎫 **Ticket:** <#${channel.id}>`,
       components: [],
-      allowedMentions: { parse: [] },
+      allowedMentions: {
+        parse: [],
+      },
     });
   });
 }
@@ -6090,25 +6268,55 @@ async function assertCurrentTicketOwner(
     return null;
   }
 
+  const member =
+    await interaction.guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null);
+
+  const administrator =
+    isTicketAdministrator(
+      member,
+    );
+
   if (
+    !administrator &&
     String(
       data.claimedById ||
       '',
     ) !==
-    String(
-      interaction.user.id,
-    )
+      String(
+        interaction.user.id,
+      )
   ) {
     await respondAssistAccessDenied(
       interaction,
       {
         content:
           data.claimedById
-            ? `Only the current claimer <@${data.claimedById}> can manage **Assist**.`
+            ? `Only the current claimer <@${data.claimedById}> or an Administrator can manage **Assist**.`
             : 'This ticket must be claimed before Assist can be used.',
         allowedMentions: {
           parse: [],
         },
+      },
+    );
+
+    return null;
+  }
+
+  // Admins can manage Assist, but a ticket still needs a real owner before
+  // Add Staff / Handover has meaningful ownership context.
+  if (
+    administrator &&
+    !data.claimedById
+  ) {
+    await respondAssistAccessDenied(
+      interaction,
+      {
+        content:
+          'An Administrator can manage **Assist** after the ticket has been claimed.',
       },
     );
 
@@ -6135,6 +6343,31 @@ async function openAssistMenu(
 
   if (!data) {
     return;
+  }
+
+  const actingMember =
+    await interaction.guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null);
+
+  if (
+    isTicketAdministrator(
+      actingMember,
+    )
+  ) {
+    await setTicketStaffTyping(
+      interaction.channel,
+      interaction.user.id,
+      true,
+      `Administrator/developer Assist access repair for ${interaction.user.tag}`,
+    ).catch((error) => {
+      console.error(
+        '[TICKET ADMIN ASSIST ACCESS REPAIR ERROR]',
+        error,
+      );
+    });
   }
 
   // Repair/synchronise ownership overwrites after the interaction is safely
@@ -6571,6 +6804,11 @@ async function addAssistStaff(
         },
         `Ticket assistants added by ${interaction.user.tag}`,
       );
+
+    cacheTicketAssistants(
+      interaction.channel.id,
+      validIds,
+    );
 
     // Re-sync every ticket staff member. The current owner + assistants get an
     // explicit member SendMessages allow; everybody else keeps the deny.
@@ -7032,6 +7270,11 @@ async function acceptTicketHandover(
   try {
     // Old owner must lose talking rights even if they were previously in the
     // assistant list. New owner receives explicit member SendMessages access.
+    removeCachedTicketAssistant(
+      interaction.channel.id,
+      oldOwnerId,
+    );
+
     await setTicketStaffTyping(
       interaction.channel,
       oldOwnerId,
@@ -7732,10 +7975,36 @@ async function handleTicketMessageCreate(
   // Administrators always retain talking access in normal tickets. Never
   // delete their messages through the staff ownership guard.
   if (
-    member.permissions.has(
-      PermissionFlagsBits.Administrator,
+    isTicketAdministrator(
+      member,
     )
   ) {
+    // Developer, server owner, and Discord Administrators are always allowed.
+    // Repair a stale member-level deny on older active tickets as well.
+    const overwrite =
+      message.channel.permissionOverwrites.cache.get(
+        member.id,
+      );
+
+    const explicitlyDenied =
+      overwrite?.deny?.has(
+        PermissionFlagsBits.SendMessages,
+      );
+
+    if (explicitlyDenied) {
+      await setTicketStaffTyping(
+        message.channel,
+        member.id,
+        true,
+        `Administrator/developer ticket access repair for ${member.user.tag}`,
+      ).catch((error) => {
+        console.error(
+          '[TICKET ADMIN ACCESS REPAIR ERROR]',
+          error,
+        );
+      });
+    }
+
     return false;
   }
 
@@ -7750,6 +8019,36 @@ async function handleTicketMessageCreate(
         : [],
     );
 
+  const authorId =
+    String(
+      message.author.id,
+    );
+
+  const memberOverwrite =
+    message.channel.permissionOverwrites.cache.get(
+      authorId,
+    );
+
+  const explicitlyAllowedToSend =
+    Boolean(
+      memberOverwrite?.allow?.has(
+        PermissionFlagsBits.SendMessages,
+      ) &&
+      !memberOverwrite?.deny?.has(
+        PermissionFlagsBits.SendMessages,
+      ),
+    );
+
+  const assistantAuthorized =
+    assistants.has(
+      authorId,
+    ) ||
+    hasCachedTicketAssistant(
+      message.channel.id,
+      authorId,
+    ) ||
+    explicitlyAllowedToSend;
+
   const allowed =
     !data.closedAt &&
     (
@@ -7757,17 +8056,29 @@ async function handleTicketMessageCreate(
         data.claimedById ||
         '',
       ) ===
-        String(
-          message.author.id,
-        ) ||
-      assistants.has(
-        String(
-          message.author.id,
-        ),
-      )
+        authorId ||
+      assistantAuthorized
     );
 
   if (allowed) {
+    // If Discord overwrite proves the assistant is valid but Mongo was briefly
+    // stale, keep the fast-path cache warm for subsequent messages.
+    if (
+      assistantAuthorized &&
+      String(
+        data.claimedById ||
+        '',
+      ) !==
+        authorId
+    ) {
+      cacheTicketAssistants(
+        message.channel.id,
+        [
+          authorId,
+        ],
+      );
+    }
+
     return false;
   }
 
