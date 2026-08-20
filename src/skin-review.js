@@ -555,11 +555,10 @@ async function reconcileBlacklistedMediaOnStartup(client) {
       continue;
     }
 
-    // rejectMessage does exactly what startup reconciliation needs:
-    // - removes all approve/check reactions
-    // - preserves the protected source bot's initial ✔️
-    // - ensures this bot has added ❌
-    await rejectMessage(
+    // Blacklisted media must contain no approve/check reaction at all,
+    // including the source bot's original ✔️ / ✅ reaction.
+    // The bot then ensures ❌ is present.
+    await rejectBlacklistedMessage(
       message,
     );
 
@@ -755,6 +754,39 @@ async function rejectMessage(message) {
   await message.react(REJECT_EMOJI);
 }
 
+async function rejectBlacklistedMessage(message) {
+  if (!message) {
+    throw new Error('The source media message no longer exists.');
+  }
+
+  // A blacklisted ID must have NO approve/check reaction at all, including
+  // the original reaction created by SOURCE_MEDIA_BOT_ID.
+  for (const reaction of message.reactions.cache.values()) {
+    if (!isApproveReactionName(reaction.emoji.name)) continue;
+
+    await reaction.remove().catch(async (error) => {
+      console.error(
+        `[SKIN REVIEW] Could not remove entire ${reaction.emoji.name} reaction; ` +
+          'falling back to removing every reaction user:',
+        error,
+      );
+
+      await removeReactionUsers(reaction);
+    });
+  }
+
+  // Ensure the blacklist rejection marker is present.
+  if (
+    ![...message.reactions.cache.values()].some(
+      (reaction) =>
+        isRejectReactionName(reaction.emoji.name) &&
+        reaction.me,
+    )
+  ) {
+    await message.react(REJECT_EMOJI);
+  }
+}
+
 async function approveMessage(message) {
   if (!message) throw new Error('The source media message no longer exists.');
 
@@ -776,7 +808,7 @@ async function enforceBlacklistOnMessage(message, mediaIds = null) {
   const blacklisted = await getBlacklistedIds(ids);
   if (!blacklisted.size) return false;
 
-  await rejectMessage(message);
+  await rejectBlacklistedMessage(message);
   return true;
 }
 
@@ -858,17 +890,21 @@ async function handleSkinReviewReactionAdd(reaction, user) {
   if (!isSourceMediaMessage(message)) return;
   if (!isApproveReactionName(reaction.emoji.name)) return;
 
-  // The designated bot's initial ✔️ must always remain.
-  if (String(user.id) === PROTECTED_REACTION_BOT_ID) return;
-
   const mediaIds = await getMediaIdsForMessage(message);
   if (!mediaIds.length) return;
 
   const blacklisted = await getBlacklistedIds(mediaIds);
   if (!blacklisted.size) return;
 
-  await reaction.users.remove(user.id).catch((error) => {
-    console.error('[SKIN REVIEW BLACKLIST REACTION REMOVE ERROR]', error);
+  // Any ✔️ / ✅ added to a blacklisted media message is removed entirely,
+  // regardless of who added it — including SOURCE_MEDIA_BOT_ID.
+  await reaction.remove().catch(async (error) => {
+    console.error(
+      '[SKIN REVIEW BLACKLIST REACTION REMOVE ERROR]',
+      error,
+    );
+
+    await removeReactionUsers(reaction);
   });
 
   await message.react(REJECT_EMOJI).catch((error) => {
@@ -2199,7 +2235,7 @@ async function blacklistMediaId(
       continue;
     }
 
-    await rejectMessage(
+    await rejectBlacklistedMessage(
       message,
     );
 
