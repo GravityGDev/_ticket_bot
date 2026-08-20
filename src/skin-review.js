@@ -4,10 +4,13 @@ const {
   ButtonStyle,
   EmbedBuilder,
   MessageFlags,
+  ModalBuilder,
   PermissionFlagsBits,
   Routes,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const { getMongoDb } = require('./database');
 
@@ -17,6 +20,32 @@ const PROTECTED_REACTION_BOT_ID = SOURCE_MEDIA_BOT_ID;
 const PAGE_SIZE = 5;
 const APPROVE_EMOJI = '✔️';
 const REJECT_EMOJI = '❌';
+
+const FILTER_ALL = 'all';
+const FILTER_SKINS = 'skins';
+const FILTER_BADGES = 'badges';
+const BLACKLIST_MANAGER_PAGE_SIZE = 15;
+
+const FILTER_OPTIONS = [
+  {
+    value: FILTER_ALL,
+    label: 'All',
+    description: 'Show all media for this ID',
+    emoji: '📂',
+  },
+  {
+    value: FILTER_SKINS,
+    label: 'Skins',
+    description: 'Show skins only',
+    emoji: '🖼️',
+  },
+  {
+    value: FILTER_BADGES,
+    label: 'Badges',
+    description: 'Show badges only',
+    emoji: '🏷️',
+  },
+];
 
 // Discord's official Search Guild Messages endpoint returns up to 25 matches
 // per request. /search uses this instead of walking the entire channel.
@@ -582,6 +611,43 @@ async function initializeSkinReview(client) {
   });
 
   return initializationPromise;
+}
+
+function normalizeClanName(value) {
+  const name = String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+  if (!name) {
+    throw new Error('Enter a clan name, for example KOD.');
+  }
+
+  if (name.length > 40) {
+    throw new Error('Clan name must be 40 characters or fewer.');
+  }
+
+  return name;
+}
+
+async function getBlacklistRecord(mediaId) {
+  const id = normalizeMediaId(mediaId);
+  const { blacklist } = await collections();
+
+  return blacklist.findOne({
+    _id: id,
+  });
+}
+
+async function getBlacklistEntries() {
+  const { blacklist } = await collections();
+
+  return blacklist
+    .find({})
+    .sort({
+      blacklistedAt: -1,
+      _id: 1,
+    })
+    .toArray();
 }
 
 async function isBlacklisted(mediaId) {
@@ -1244,6 +1310,47 @@ function reactionCounts(message) {
   return { approve, reject };
 }
 
+function normalizeSearchFilter(value) {
+  const filter = String(value || FILTER_ALL).toLowerCase();
+
+  if (
+    filter !== FILTER_ALL &&
+    filter !== FILTER_SKINS &&
+    filter !== FILTER_BADGES
+  ) {
+    return FILTER_ALL;
+  }
+
+  return filter;
+}
+
+function filterLabel(value) {
+  const filter = normalizeSearchFilter(value);
+  return (
+    FILTER_OPTIONS.find((option) => option.value === filter)?.label ||
+    'All'
+  );
+}
+
+function recordMatchesFilter(record, filterValue) {
+  const filter = normalizeSearchFilter(filterValue);
+  const typeKey = String(record?.typeKey || '').toLowerCase();
+
+  if (filter === FILTER_ALL) {
+    return true;
+  }
+
+  if (filter === FILTER_BADGES) {
+    return typeKey === 'clanbadge' || typeKey === 'badge';
+  }
+
+  if (filter === FILTER_SKINS) {
+    return !(typeKey === 'clanbadge' || typeKey === 'badge');
+  }
+
+  return true;
+}
+
 async function hydratePageRecords(client, records) {
   const hydrated = [];
 
@@ -1260,18 +1367,26 @@ async function hydratePageRecords(client, records) {
   return hydrated;
 }
 
-function searchCustomId(action, mediaId, page, extra = null) {
+function searchCustomId(action, mediaId, page, filterValue = FILTER_ALL, extra = null) {
   return [
     'skinreview',
     action,
     mediaId,
     String(page),
+    normalizeSearchFilter(filterValue),
     ...(extra ? [extra] : []),
   ].join(':');
 }
 
-async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey = null) {
+async function buildSearchPanel(
+  client,
+  mediaId,
+  requestedPage = 0,
+  selectedKey = null,
+  requestedFilter = FILTER_ALL,
+) {
   const id = normalizeMediaId(mediaId);
+  const activeFilter = normalizeSearchFilter(requestedFilter);
   let records = [];
   let searchSource = 'Discord Search';
 
@@ -1297,9 +1412,27 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
         : 'MongoDB cache (Discord search fallback)';
   }
 
-  const blacklisted = await isBlacklisted(id);
+  const blacklistRecord =
+    await getBlacklistRecord(id);
 
-  if (!records.length) {
+  const blacklisted =
+    Boolean(blacklistRecord);
+
+  const blacklistName =
+    blacklistRecord
+      ? String(
+          blacklistRecord.clanName ||
+            blacklistRecord.name ||
+            'Unnamed',
+        )
+      : null;
+
+  const allRecordCount = records.length;
+  records = records.filter((record) =>
+    recordMatchesFilter(record, activeFilter),
+  );
+
+  if (!allRecordCount) {
     return {
       empty: true,
       payload: {
@@ -1307,6 +1440,52 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
           `🔎 I could not find any media associated with \`${id}\` in <#${SKIN_REVIEW_CHANNEL_ID}>.`,
         embeds: [],
         components: [],
+        allowedMentions: { parse: [] },
+      },
+    };
+  }
+
+  if (!records.length) {
+    return {
+      empty: true,
+      payload: {
+        content:
+          `🔎 I found media for \`${id}\`, but none matched the **${filterLabel(activeFilter)}** filter.`,
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle('🔎 Skin / Badge Search')
+            .setDescription(
+              `**ID:** \`${id}\`\n` +
+                `**Found:** ${allRecordCount} media item${allRecordCount === 1 ? '' : 's'}\n` +
+                `**Source:** ${searchSource}\n` +
+                `**Filter:** ${filterLabel(activeFilter)}\n` +
+                `**Blacklist:** ${
+                  blacklisted
+                    ? `🚫 **${blacklistName}** | \`${id}\``
+                    : '✅ Not blacklisted'
+                }`,
+            ),
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(searchCustomId('filter', id, 0, activeFilter))
+              .setPlaceholder('Filter media type')
+              .setMinValues(1)
+              .setMaxValues(1)
+              .addOptions(
+                FILTER_OPTIONS.map((option) =>
+                  new StringSelectMenuOptionBuilder()
+                    .setLabel(option.label)
+                    .setDescription(option.description)
+                    .setEmoji(option.emoji)
+                    .setValue(option.value)
+                    .setDefault(option.value === activeFilter),
+                ),
+              ),
+          ),
+        ],
         allowedMentions: { parse: [] },
       },
     };
@@ -1322,14 +1501,19 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
     .setTitle('🔎 Skin / Badge Search')
     .setDescription(
       `**ID:** \`${id}\`\n` +
-        `**Found:** ${records.length} media item${records.length === 1 ? '' : 's'}\n` +
+        `**Found:** ${records.length} media item${records.length === 1 ? '' : 's'} / ${allRecordCount} total\n` +
         `**Source:** ${searchSource}\n` +
+        `**Filter:** ${filterLabel(activeFilter)}\n` +
         `**Page:** ${page + 1}/${pageCount}\n` +
-        `**Blacklist:** ${blacklisted ? '🚫 **BLACKLISTED**' : '✅ Not blacklisted'}` +
+        `**Blacklist:** ${
+          blacklisted
+            ? `🚫 **${blacklistName}** | \`${id}\``
+            : '✅ Not blacklisted'
+        }` +
         (selectedKey ? `\n**Selected:** \`${selectedKey}\`` : ''),
     )
     .setFooter({
-      text: 'Select one of the five items below, then Approve or Reject it.',
+      text: 'Select a media item, choose a filter if needed, then Approve or Reject it.',
     });
 
   const embeds = [header];
@@ -1375,6 +1559,22 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
       ),
     );
 
+  const filterMenu = new StringSelectMenuBuilder()
+    .setCustomId(searchCustomId('filter', id, page, activeFilter))
+    .setPlaceholder('Filter media type')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(
+      FILTER_OPTIONS.map((option) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(option.label)
+          .setDescription(option.description)
+          .setEmoji(option.emoji)
+          .setValue(option.value)
+          .setDefault(option.value === activeFilter),
+      ),
+    );
+
   const selectedRecord = selectedKey
     ? pageRecords.find((record) => recordKey(record) === selectedKey)
     : null;
@@ -1386,6 +1586,7 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
           'approve',
           id,
           page,
+          activeFilter,
           selectedRecord ? recordKey(selectedRecord) : 'none',
         ),
       )
@@ -1399,6 +1600,7 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
           'reject',
           id,
           page,
+          activeFilter,
           selectedRecord ? recordKey(selectedRecord) : 'none',
         ),
       )
@@ -1412,6 +1614,7 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
           blacklisted ? 'unblacklist' : 'blacklist',
           id,
           page,
+          activeFilter,
         ),
       )
       .setLabel(blacklisted ? 'UnBlacklist' : 'Blacklist')
@@ -1421,17 +1624,17 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
 
   const pageRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(searchCustomId('page', id, Math.max(0, page - 1)))
+      .setCustomId(searchCustomId('page', id, Math.max(0, page - 1), activeFilter))
       .setEmoji('⬅️')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 0),
     new ButtonBuilder()
-      .setCustomId(searchCustomId('noop', id, page))
+      .setCustomId(searchCustomId('noop', id, page, activeFilter))
       .setLabel(`Page ${page + 1}/${pageCount}`)
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(true),
     new ButtonBuilder()
-      .setCustomId(searchCustomId('page', id, Math.min(pageCount - 1, page + 1)))
+      .setCustomId(searchCustomId('page', id, Math.min(pageCount - 1, page + 1), activeFilter))
       .setEmoji('➡️')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page >= pageCount - 1),
@@ -1446,6 +1649,7 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
       embeds,
       components: [
         new ActionRowBuilder().addComponents(select),
+        new ActionRowBuilder().addComponents(filterMenu),
         actionRow,
         pageRow,
       ],
@@ -1454,12 +1658,343 @@ async function buildSearchPanel(client, mediaId, requestedPage = 0, selectedKey 
   };
 }
 
+function managerCustomId(action, page = 0, extra = null) {
+  return [
+    'skinreview',
+    'manager',
+    action,
+    String(Math.max(0, Number(page) || 0)),
+    ...(extra ? [String(extra)] : []),
+  ].join(':');
+}
+
+function createSearchIdModal() {
+  return new ModalBuilder()
+    .setCustomId(managerCustomId('search-submit'))
+    .setTitle('Search Skin / Clan ID')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('media_id')
+          .setLabel('Skin / Clan / Badge ID')
+          .setPlaceholder('6a5099b92064ec052cd0187b')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMinLength(24)
+          .setMaxLength(24),
+      ),
+    );
+}
+
+function createBlacklistModal({
+  mediaId = '',
+  page = 0,
+  returnFilter = FILTER_ALL,
+  returnTo = 'manager',
+} = {}) {
+  const idInput = new TextInputBuilder()
+    .setCustomId('media_id')
+    .setLabel('Clan ID')
+    .setPlaceholder('6a5099b92064ec052cd0187b')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMinLength(24)
+    .setMaxLength(24);
+
+  if (mediaId) {
+    idInput.setValue(
+      normalizeMediaId(mediaId),
+    );
+  }
+
+  return new ModalBuilder()
+    .setCustomId(
+      [
+        'skinreview',
+        'blacklist-submit',
+        String(Math.max(0, Number(page) || 0)),
+        normalizeSearchFilter(returnFilter),
+        returnTo === 'search' ? 'search' : 'manager',
+      ].join(':'),
+    )
+    .setTitle('Blacklist Clan')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('clan_name')
+          .setLabel('Clan Name')
+          .setPlaceholder('KOD')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(40),
+      ),
+      new ActionRowBuilder().addComponents(
+        idInput,
+      ),
+    );
+}
+
+async function buildBlacklistManagerPanel(
+  requestedPage = 0,
+  {
+    showUnblacklistMenu = false,
+    notice = null,
+  } = {},
+) {
+  const entries =
+    await getBlacklistEntries();
+
+  const pageCount =
+    Math.max(
+      1,
+      Math.ceil(
+        entries.length /
+          BLACKLIST_MANAGER_PAGE_SIZE,
+      ),
+    );
+
+  const page =
+    Math.min(
+      Math.max(
+        Number(requestedPage) || 0,
+        0,
+      ),
+      pageCount - 1,
+    );
+
+  const pageEntries =
+    entries.slice(
+      page *
+        BLACKLIST_MANAGER_PAGE_SIZE,
+      page *
+        BLACKLIST_MANAGER_PAGE_SIZE +
+        BLACKLIST_MANAGER_PAGE_SIZE,
+    );
+
+  const lines =
+    pageEntries.map(
+      (record, index) => {
+        const absolute =
+          page *
+            BLACKLIST_MANAGER_PAGE_SIZE +
+          index +
+          1;
+
+        const name =
+          String(
+            record.clanName ||
+              record.name ||
+              'Unnamed',
+          );
+
+        return (
+          `**${absolute}. ${name}** | ` +
+          `\`${record._id}\``
+        );
+      },
+    );
+
+  const embed =
+    new EmbedBuilder()
+      .setColor(0x2b2d31)
+      .setTitle('🚫 Skin / Clan Blacklist Manager')
+      .setDescription(
+        (notice
+          ? `${notice}\n\n`
+          : '') +
+          `**Blacklisted IDs:** ${entries.length}\n` +
+          `**Page:** ${page + 1}/${pageCount}\n\n` +
+          (lines.length
+            ? lines.join('\n')
+            : 'No IDs are currently blacklisted.'),
+      )
+      .setFooter({
+        text:
+          'Search an ID, remove a blacklist entry, or add a clan name + ID.',
+      });
+
+  const mainActions =
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(
+          managerCustomId(
+            'search',
+            page,
+          ),
+        )
+        .setLabel('Search')
+        .setEmoji('🔎')
+        .setStyle(
+          ButtonStyle.Primary,
+        ),
+      new ButtonBuilder()
+        .setCustomId(
+          managerCustomId(
+            'unblacklist',
+            page,
+          ),
+        )
+        .setLabel('UnBlacklist')
+        .setEmoji('🔓')
+        .setStyle(
+          ButtonStyle.Secondary,
+        )
+        .setDisabled(
+          !entries.length,
+        ),
+      new ButtonBuilder()
+        .setCustomId(
+          managerCustomId(
+            'blacklist',
+            page,
+          ),
+        )
+        .setLabel('Blacklist')
+        .setEmoji('🚫')
+        .setStyle(
+          ButtonStyle.Danger,
+        ),
+    );
+
+  const components = [
+    mainActions,
+  ];
+
+  if (
+    showUnblacklistMenu &&
+    pageEntries.length
+  ) {
+    const select =
+      new StringSelectMenuBuilder()
+        .setCustomId(
+          managerCustomId(
+            'unblacklist-select',
+            page,
+          ),
+        )
+        .setPlaceholder(
+          'Select an ID to UnBlacklist',
+        )
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(
+          pageEntries.map(
+            (record) => {
+              const name =
+                String(
+                  record.clanName ||
+                    record.name ||
+                    'Unnamed',
+                );
+
+              return new StringSelectMenuOptionBuilder()
+                .setLabel(
+                  `${name} | ${record._id}`.slice(
+                    0,
+                    100,
+                  ),
+                )
+                .setDescription(
+                  `Remove ${record._id} from the blacklist`.slice(
+                    0,
+                    100,
+                  ),
+                )
+                .setValue(
+                  String(
+                    record._id,
+                  ),
+                )
+                .setEmoji('🔓');
+            },
+          ),
+        );
+
+    components.push(
+      new ActionRowBuilder().addComponents(
+        select,
+      ),
+    );
+  }
+
+  if (pageCount > 1) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            managerCustomId(
+              'page',
+              Math.max(
+                0,
+                page - 1,
+              ),
+            ),
+          )
+          .setEmoji('⬅️')
+          .setStyle(
+            ButtonStyle.Secondary,
+          )
+          .setDisabled(
+            page <= 0,
+          ),
+        new ButtonBuilder()
+          .setCustomId(
+            managerCustomId(
+              'noop',
+              page,
+            ),
+          )
+          .setLabel(
+            `Page ${page + 1}/${pageCount}`,
+          )
+          .setStyle(
+            ButtonStyle.Secondary,
+          )
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId(
+            managerCustomId(
+              'page',
+              Math.min(
+                pageCount - 1,
+                page + 1,
+              ),
+            ),
+          )
+          .setEmoji('➡️')
+          .setStyle(
+            ButtonStyle.Secondary,
+          )
+          .setDisabled(
+            page >=
+              pageCount - 1,
+          ),
+      ),
+    );
+  }
+
+  return {
+    page,
+    pageCount,
+    payload: {
+      content: '',
+      embeds: [embed],
+      components,
+      allowedMentions: {
+        parse: [],
+      },
+    },
+  };
+}
+
 async function executeSkinSearch(interaction, client) {
   if (!(await requireStaff(interaction))) return;
 
-  const mediaId = normalizeMediaId(
-    interaction.options.getString('id', true),
-  );
+  const rawMediaId =
+    interaction.options.getString(
+      'id',
+      false,
+    );
 
   await interaction.deferReply({
     flags: MessageFlags.Ephemeral,
@@ -1469,8 +2004,35 @@ async function executeSkinSearch(interaction, client) {
     await assertSourceChannelPermissions(client);
     await initializeSkinReview(client);
 
-    const result = await buildSearchPanel(client, mediaId, 0, null);
-    await interaction.editReply(result.payload);
+    if (!rawMediaId) {
+      const manager =
+        await buildBlacklistManagerPanel(
+          0,
+        );
+
+      await interaction.editReply(
+        manager.payload,
+      );
+      return;
+    }
+
+    const mediaId =
+      normalizeMediaId(
+        rawMediaId,
+      );
+
+    const result =
+      await buildSearchPanel(
+        client,
+        mediaId,
+        0,
+        null,
+        FILTER_ALL,
+      );
+
+    await interaction.editReply(
+      result.payload,
+    );
   } catch (error) {
     console.error('[SKIN SEARCH ERROR]', error);
 
@@ -1483,33 +2045,92 @@ async function executeSkinSearch(interaction, client) {
   }
 }
 
-async function blacklistMediaId(client, mediaId, userId) {
-  const id = normalizeMediaId(mediaId);
-  const { blacklist } = await collections();
+async function blacklistMediaId(
+  client,
+  mediaId,
+  userId,
+  clanName,
+) {
+  const id =
+    normalizeMediaId(mediaId);
+
+  const name =
+    normalizeClanName(clanName);
+
+  const { blacklist } =
+    await collections();
 
   await blacklist.updateOne(
-    { _id: id },
+    {
+      _id: id,
+    },
     {
       $set: {
         mediaId: id,
-        blacklistedAt: new Date(),
-        blacklistedBy: String(userId),
-        channelId: SKIN_REVIEW_CHANNEL_ID,
+        clanName: name,
+        blacklistedAt:
+          new Date(),
+        blacklistedBy:
+          String(userId),
+        channelId:
+          SKIN_REVIEW_CHANNEL_ID,
       },
     },
-    { upsert: true },
+    {
+      upsert: true,
+    },
   );
 
-  const records = await getRecords(id);
-  const messageIds = [...new Set(records.map((record) => String(record.messageId)))];
+  let records = [];
+
+  try {
+    records =
+      await getRecordsUsingDiscordSearch(
+        client,
+        id,
+      );
+  } catch (error) {
+    console.error(
+      '[SKIN REVIEW BLACKLIST DISCORD SEARCH ERROR]',
+      error,
+    );
+
+    records =
+      await getRecordsFromMongo(
+        id,
+      );
+  }
+
+  const messageIds = [
+    ...new Set(
+      records.map(
+        (record) =>
+          String(
+            record.messageId,
+          ),
+      ),
+    ),
+  ];
 
   let updated = 0;
 
-  for (const messageId of messageIds) {
-    const message = await fetchSourceMessage(client, messageId);
-    if (!message) continue;
+  for (
+    const messageId of messageIds
+  ) {
+    const message =
+      await fetchSourceMessage(
+        client,
+        messageId,
+      );
 
-    await rejectMessage(message);
+    if (!message) {
+      continue;
+    }
+
+    await rejectMessage(
+      message,
+    );
+
     updated += 1;
   }
 
@@ -1523,8 +2144,22 @@ async function unblacklistMediaId(mediaId) {
   await blacklist.deleteOne({ _id: id });
 }
 
-async function rerenderInteraction(interaction, client, mediaId, page, selectedKey = null) {
-  const result = await buildSearchPanel(client, mediaId, page, selectedKey);
+async function rerenderInteraction(
+  interaction,
+  client,
+  mediaId,
+  page,
+  selectedKey = null,
+  filterValue = FILTER_ALL,
+) {
+  const result = await buildSearchPanel(
+    client,
+    mediaId,
+    page,
+    selectedKey,
+    filterValue,
+  );
+
   await interaction.editReply(result.payload);
 }
 
@@ -1535,15 +2170,277 @@ async function handleSkinReviewInteraction(interaction, client) {
 
   if (!(await requireStaff(interaction))) return true;
 
-  const parts = interaction.customId.split(':');
+  const parts =
+    interaction.customId.split(':');
+
   const action = parts[1];
-  const mediaId = normalizeMediaId(parts[2]);
-  const page = Number(parts[3]) || 0;
-  const extra = parts[4] || null;
 
   try {
     await assertSourceChannelPermissions(client);
     await initializeSkinReview(client);
+
+    // ---------------------------------------------------------------
+    // Plain /search blacklist-manager interactions.
+    // ---------------------------------------------------------------
+    if (action === 'manager') {
+      const managerAction =
+        parts[2] || '';
+
+      const managerPage =
+        Number(parts[3]) || 0;
+
+      if (
+        managerAction === 'noop' &&
+        interaction.isButton()
+      ) {
+        await interaction.deferUpdate();
+        return true;
+      }
+
+      if (
+        managerAction === 'page' &&
+        interaction.isButton()
+      ) {
+        await interaction.deferUpdate();
+
+        const manager =
+          await buildBlacklistManagerPanel(
+            managerPage,
+          );
+
+        await interaction.editReply(
+          manager.payload,
+        );
+
+        return true;
+      }
+
+      if (
+        managerAction === 'search' &&
+        interaction.isButton()
+      ) {
+        await interaction.showModal(
+          createSearchIdModal(),
+        );
+
+        return true;
+      }
+
+      if (
+        managerAction === 'search-submit' &&
+        interaction.isModalSubmit()
+      ) {
+        const mediaId =
+          normalizeMediaId(
+            interaction.fields.getTextInputValue(
+              'media_id',
+            ),
+          );
+
+        await interaction.deferUpdate();
+
+        const result =
+          await buildSearchPanel(
+            client,
+            mediaId,
+            0,
+            null,
+            FILTER_ALL,
+          );
+
+        await interaction.editReply(
+          result.payload,
+        );
+
+        return true;
+      }
+
+      if (
+        managerAction === 'blacklist' &&
+        interaction.isButton()
+      ) {
+        await interaction.showModal(
+          createBlacklistModal({
+            page:
+              managerPage,
+            returnTo:
+              'manager',
+          }),
+        );
+
+        return true;
+      }
+
+      if (
+        managerAction === 'unblacklist' &&
+        interaction.isButton()
+      ) {
+        await interaction.deferUpdate();
+
+        const manager =
+          await buildBlacklistManagerPanel(
+            managerPage,
+            {
+              showUnblacklistMenu:
+                true,
+            },
+          );
+
+        await interaction.editReply(
+          manager.payload,
+        );
+
+        return true;
+      }
+
+      if (
+        managerAction === 'unblacklist-select' &&
+        interaction.isStringSelectMenu()
+      ) {
+        const selectedId =
+          normalizeMediaId(
+            interaction.values[0],
+          );
+
+        const record =
+          await getBlacklistRecord(
+            selectedId,
+          );
+
+        await interaction.deferUpdate();
+
+        await unblacklistMediaId(
+          selectedId,
+        );
+
+        const name =
+          String(
+            record?.clanName ||
+              record?.name ||
+              'Unnamed',
+          );
+
+        const manager =
+          await buildBlacklistManagerPanel(
+            managerPage,
+            {
+              notice:
+                `✅ UnBlacklisted **${name}** | \`${selectedId}\`.`,
+            },
+          );
+
+        await interaction.editReply(
+          manager.payload,
+        );
+
+        console.log(
+          `[SKIN REVIEW] ${selectedId} unblacklisted by ${interaction.user.id}.`,
+        );
+
+        return true;
+      }
+
+      return true;
+    }
+
+    // ---------------------------------------------------------------
+    // Clan-name blacklist modal submission.
+    // customId:
+    // skinreview:blacklist-submit:{page}:{filter}:{manager|search}
+    // ---------------------------------------------------------------
+    if (
+      action === 'blacklist-submit' &&
+      interaction.isModalSubmit()
+    ) {
+      const returnPage =
+        Number(parts[2]) || 0;
+
+      const returnFilter =
+        normalizeSearchFilter(
+          parts[3] ||
+            FILTER_ALL,
+        );
+
+      const returnTo =
+        parts[4] === 'search'
+          ? 'search'
+          : 'manager';
+
+      const clanName =
+        normalizeClanName(
+          interaction.fields.getTextInputValue(
+            'clan_name',
+          ),
+        );
+
+      const mediaId =
+        normalizeMediaId(
+          interaction.fields.getTextInputValue(
+            'media_id',
+          ),
+        );
+
+      await interaction.deferUpdate();
+
+      const updated =
+        await blacklistMediaId(
+          client,
+          mediaId,
+          interaction.user.id,
+          clanName,
+        );
+
+      console.log(
+        `[SKIN REVIEW] ${clanName} | ${mediaId} blacklisted by ` +
+          `${interaction.user.id}; ${updated} message(s) rejected.`,
+      );
+
+      if (
+        returnTo === 'search'
+      ) {
+        await rerenderInteraction(
+          interaction,
+          client,
+          mediaId,
+          returnPage,
+          null,
+          returnFilter,
+        );
+      } else {
+        const manager =
+          await buildBlacklistManagerPanel(
+            returnPage,
+            {
+              notice:
+                `🚫 Blacklisted **${clanName}** | \`${mediaId}\`. ` +
+                `Rejected ${updated} matching media message${updated === 1 ? '' : 's'}.`,
+            },
+          );
+
+        await interaction.editReply(
+          manager.payload,
+        );
+      }
+
+      return true;
+    }
+
+    const mediaId =
+      normalizeMediaId(
+        parts[2],
+      );
+
+    const page =
+      Number(parts[3]) || 0;
+
+    const filterValue =
+      normalizeSearchFilter(
+        parts[4] ||
+          FILTER_ALL,
+      );
+
+    const extra =
+      parts[5] || null;
 
     if (action === 'noop' && interaction.isButton()) {
       await interaction.deferUpdate();
@@ -1552,7 +2449,7 @@ async function handleSkinReviewInteraction(interaction, client) {
 
     if (action === 'page' && interaction.isButton()) {
       await interaction.deferUpdate();
-      await rerenderInteraction(interaction, client, mediaId, page, null);
+      await rerenderInteraction(interaction, client, mediaId, page, null, filterValue);
       return true;
     }
 
@@ -1570,7 +2467,22 @@ async function handleSkinReviewInteraction(interaction, client) {
       }
 
       await interaction.deferUpdate();
-      await rerenderInteraction(interaction, client, mediaId, page, selectedKey);
+      await rerenderInteraction(interaction, client, mediaId, page, selectedKey, filterValue);
+      return true;
+    }
+
+    if (action === 'filter' && interaction.isStringSelectMenu()) {
+      const selectedFilter = normalizeSearchFilter(interaction.values[0]);
+
+      await interaction.deferUpdate();
+      await rerenderInteraction(
+        interaction,
+        client,
+        mediaId,
+        0,
+        null,
+        selectedFilter,
+      );
       return true;
     }
 
@@ -1615,24 +2527,21 @@ async function handleSkinReviewInteraction(interaction, client) {
         await rejectMessage(message);
       }
 
-      await rerenderInteraction(interaction, client, mediaId, page, extra);
+      await rerenderInteraction(interaction, client, mediaId, page, extra, filterValue);
       return true;
     }
 
     if (action === 'blacklist' && interaction.isButton()) {
-      await interaction.deferUpdate();
-
-      const updated = await blacklistMediaId(
-        client,
-        mediaId,
-        interaction.user.id,
+      await interaction.showModal(
+        createBlacklistModal({
+          mediaId,
+          page,
+          returnFilter:
+            filterValue,
+          returnTo:
+            'search',
+        }),
       );
-
-      console.log(
-        `[SKIN REVIEW] ${mediaId} blacklisted by ${interaction.user.id}; ${updated} message(s) rejected.`,
-      );
-
-      await rerenderInteraction(interaction, client, mediaId, page, null);
       return true;
     }
 
@@ -1644,7 +2553,7 @@ async function handleSkinReviewInteraction(interaction, client) {
         `[SKIN REVIEW] ${mediaId} unblacklisted by ${interaction.user.id}.`,
       );
 
-      await rerenderInteraction(interaction, client, mediaId, page, null);
+      await rerenderInteraction(interaction, client, mediaId, page, null, filterValue);
       return true;
     }
 
