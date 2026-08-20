@@ -27,6 +27,8 @@ const REJECT_EMOJI = '❌';
 const FILTER_ALL = 'all';
 const FILTER_SKINS = 'skins';
 const FILTER_BADGES = 'badges';
+const FILTER_APPROVED = 'approved';
+const FILTER_REJECTED = 'rejected';
 const BLACKLIST_MANAGER_PAGE_SIZE = 15;
 
 const FILTER_OPTIONS = [
@@ -47,6 +49,18 @@ const FILTER_OPTIONS = [
     label: 'Badges',
     description: 'Show badges only',
     emoji: '🏷️',
+  },
+  {
+    value: FILTER_APPROVED,
+    label: 'Approved',
+    description: 'Show media with an approve reaction',
+    emoji: '✔️',
+  },
+  {
+    value: FILTER_REJECTED,
+    label: 'Rejected',
+    description: 'Show media with a reject reaction',
+    emoji: '❌',
   },
 ];
 
@@ -1459,13 +1473,126 @@ function reactionCounts(message) {
   return { approve, reject };
 }
 
+function reactionStatusFromCounts(counts) {
+  const approve =
+    Number(counts?.approve) || 0;
+
+  const reject =
+    Number(counts?.reject) || 0;
+
+  // The source bot starts media at a neutral 1:1 reaction state.
+  // Treat equal approve/reject totals as Pending. Staff moderation then tips
+  // the result toward Approved or Rejected.
+  if (approve > reject) {
+    return {
+      key: FILTER_APPROVED,
+      label: 'Approved',
+    };
+  }
+
+  if (reject > approve) {
+    return {
+      key: FILTER_REJECTED,
+      label: 'Rejected',
+    };
+  }
+
+  return {
+    key: 'pending',
+    label: 'Pending',
+  };
+}
+
+async function hydrateRecordsForStatusFilter(
+  client,
+  records,
+  concurrency = 8,
+) {
+  const hydrated = new Array(
+    records.length,
+  );
+
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      const index =
+        cursor;
+
+      cursor += 1;
+
+      if (
+        index >= records.length
+      ) {
+        return;
+      }
+
+      const record =
+        records[index];
+
+      const message =
+        await fetchSourceMessage(
+          client,
+          record.messageId,
+        );
+
+      if (!message) {
+        hydrated[index] = null;
+        continue;
+      }
+
+      const counts =
+        reactionCounts(
+          message,
+        );
+
+      const status =
+        reactionStatusFromCounts(
+          counts,
+        );
+
+      hydrated[index] = {
+        ...record,
+        _message:
+          message,
+        _reactionCounts:
+          counts,
+        _reactionStatus:
+          status.key,
+        _reactionStatusLabel:
+          status.label,
+      };
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      {
+        length:
+          Math.min(
+            Math.max(
+              records.length,
+              1,
+            ),
+            concurrency,
+          ),
+      },
+      () => worker(),
+    ),
+  );
+
+  return hydrated.filter(Boolean);
+}
+
 function normalizeSearchFilter(value) {
   const filter = String(value || FILTER_ALL).toLowerCase();
 
   if (
     filter !== FILTER_ALL &&
     filter !== FILTER_SKINS &&
-    filter !== FILTER_BADGES
+    filter !== FILTER_BADGES &&
+    filter !== FILTER_APPROVED &&
+    filter !== FILTER_REJECTED
   ) {
     return FILTER_ALL;
   }
@@ -1482,38 +1609,98 @@ function filterLabel(value) {
 }
 
 function recordMatchesFilter(record, filterValue) {
-  const filter = normalizeSearchFilter(filterValue);
-  const typeKey = String(record?.typeKey || '').toLowerCase();
+  const filter =
+    normalizeSearchFilter(
+      filterValue,
+    );
+
+  const typeKey =
+    String(
+      record?.typeKey || '',
+    ).toLowerCase();
 
   if (filter === FILTER_ALL) {
     return true;
   }
 
   if (filter === FILTER_BADGES) {
-    return typeKey === 'clanbadge' || typeKey === 'badge';
+    return (
+      typeKey === 'clanbadge' ||
+      typeKey === 'badge'
+    );
   }
 
   if (filter === FILTER_SKINS) {
-    return !(typeKey === 'clanbadge' || typeKey === 'badge');
+    return !(
+      typeKey === 'clanbadge' ||
+      typeKey === 'badge'
+    );
+  }
+
+  if (filter === FILTER_APPROVED) {
+    return (
+      record?._reactionStatus ===
+      FILTER_APPROVED
+    );
+  }
+
+  if (filter === FILTER_REJECTED) {
+    return (
+      record?._reactionStatus ===
+      FILTER_REJECTED
+    );
   }
 
   return true;
 }
 
 async function hydratePageRecords(client, records) {
-  const hydrated = [];
+  return Promise.all(
+    records.map(
+      async (record) => {
+        const message =
+          record._message ||
+          (await fetchSourceMessage(
+            client,
+            record.messageId,
+          ));
 
-  for (const record of records) {
-    const message = await fetchSourceMessage(client, record.messageId);
+        const counts =
+          record._reactionCounts ||
+          reactionCounts(
+            message,
+          );
 
-    hydrated.push({
-      record,
-      message,
-      counts: reactionCounts(message),
-    });
-  }
+        const status =
+          record._reactionStatus
+            ? {
+                key:
+                  record._reactionStatus,
+                label:
+                  record._reactionStatusLabel ||
+                  (
+                    record._reactionStatus ===
+                    FILTER_APPROVED
+                      ? 'Approved'
+                      : record._reactionStatus ===
+                          FILTER_REJECTED
+                        ? 'Rejected'
+                        : 'Pending'
+                  ),
+              }
+            : reactionStatusFromCounts(
+                counts,
+              );
 
-  return hydrated;
+        return {
+          record,
+          message,
+          counts,
+          status,
+        };
+      },
+    ),
+  );
 }
 
 function searchCustomId(action, mediaId, page, filterValue = FILTER_ALL, extra = null) {
@@ -1606,9 +1793,36 @@ async function buildSearchPanel(
         )
       : null;
 
-  const allRecordCount = records.length;
-  records = records.filter((record) =>
-    recordMatchesFilter(record, activeFilter),
+  const allRecordCount =
+    records.length;
+
+  if (
+    activeFilter ===
+      FILTER_APPROVED ||
+    activeFilter ===
+      FILTER_REJECTED
+  ) {
+    const statusStartedAt =
+      Date.now();
+
+    records =
+      await hydrateRecordsForStatusFilter(
+        client,
+        records,
+      );
+
+    console.log(
+      `[SKIN SEARCH] Hydrated ${records.length} media reaction state(s) for ` +
+        `${filterLabel(activeFilter)} filter in ${Date.now() - statusStartedAt}ms.`,
+    );
+  }
+
+  records = records.filter(
+    (record) =>
+      recordMatchesFilter(
+        record,
+        activeFilter,
+      ),
   );
 
   if (!allRecordCount) {
@@ -1697,7 +1911,7 @@ async function buildSearchPanel(
 
   const embeds = [header];
 
-  hydrated.forEach(({ record, message, counts }, index) => {
+  hydrated.forEach(({ record, message, counts, status }, index) => {
     const absoluteIndex = page * PAGE_SIZE + index + 1;
     const key = recordKey(record);
     const selected = key === selectedKey;
@@ -1710,7 +1924,7 @@ async function buildSearchPanel(
       .setDescription(
         `**ID:** \`${record.mediaId}\`\n` +
           `**Message:** ${message ? `[Jump to source](${message.url})` : '⚠️ Source message unavailable'}\n` +
-          `**Reactions:** ${APPROVE_EMOJI} ${counts.approve} • ${REJECT_EMOJI} ${counts.reject}\n` +
+          `**Reactions:** ${APPROVE_EMOJI} ${counts.approve} • ${REJECT_EMOJI} ${counts.reject} • **Status:** ${status.label}\n` +
           `**Source message ID:** \`${record.messageId}\``,
       )
       .setImage(record.url)
