@@ -6,6 +6,9 @@ const {
 } = require('discord.js');
 const { getStaffSnapshot } = require('./staff-tracking-store');
 const { getStaffTrackingSettings } = require('./staff-settings-store');
+const {
+  isStaffMember,
+} = require('./staff-role-hierarchy');
 
 const WARNING_ROLE_IDS = Object.freeze([
   '961199921841713162',
@@ -138,7 +141,7 @@ async function getRankRows(guild, snapshot, hiddenStaffUserIds = []) {
     .filter(
       (member) =>
         !member.user.bot &&
-        member.permissions.has(PermissionFlagsBits.ViewAuditLog) &&
+        isStaffMember(member) &&
         !hidden.has(member.id),
     )
     .map((member) => ({
@@ -310,9 +313,9 @@ async function renderRankCard(guild, member, periodKey) {
   const starMarkup =
     starLevel === 2
       ? `
-        <polygon points="95,570 106,596 134,598 112,616 120,644 95,628 70,644 78,616 56,598 84,596"
+        <polygon points="106,570 117,596 145,598 123,616 131,644 106,628 81,644 89,616 67,598 95,596"
                  fill="#f8c94d"/>
-        <polygon points="185,570 196,596 224,598 202,616 210,644 185,628 160,644 168,616 146,598 174,596"
+        <polygon points="166,570 177,596 205,598 183,616 191,644 166,628 141,644 149,616 127,598 155,596"
                  fill="#f8c94d"/>`
       : starLevel === 1
         ? `
@@ -539,12 +542,12 @@ async function renderRankCard(guild, member, periodKey) {
     <!-- Left status column -->
     ${starMarkup}
 
-    <line x1="242" y1="571"
-          x2="242" y2="648"
+    <line x1="210" y1="571"
+          x2="210" y2="648"
           stroke="#617084"
           stroke-opacity=".55"/>
 
-    <text x="262" y="622"
+    <text x="220" y="622"
           font-family="Arial, Helvetica, sans-serif"
           font-size="30"
           font-weight="800"
@@ -557,12 +560,12 @@ async function renderRankCard(guild, member, periodKey) {
 
     ${warningMarkup}
 
-    <line x1="242" y1="670"
-          x2="242" y2="738"
+    <line x1="210" y1="670"
+          x2="210" y2="738"
           stroke="#617084"
           stroke-opacity=".55"/>
 
-    <text x="262" y="716"
+    <text x="220" y="716"
           font-family="Arial, Helvetica, sans-serif"
           font-size="30"
           font-weight="800"
@@ -843,8 +846,11 @@ async function sendRankCard(
     .catch(() => null);
 
   if (
-    !requester ||
-    !requester.permissions.has(PermissionFlagsBits.ViewAuditLog)
+    !interaction.__snayPermissionAuthorized &&
+    (
+      !requester ||
+      !requester.permissions.has(PermissionFlagsBits.ViewAuditLog)
+    )
   ) {
     await interaction.reply({
       content: 'This command is available to staff with **View Audit Log** permission.',
@@ -871,7 +877,7 @@ async function sendRankCard(
   if (
     !member ||
     member.user.bot ||
-    !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
+    !isStaffMember(member)
   ) {
     await interaction.reply({
       content: `This user isn't Snay.io staff.`,

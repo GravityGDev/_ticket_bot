@@ -13,6 +13,9 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const { getMongoDb } = require('./database');
+const {
+  canMemberUseCommandSync,
+} = require('./staff-command-permissions');
 
 const SKIN_REVIEW_CHANNEL_ID = '1193625435796422657';
 const SOURCE_MEDIA_BOT_ID = '891220330817912852';
@@ -969,6 +972,19 @@ async function requireSearchAccess(interaction) {
     await sendSkinAccessDenied(
       interaction,
       'I could not resolve your server permissions.',
+    );
+    return null;
+  }
+
+  if (
+    !canMemberUseCommandSync(
+      member,
+      'chat:search',
+    )
+  ) {
+    await sendSkinAccessDenied(
+      interaction,
+      'You do not have permission to use the skin search/review system.',
     );
     return null;
   }

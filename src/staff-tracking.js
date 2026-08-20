@@ -18,6 +18,12 @@ const {
   handleStaffSettingsInteraction,
 } = require('./staff-settings');
 const {
+  canMemberUseCommandSync,
+} = require('./staff-command-permissions');
+const {
+  isStaffMember,
+} = require('./staff-role-hierarchy');
+const {
   getStaffTrackingSettings,
 } = require('./staff-settings-store');
 
@@ -115,7 +121,7 @@ async function getCurrentStaffMembers(guild) {
     .filter(
       (member) =>
         !member.user.bot &&
-        member.permissions.has(PermissionFlagsBits.ViewAuditLog),
+        isStaffMember(member),
     );
 }
 
@@ -762,16 +768,24 @@ async function buildDetailPayload(
 }
 
 async function canViewStaffPanel(interaction) {
-  // Every staff member is identified by View Audit Log permission and may view
-  // the dashboard. Admin Settings remains a separate permission check and is
-  // only rendered for the owner / whitelisted Settings Editors.
+  const member =
+    await interaction.guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null);
+
   if (
-    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
-    interaction.memberPermissions?.has(PermissionFlagsBits.ViewAuditLog)
+    member &&
+    canMemberUseCommandSync(
+      member,
+      'chat:staff-stats',
+    )
   ) {
     return true;
   }
 
+  // Keep the existing Staff Tracking Settings editor escape hatch.
   return canManageStaffSettings(
     interaction.guild.id,
     interaction.user.id,

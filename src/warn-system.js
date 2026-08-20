@@ -11,6 +11,9 @@ const {
   TextInputStyle,
 } = require('discord.js');
 const {
+  canMemberUseCommandSync,
+} = require('./staff-command-permissions');
+const {
   getWarningRemovalSchedule,
   revokeWarningRemovalSchedule,
   saveWarningRevokeDetails,
@@ -153,8 +156,15 @@ function buildExtendReasonModal(
 }
 
 function isAdmin(interaction) {
+  const member =
+    interaction.member;
+
   return Boolean(
-    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator),
+    member &&
+    canMemberUseCommandSync(
+      member,
+      'chat:warn',
+    )
   );
 }
 

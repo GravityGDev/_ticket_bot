@@ -38,6 +38,12 @@ const {
   processDueWarningRemovals,
 } = require('./staff-settings');
 const {
+  authorizeApplicationCommand,
+  initializeGuildPermissions,
+  handleStaffPermissionInteraction,
+} = require('./staff-command-permissions');
+
+const {
   initializeSkinReview,
   handleSkinReviewInteraction,
   handleSkinReviewMessageCreate,
@@ -124,6 +130,11 @@ function loadCommands() {
     }
 
     const json = command.data.toJSON();
+
+    // Runtime access is controlled by the custom staff-role hierarchy.
+    // Clear Discord's old Administrator / View Audit Log defaults so a lower
+    // hierarchy role can actually invoke a command after the developer grants it.
+    json.default_member_permissions = null;
 
     if (!json.name) {
       console.warn(`[COMMAND] Skipping ${relativePath}: command has no name.`);
@@ -293,6 +304,14 @@ client.once(Events.ClientReady, (readyClient) => {
 });
 
 client.once(Events.ClientReady, (readyClient) => {
+  for (const guild of readyClient.guilds.cache.values()) {
+    initializeGuildPermissions(guild).catch((error) => {
+      console.error('[STAFF PERMISSIONS INITIALIZE ERROR]', error);
+    });
+  }
+});
+
+client.once(Events.ClientReady, (readyClient) => {
   applySavedBotStatus(readyClient).catch((error) => {
     console.error('[BOT STATUS RESTORE ERROR]', error);
   });
@@ -355,10 +374,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
+      if (
+        !(await authorizeApplicationCommand(
+          interaction,
+        ))
+      ) {
+        return;
+      }
+
       await command.execute(
         interaction,
         client,
       );
+      return;
+    }
+
+    if (
+      await handleStaffPermissionInteraction(
+        interaction,
+        client,
+      )
+    ) {
       return;
     }
 
