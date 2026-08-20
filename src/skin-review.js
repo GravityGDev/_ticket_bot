@@ -891,17 +891,27 @@ async function requireStaff(interaction) {
 
   if (
     !member ||
-    !member.permissions.has(PermissionFlagsBits.ViewAuditLog)
+    !member.permissions.has(
+      PermissionFlagsBits.Administrator,
+    )
   ) {
     const payload = {
-      content: 'You need **View Audit Log** staff permission to use the skin review system.',
+      content:
+        'Only server **Administrators** can use the skin review / blacklist system.',
       flags: MessageFlags.Ephemeral,
     };
 
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp(payload).catch(() => {});
+    if (
+      interaction.deferred ||
+      interaction.replied
+    ) {
+      await interaction
+        .followUp(payload)
+        .catch(() => {});
     } else {
-      await interaction.reply(payload).catch(() => {});
+      await interaction
+        .reply(payload)
+        .catch(() => {});
     }
 
     return null;
