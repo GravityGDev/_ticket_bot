@@ -1625,6 +1625,12 @@ function assertTicketRuntimeHelpers() {
       typeof canActorManageMember,
     getAssignableTicketRoles:
       typeof getAssignableTicketRoles,
+    openInGameIdModal:
+      typeof openInGameIdModal,
+    handleInGameIdModal:
+      typeof handleInGameIdModal,
+    updateInGameIdControlState:
+      typeof updateInGameIdControlState,
   };
 
   const missing =
@@ -8316,6 +8322,375 @@ async function acceptTicketHandover(
     .catch(() => {});
 }
 
+
+async function updateInGameIdControlState(
+  channel,
+  data,
+  disabled = true,
+) {
+  const controlMessage =
+    await findTicketControlMessage(
+      channel,
+      data,
+    );
+
+  if (!controlMessage) {
+    console.warn(
+      `[TICKET IN-GAME ID] Could not find control message in ${channel.id}.`,
+    );
+
+    return;
+  }
+
+  const targetCustomId =
+    `ticket_ingame_id:${data.creatorId}`;
+
+  const components =
+    controlMessage.components.map(
+      (row) => {
+        const rowJson =
+          row.toJSON();
+
+        rowJson.components =
+          rowJson.components.map(
+            (component) => {
+              if (
+                component.custom_id ===
+                targetCustomId
+              ) {
+                return {
+                  ...component,
+                  disabled:
+                    Boolean(
+                      disabled,
+                    ),
+                };
+              }
+
+              return component;
+            },
+          );
+
+        return rowJson;
+      },
+    );
+
+  await controlMessage.edit({
+    components,
+  });
+}
+
+async function openInGameIdModal(
+  interaction,
+) {
+  try {
+    const [
+      ,
+      creatorId,
+    ] =
+      interaction.customId.split(
+        ':',
+      );
+
+    const data =
+      await getLiveTicketData(
+        interaction.channel,
+      );
+
+    if (
+      !data ||
+      String(
+        data.creatorId,
+      ) !==
+        String(
+          creatorId,
+        ) ||
+      !TICKET_TYPES[
+        data.typeKey
+      ]?.requiresInGameId
+    ) {
+      await interaction.reply({
+        content:
+          'This In-game ID button is no longer valid for this ticket.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    if (
+      String(
+        interaction.user.id,
+      ) !==
+      String(
+        creatorId,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'Only the ticket creator can submit the In-game ID for this ticket.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    if (
+      data.closedAt
+    ) {
+      await interaction.reply({
+        content:
+          'This ticket is currently closed.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    if (
+      data.inGameIdStatus ===
+        'done'
+    ) {
+      await interaction.reply({
+        content:
+          '✅ Your In-game ID has already been submitted for this ticket.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    const input =
+      new TextInputBuilder()
+        .setCustomId(
+          'ingame_id',
+        )
+        .setLabel(
+          'In-game user ID',
+        )
+        .setPlaceholder(
+          'Enter your in-game user ID',
+        )
+        .setStyle(
+          TextInputStyle.Short,
+        )
+        .setMinLength(1)
+        .setMaxLength(100)
+        .setRequired(true);
+
+    const modal =
+      new ModalBuilder()
+        .setCustomId(
+          `ticket_ingame_id_modal:${creatorId}`,
+        )
+        .setTitle(
+          'Submit In-game ID',
+        )
+        .addComponents(
+          new ActionRowBuilder()
+            .addComponents(
+              input,
+            ),
+        );
+
+    await interaction.showModal(
+      modal,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET IN-GAME ID MODAL ERROR]',
+      error,
+    );
+
+    if (
+      !interaction.replied &&
+      !interaction.deferred
+    ) {
+      await interaction.reply({
+        content:
+          '❌ I could not open the In-game ID form. Please try again.',
+        flags:
+          MessageFlags.Ephemeral,
+      }).catch(() => {});
+    }
+  }
+}
+
+async function handleInGameIdModal(
+  interaction,
+) {
+  const [
+    ,
+    creatorId,
+  ] =
+    interaction.customId.split(
+      ':',
+    );
+
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
+
+  try {
+    const data =
+      await getLiveTicketData(
+        interaction.channel,
+      );
+
+    if (
+      !data ||
+      String(
+        data.creatorId,
+      ) !==
+        String(
+          creatorId,
+        ) ||
+      !TICKET_TYPES[
+        data.typeKey
+      ]?.requiresInGameId
+    ) {
+      await interaction.editReply({
+        content:
+          'This In-game ID form is no longer valid for this ticket.',
+      });
+
+      return;
+    }
+
+    if (
+      String(
+        interaction.user.id,
+      ) !==
+      String(
+        creatorId,
+      )
+    ) {
+      await interaction.editReply({
+        content:
+          'Only the ticket creator can submit the In-game ID for this ticket.',
+      });
+
+      return;
+    }
+
+    if (
+      data.closedAt
+    ) {
+      await interaction.editReply({
+        content:
+          'This ticket is currently closed.',
+      });
+
+      return;
+    }
+
+    if (
+      data.inGameIdStatus ===
+        'done'
+    ) {
+      await interaction.editReply({
+        content:
+          '✅ Your In-game ID has already been submitted.',
+      });
+
+      return;
+    }
+
+    const inGameId =
+      interaction.fields
+        .getTextInputValue(
+          'ingame_id',
+        )
+        .trim();
+
+    if (!inGameId) {
+      await interaction.editReply({
+        content:
+          'Please enter a valid In-game ID.',
+      });
+
+      return;
+    }
+
+    const next =
+      await updateTicketTopic(
+        interaction.channel,
+        data,
+        {
+          inGameIdStatus:
+            'done',
+        },
+        `In-game ID submitted by ${interaction.user.tag}`,
+      );
+
+    const creatorUnlocked =
+      shouldCreatorBeUnlocked(
+        next,
+      );
+
+    await setCreatorTyping(
+      interaction.channel,
+      creatorId,
+      creatorUnlocked,
+      `In-game ID submitted by ${interaction.user.tag}`,
+    );
+
+    await updateInGameIdControlState(
+      interaction.channel,
+      next,
+      true,
+    ).catch((error) => {
+      console.error(
+        '[TICKET IN-GAME ID BUTTON UPDATE ERROR]',
+        error,
+      );
+    });
+
+    await interaction.channel
+      .send({
+        content:
+          `🆔 In-game ID submitted by <@${creatorId}>: \`${inGameId.replaceAll('`', 'ˋ')}\``,
+        allowedMentions: {
+          users: [
+            creatorId,
+          ],
+        },
+      })
+      .catch((error) => {
+        console.error(
+          '[TICKET IN-GAME ID NOTICE ERROR]',
+          error,
+        );
+      });
+
+    await interaction.editReply({
+      content:
+        creatorUnlocked
+          ? '✅ In-game ID submitted. You can now type in this ticket.'
+          : (
+              data.typeKey ===
+                'youtuber_submission'
+                ? '✅ In-game ID submitted. Complete the remaining YouTuber submission step before typing is unlocked.'
+                : '✅ In-game ID submitted.'
+            ),
+    });
+  } catch (error) {
+    console.error(
+      '[TICKET IN-GAME ID SUBMIT ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        '❌ I could not save your In-game ID. Please try again.',
+    }).catch(() => {});
+  }
+}
 
 function canActorManageMember(
   guild,
