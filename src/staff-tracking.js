@@ -209,10 +209,28 @@ function withActivityPoints(
 
   return {
     ...row,
+    calculatedTicketPoints,
+    calculatedMessagePoints,
     ticketPoints,
     messagePoints,
     ticketPointsManual,
     messagePointsManual,
+    ticketPointsUpdatedBy:
+      pointOverride
+        ?.ticketPointsUpdatedBy ||
+      null,
+    ticketPointsUpdatedAt:
+      pointOverride
+        ?.ticketPointsUpdatedAt ||
+      null,
+    messagePointsUpdatedBy:
+      pointOverride
+        ?.messagePointsUpdatedBy ||
+      null,
+    messagePointsUpdatedAt:
+      pointOverride
+        ?.messagePointsUpdatedAt ||
+      null,
     activityScore:
       ticketPoints +
       messagePoints,
@@ -317,6 +335,63 @@ function getBestActiveStaff(allRows, pointSettings) {
     });
 
   return activeStaff[0] || null;
+}
+
+function formatManualPointAdjustment({
+  label,
+  finalPoints,
+  calculatedPoints,
+  manual,
+  updatedBy,
+  updatedAt,
+}) {
+  if (!manual) {
+    return null;
+  }
+
+  const finalValue =
+    Number(
+      finalPoints,
+    ) || 0;
+
+  const baseValue =
+    Number(
+      calculatedPoints,
+    ) || 0;
+
+  const delta =
+    finalValue -
+    baseValue;
+
+  const actor =
+    updatedBy
+      ? `<@${updatedBy}>`
+      : 'Unknown admin';
+
+  const timestamp =
+    updatedAt
+      ? ` • ${formatDiscordTime(
+          updatedAt,
+        )}`
+      : '';
+
+  let adjustmentText;
+
+  if (delta > 0) {
+    adjustmentText =
+      `Credited: **+${delta} pts** by ${actor}`;
+  } else if (delta < 0) {
+    adjustmentText =
+      `Adjusted: **${delta} pts** by ${actor}`;
+  } else {
+    adjustmentText =
+      `Manual override by ${actor} • **no net change**`;
+  }
+
+  return (
+    `**${label}: ${finalValue} pts**\n` +
+    `↳ Base: **${baseValue} pts** • ${adjustmentText}${timestamp}`
+  );
 }
 
 function formatTicketType(typeKey) {
@@ -758,6 +833,43 @@ function buildDetailEmbed({
 }) {
   const member = row.member;
   const warningRoles = getRoleMentions(member, WARNING_ROLE_IDS);
+
+  const manualPointCredits =
+    [
+      formatManualPointAdjustment({
+        label:
+          'Ticket Points',
+        finalPoints:
+          row.ticketPoints,
+        calculatedPoints:
+          row.calculatedTicketPoints,
+        manual:
+          row.ticketPointsManual,
+        updatedBy:
+          row.ticketPointsUpdatedBy,
+        updatedAt:
+          row.ticketPointsUpdatedAt,
+      }),
+      formatManualPointAdjustment({
+        label:
+          'Message Points',
+        finalPoints:
+          row.messagePoints,
+        calculatedPoints:
+          row.calculatedMessagePoints,
+        manual:
+          row.messagePointsManual,
+        updatedBy:
+          row.messagePointsUpdatedBy,
+        updatedAt:
+          row.messagePointsUpdatedAt,
+      }),
+    ]
+      .filter(Boolean)
+      .join(
+        '\n\n',
+      );
+
   const starRoles =
     row.starLevel === 2
       ? `⭐⭐ <@&${STAR_MANAGEMENT_ROLES.twoStar}>`
@@ -850,6 +962,21 @@ function buildDetailEmbed({
           `Message points: **${row.messagePoints.toLocaleString()}**${row.messagePointsManual ? ' *(manual)*' : ''}`,
         inline: false,
       },
+      ...(
+        manualPointCredits
+          ? [
+              {
+                name:
+                  '🧾 Manual Point Credits',
+                value:
+                  manualPointCredits.slice(
+                    0,
+                    1024,
+                  ),
+              },
+            ]
+          : []
+      ),
       {
         name: '⭐ Star Management Roles',
         value: starRoles,

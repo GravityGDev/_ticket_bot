@@ -5,130 +5,549 @@ const {
 const COLLECTION =
   'staff_point_overrides';
 
+const GLOBAL_PERIOD =
+  'global';
+
 const VALID_PERIODS =
   new Set([
     'weekly',
     'monthly',
     'quarterly',
     'lifetime',
+    GLOBAL_PERIOD,
   ]);
 
-function cleanPeriod(value) {
+function cleanPeriod(
+  value,
+) {
   const key =
-    String(value || '')
+    String(
+      value ||
+      '',
+    )
       .trim()
       .toLowerCase();
 
-  return VALID_PERIODS.has(key)
+  return VALID_PERIODS.has(
+    key,
+  )
     ? key
     : 'weekly';
 }
 
-function finiteOrNull(value) {
-  return Number.isFinite(value)
-    ? Number(value)
+function finiteOrNull(
+  value,
+) {
+  return Number.isFinite(
+    value,
+  )
+    ? Number(
+        value,
+      )
     : null;
 }
 
 async function collection() {
   return (
     await getMongoDb()
-  ).collection(COLLECTION);
+  ).collection(
+    COLLECTION,
+  );
 }
 
-function documentId(
+function globalDocumentId(
+  guildId,
+  userId,
+) {
+  return `${String(
+    guildId,
+  )}:${GLOBAL_PERIOD}:${String(
+    userId,
+  )}`;
+}
+
+function legacyDocumentId(
   guildId,
   userId,
   periodKey,
 ) {
-  return `${String(guildId)}:${cleanPeriod(periodKey)}:${String(userId)}`;
+  return `${String(
+    guildId,
+  )}:${cleanPeriod(
+    periodKey,
+  )}:${String(
+    userId,
+  )}`;
 }
 
-function normalize(document) {
+function normalize(
+  document,
+) {
   if (!document) {
     return null;
   }
 
   return {
     guildId:
-      String(document.guildId),
+      String(
+        document.guildId,
+      ),
     userId:
-      String(document.userId),
+      String(
+        document.userId,
+      ),
     periodKey:
-      cleanPeriod(document.periodKey),
+      GLOBAL_PERIOD,
     ticketPoints:
-      finiteOrNull(document.ticketPoints),
+      finiteOrNull(
+        document.ticketPoints,
+      ),
     messagePoints:
-      finiteOrNull(document.messagePoints),
+      finiteOrNull(
+        document.messagePoints,
+      ),
+    ticketPointsUpdatedAt:
+      document.ticketPointsUpdatedAt ||
+      (
+        Number.isFinite(
+          document.ticketPoints,
+        )
+          ? document.updatedAt ||
+            null
+          : null
+      ),
+    ticketPointsUpdatedBy:
+      document.ticketPointsUpdatedBy
+        ? String(
+            document.ticketPointsUpdatedBy,
+          )
+        : (
+            Number.isFinite(
+              document.ticketPoints,
+            ) &&
+            document.updatedBy
+              ? String(
+                  document.updatedBy,
+                )
+              : null
+          ),
+    messagePointsUpdatedAt:
+      document.messagePointsUpdatedAt ||
+      (
+        Number.isFinite(
+          document.messagePoints,
+        )
+          ? document.updatedAt ||
+            null
+          : null
+      ),
+    messagePointsUpdatedBy:
+      document.messagePointsUpdatedBy
+        ? String(
+            document.messagePointsUpdatedBy,
+          )
+        : (
+            Number.isFinite(
+              document.messagePoints,
+            ) &&
+            document.updatedBy
+              ? String(
+                  document.updatedBy,
+                )
+              : null
+          ),
     updatedAt:
-      document.updatedAt || null,
+      document.updatedAt ||
+      null,
     updatedBy:
       document.updatedBy
-        ? String(document.updatedBy)
+        ? String(
+            document.updatedBy,
+          )
         : null,
   };
 }
 
-async function getStaffPointOverridesForPeriod(
+async function promoteLegacyOverride(
+  coll,
   guildId,
-  periodKey,
+  userId,
+  preferredPeriod = null,
 ) {
-  const period =
-    cleanPeriod(periodKey);
-
-  const documents =
-    await (
-      await collection()
-    )
-      .find({
-        guildId:
-          String(guildId),
-        periodKey:
-          period,
-      })
-      .toArray();
-
-  const map =
-    new Map();
-
-  for (
-    const document of
-    documents
-  ) {
-    const value =
-      normalize(document);
-
-    if (!value) {
-      continue;
-    }
-
-    map.set(
-      value.userId,
-      value,
+  const guildKey =
+    String(
+      guildId,
     );
+
+  const userKey =
+    String(
+      userId,
+    );
+
+  let legacy =
+    null;
+
+  if (
+    preferredPeriod &&
+    cleanPeriod(
+      preferredPeriod,
+    ) !==
+      GLOBAL_PERIOD
+  ) {
+    legacy =
+      await coll.findOne({
+        _id:
+          legacyDocumentId(
+            guildKey,
+            userKey,
+            preferredPeriod,
+          ),
+      });
   }
 
-  return map;
+  if (!legacy) {
+    legacy =
+      await coll.find({
+        guildId:
+          guildKey,
+        userId:
+          userKey,
+        periodKey: {
+          $ne:
+            GLOBAL_PERIOD,
+        },
+        $or: [
+          {
+            ticketPoints: {
+              $type:
+                'number',
+            },
+          },
+          {
+            messagePoints: {
+              $type:
+                'number',
+            },
+          },
+        ],
+      })
+        .sort({
+          updatedAt:
+            -1,
+        })
+        .limit(1)
+        .next();
+  }
+
+  if (!legacy) {
+    return null;
+  }
+
+  const migrated = {
+    guildId:
+      guildKey,
+    userId:
+      userKey,
+    periodKey:
+      GLOBAL_PERIOD,
+    ticketPoints:
+      finiteOrNull(
+        legacy.ticketPoints,
+      ),
+    messagePoints:
+      finiteOrNull(
+        legacy.messagePoints,
+      ),
+    ticketPointsUpdatedAt:
+      legacy.ticketPointsUpdatedAt ||
+      (
+        Number.isFinite(
+          legacy.ticketPoints,
+        )
+          ? legacy.updatedAt ||
+            null
+          : null
+      ),
+    ticketPointsUpdatedBy:
+      legacy.ticketPointsUpdatedBy
+        ? String(
+            legacy.ticketPointsUpdatedBy,
+          )
+        : (
+            Number.isFinite(
+              legacy.ticketPoints,
+            ) &&
+            legacy.updatedBy
+              ? String(
+                  legacy.updatedBy,
+                )
+              : null
+          ),
+    messagePointsUpdatedAt:
+      legacy.messagePointsUpdatedAt ||
+      (
+        Number.isFinite(
+          legacy.messagePoints,
+        )
+          ? legacy.updatedAt ||
+            null
+          : null
+      ),
+    messagePointsUpdatedBy:
+      legacy.messagePointsUpdatedBy
+        ? String(
+            legacy.messagePointsUpdatedBy,
+          )
+        : (
+            Number.isFinite(
+              legacy.messagePoints,
+            ) &&
+            legacy.updatedBy
+              ? String(
+                  legacy.updatedBy,
+                )
+              : null
+          ),
+    updatedAt:
+      now,
+    updatedBy:
+      legacy.updatedBy
+        ? String(
+            legacy.updatedBy,
+          )
+        : null,
+    migratedFromPeriod:
+      String(
+        legacy.periodKey ||
+        preferredPeriod ||
+        'legacy',
+      ),
+  };
+
+  const setValues = {
+    guildId:
+      migrated.guildId,
+    userId:
+      migrated.userId,
+    periodKey:
+      GLOBAL_PERIOD,
+    updatedAt:
+      migrated.updatedAt,
+    migratedFromPeriod:
+      migrated.migratedFromPeriod,
+  };
+
+  if (
+    migrated.updatedBy
+  ) {
+    setValues.updatedBy =
+      migrated.updatedBy;
+  }
+
+  if (
+    migrated.ticketPoints !==
+      null
+  ) {
+    setValues.ticketPoints =
+      migrated.ticketPoints;
+
+    if (
+      migrated.ticketPointsUpdatedAt
+    ) {
+      setValues.ticketPointsUpdatedAt =
+        migrated.ticketPointsUpdatedAt;
+    }
+
+    if (
+      migrated.ticketPointsUpdatedBy
+    ) {
+      setValues.ticketPointsUpdatedBy =
+        migrated.ticketPointsUpdatedBy;
+    }
+  }
+
+  if (
+    migrated.messagePoints !==
+      null
+  ) {
+    setValues.messagePoints =
+      migrated.messagePoints;
+
+    if (
+      migrated.messagePointsUpdatedAt
+    ) {
+      setValues.messagePointsUpdatedAt =
+        migrated.messagePointsUpdatedAt;
+    }
+
+    if (
+      migrated.messagePointsUpdatedBy
+    ) {
+      setValues.messagePointsUpdatedBy =
+        migrated.messagePointsUpdatedBy;
+    }
+  }
+
+  await coll.updateOne(
+    {
+      _id:
+        globalDocumentId(
+          guildKey,
+          userKey,
+        ),
+    },
+    {
+      $set:
+        setValues,
+    },
+    {
+      upsert:
+        true,
+    },
+  );
+
+  console.log(
+    `[STAFF POINT OVERRIDE MIGRATION] ${userKey}: ` +
+      `migrated ${migrated.migratedFromPeriod} override to global.`,
+  );
+
+  return normalize(
+    {
+      ...setValues,
+    },
+  );
 }
 
 async function getStaffPointOverride(
   guildId,
   userId,
-  periodKey,
+  periodKey = null,
 ) {
-  const document =
-    await (
-      await collection()
-    ).findOne({
+  const coll =
+    await collection();
+
+  const global =
+    await coll.findOne({
       _id:
-        documentId(
+        globalDocumentId(
           guildId,
           userId,
-          periodKey,
         ),
     });
 
-  return normalize(document);
+  if (global) {
+    return normalize(
+      global,
+    );
+  }
+
+  return promoteLegacyOverride(
+    coll,
+    guildId,
+    userId,
+    periodKey,
+  );
+}
+
+async function getStaffPointOverridesForPeriod(
+  guildId,
+  periodKey = null,
+) {
+  const guildKey =
+    String(
+      guildId,
+    );
+
+  const coll =
+    await collection();
+
+  const documents =
+    await coll.find({
+      guildId:
+        guildKey,
+    }).toArray();
+
+  const map =
+    new Map();
+
+  const usersNeedingMigration =
+    new Set();
+
+  for (
+    const document of
+    documents
+  ) {
+    const userId =
+      String(
+        document.userId ||
+        '',
+      );
+
+    if (!userId) {
+      continue;
+    }
+
+    if (
+      document.periodKey ===
+        GLOBAL_PERIOD ||
+      String(
+        document._id ||
+        '',
+      ) ===
+        globalDocumentId(
+          guildKey,
+          userId,
+        )
+    ) {
+      const value =
+        normalize(
+          document,
+        );
+
+      if (value) {
+        map.set(
+          userId,
+          value,
+        );
+      }
+
+      continue;
+    }
+
+    usersNeedingMigration.add(
+      userId,
+    );
+  }
+
+  for (
+    const userId of
+    usersNeedingMigration
+  ) {
+    if (
+      map.has(
+        userId,
+      )
+    ) {
+      continue;
+    }
+
+    const migrated =
+      await promoteLegacyOverride(
+        coll,
+        guildKey,
+        userId,
+        periodKey,
+      );
+
+    if (migrated) {
+      map.set(
+        userId,
+        migrated,
+      );
+    }
+  }
+
+  return map;
 }
 
 async function setStaffPointOverride(
@@ -140,7 +559,10 @@ async function setStaffPointOverride(
   updatedBy,
 ) {
   if (
-    !['ticket', 'message'].includes(
+    ![
+      'ticket',
+      'message',
+    ].includes(
       pointType,
     )
   ) {
@@ -150,11 +572,16 @@ async function setStaffPointOverride(
   }
 
   if (
-    value !== null &&
+    value !==
+      null &&
     (
-      !Number.isSafeInteger(value) ||
-      value < 0 ||
-      value > 10000000
+      !Number.isSafeInteger(
+        value,
+      ) ||
+      value <
+        0 ||
+      value >
+        10000000
     )
   ) {
     throw new Error(
@@ -162,78 +589,134 @@ async function setStaffPointOverride(
     );
   }
 
-  const period =
-    cleanPeriod(periodKey);
-  const id =
-    documentId(
-      guildId,
-      userId,
-      period,
-    );
-  const field =
-    pointType === 'ticket'
-      ? 'ticketPoints'
-      : 'messagePoints';
   const coll =
     await collection();
 
+  const id =
+    globalDocumentId(
+      guildId,
+      userId,
+    );
+
+  const field =
+    pointType ===
+      'ticket'
+      ? 'ticketPoints'
+      : 'messagePoints';
+
+  const updatedByField =
+    pointType ===
+      'ticket'
+      ? 'ticketPointsUpdatedBy'
+      : 'messagePointsUpdatedBy';
+
+  const updatedAtField =
+    pointType ===
+      'ticket'
+      ? 'ticketPointsUpdatedAt'
+      : 'messagePointsUpdatedAt';
+
+  const now =
+    new Date().toISOString();
+
   const baseSet = {
     guildId:
-      String(guildId),
+      String(
+        guildId,
+      ),
     userId:
-      String(userId),
+      String(
+        userId,
+      ),
     periodKey:
-      period,
+      GLOBAL_PERIOD,
     updatedAt:
       new Date().toISOString(),
     updatedBy:
-      String(updatedBy),
+      String(
+        updatedBy,
+      ),
   };
 
-  if (value === null) {
+  if (
+    value ===
+      null
+  ) {
     await coll.updateOne(
-      { _id: id },
+      {
+        _id:
+          id,
+      },
       {
         $set:
           baseSet,
         $unset: {
-          [field]: '',
+          [field]:
+            '',
+          [updatedByField]:
+            '',
+          [updatedAtField]:
+            '',
         },
       },
-      { upsert: true },
+      {
+        upsert:
+          true,
+      },
     );
 
     await coll.deleteOne({
-      _id: id,
+      _id:
+        id,
       ticketPoints: {
-        $exists: false,
+        $exists:
+          false,
       },
       messagePoints: {
-        $exists: false,
+        $exists:
+          false,
       },
     });
   } else {
     await coll.updateOne(
-      { _id: id },
+      {
+        _id:
+          id,
+      },
       {
         $set: {
           ...baseSet,
           [field]:
             value,
+          [updatedByField]:
+            String(
+              updatedBy,
+            ),
+          [updatedAtField]:
+            now,
         },
       },
-      { upsert: true },
+      {
+        upsert:
+          true,
+      },
     );
   }
+
+  console.log(
+    `[STAFF POINT OVERRIDE] ${userId}: ${pointType}=` +
+      `${value === null ? 'AUTO' : value} (global) by ${updatedBy}.`,
+  );
 
   return getStaffPointOverride(
     guildId,
     userId,
-    period,
+    GLOBAL_PERIOD,
   );
 }
 
 module.exports = {
+  GLOBAL_PERIOD,
   getStaffPointOverride,
   getStaffPointOverridesForPeriod,
   setStaffPointOverride,

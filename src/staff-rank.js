@@ -364,6 +364,36 @@ async function renderRankCard(guild, member, periodKey) {
         pointSettings.trackedMessagePoints
     );
 
+  const displayedTicketValue =
+    rankedRow?.ticketPointsManual
+      ? rankedRow.ticketPoints
+      : tickets;
+
+  const displayedMessageValue =
+    rankedRow?.messagePointsManual
+      ? rankedRow.messagePoints
+      : messages;
+
+  const ticketStatLine1 =
+    rankedRow?.ticketPointsManual
+      ? 'TICKET'
+      : 'TICKETS';
+
+  const ticketStatLine2 =
+    rankedRow?.ticketPointsManual
+      ? 'POINTS'
+      : 'CLAIMED';
+
+  const messageStatLine1 =
+    rankedRow?.messagePointsManual
+      ? 'MESSAGE'
+      : 'TRACKED';
+
+  const messageStatLine2 =
+    rankedRow?.messagePointsManual
+      ? 'POINTS'
+      : 'MESSAGES';
+
   const xp =
     getXpState(
       score,
@@ -457,6 +487,12 @@ async function renderRankCard(guild, member, periodKey) {
         ? ''
         : 's'
     } per tracked message`;
+
+  const manualOverrideLabel =
+    rankedRow?.ticketPointsManual ||
+    rankedRow?.messagePointsManual
+      ? ' • MANUAL POINT OVERRIDE ACTIVE'
+      : '';
 
   const starMarkup =
     starLevel === 2
@@ -777,12 +813,12 @@ async function renderRankCard(guild, member, periodKey) {
           font-family="Arial, Helvetica, sans-serif"
           font-size="24"
           font-weight="800"
-          fill="#ffffff">TICKETS</text>
+          fill="#ffffff">${ticketStatLine1}</text>
     <text x="724" y="621"
           font-family="Arial, Helvetica, sans-serif"
           font-size="24"
           font-weight="800"
-          fill="#ffffff">CLAIMED</text>
+          fill="#ffffff">${ticketStatLine2}</text>
 
     <line x1="638" y1="658"
           x2="837" y2="658"
@@ -796,7 +832,7 @@ async function renderRankCard(guild, member, periodKey) {
           font-family="Arial, Helvetica, sans-serif"
           font-size="68"
           font-weight="800"
-          fill="#ffffff">${tickets.toLocaleString()}</text>
+          fill="#ffffff">${displayedTicketValue.toLocaleString()}</text>
 
     <!-- Stat card: messages -->
     <rect x="895" y="535"
@@ -831,12 +867,12 @@ async function renderRankCard(guild, member, periodKey) {
           font-family="Arial, Helvetica, sans-serif"
           font-size="23"
           font-weight="800"
-          fill="#ffffff">TRACKED</text>
+          fill="#ffffff">${messageStatLine1}</text>
     <text x="1006" y="621"
           font-family="Arial, Helvetica, sans-serif"
           font-size="23"
           font-weight="800"
-          fill="#ffffff">MESSAGES</text>
+          fill="#ffffff">${messageStatLine2}</text>
 
     <line x1="923" y1="658"
           x2="1122" y2="658"
@@ -850,7 +886,7 @@ async function renderRankCard(guild, member, periodKey) {
           font-family="Arial, Helvetica, sans-serif"
           font-size="68"
           font-weight="800"
-          fill="#ffffff">${messages.toLocaleString()}</text>
+          fill="#ffffff">${displayedMessageValue.toLocaleString()}</text>
 
     <!-- Stat card: score -->
     <rect x="1180" y="535"
@@ -946,7 +982,7 @@ async function renderRankCard(guild, member, periodKey) {
     <text x="738" y="868"
           font-family="Arial, Helvetica, sans-serif"
           font-size="25"
-          fill="#aeb9c9">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}</text>
+          fill="#aeb9c9">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}${escapeXml(manualOverrideLabel)}</text>
 
     <!-- footer -->
     <line x1="84" y1="958"
