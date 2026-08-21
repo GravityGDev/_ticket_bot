@@ -126,39 +126,127 @@ async function fetchAvatarPng(member) {
   }
 }
 
-async function getRankRows(guild, snapshot, hiddenStaffUserIds = []) {
+async function getRankRows(
+  guild,
+  snapshot,
+  pointSettings,
+  hiddenStaffUserIds = [],
+) {
   try {
     await guild.members.fetch();
   } catch (error) {
-    console.error('[RANK CARD MEMBER FETCH ERROR]', error);
+    console.error(
+      '[RANK CARD MEMBER FETCH ERROR]',
+      error,
+    );
   }
 
-  const hidden = new Set(
-    (hiddenStaffUserIds || []).map(String),
-  );
+  const hidden =
+    new Set(
+      (
+        hiddenStaffUserIds ||
+        []
+      ).map(
+        String,
+      ),
+    );
 
-  return [...guild.members.cache.values()]
+  return [
+    ...guild.members.cache.values(),
+  ]
     .filter(
       (member) =>
         !member.user.bot &&
-        isStaffMember(member) &&
-        !hidden.has(member.id),
+        isStaffMember(
+          member,
+        ) &&
+        !hidden.has(
+          member.id,
+        ),
     )
-    .map((member) => ({
-      member,
-      tickets: snapshot.claimCounts.get(member.id) || 0,
-      messages: snapshot.messageCounts.get(member.id) || 0,
-    }))
-    .sort((a, b) => {
-      if (b.tickets !== a.tickets) return b.tickets - a.tickets;
-      if (b.messages !== a.messages) return b.messages - a.messages;
+    .map(
+      (member) => {
+        const tickets =
+          snapshot.claimCounts.get(
+            member.id,
+          ) ||
+          0;
 
-      return (a.member.displayName || a.member.user.username).localeCompare(
-        b.member.displayName || b.member.user.username,
-        undefined,
-        { sensitivity: 'base' },
-      );
-    });
+        const messages =
+          snapshot.messageCounts.get(
+            member.id,
+          ) ||
+          0;
+
+        const ticketPoints =
+          tickets *
+          pointSettings.ticketClaimPoints;
+
+        const messagePoints =
+          messages *
+          pointSettings.trackedMessagePoints;
+
+        return {
+          member,
+          tickets,
+          messages,
+          ticketPoints,
+          messagePoints,
+          activityScore:
+            ticketPoints +
+            messagePoints,
+        };
+      },
+    )
+    .sort(
+      (a, b) => {
+        // Keep /rank in EXACT alignment with /staff-stats:
+        // primary order is total configured activity points.
+        if (
+          b.activityScore !==
+          a.activityScore
+        ) {
+          return (
+            b.activityScore -
+            a.activityScore
+          );
+        }
+
+        // Same points-based tie-breakers as /staff-stats.
+        if (
+          b.ticketPoints !==
+          a.ticketPoints
+        ) {
+          return (
+            b.ticketPoints -
+            a.ticketPoints
+          );
+        }
+
+        if (
+          b.messagePoints !==
+          a.messagePoints
+        ) {
+          return (
+            b.messagePoints -
+            a.messagePoints
+          );
+        }
+
+        return (
+          a.member.displayName ||
+          a.member.user.username
+        ).localeCompare(
+          b.member.displayName ||
+          b.member.user.username,
+          undefined,
+          {
+            sensitivity:
+              'base',
+          },
+        );
+      },
+    );
 }
 
 function posterNameFontSize(value) {
@@ -182,11 +270,13 @@ async function renderRankCard(guild, member, periodKey) {
   );
   const isRankHidden = hiddenStaffIds.has(member.id);
 
-  const rows = await getRankRows(
-    guild,
-    snapshot,
-    pointSettings.hiddenStaffUserIds,
-  );
+  const rows =
+    await getRankRows(
+      guild,
+      snapshot,
+      pointSettings,
+      pointSettings.hiddenStaffUserIds,
+    );
 
   const rankIndex = rows.findIndex(
     (row) => row.member.id === member.id,
@@ -199,9 +289,29 @@ async function renderRankCard(guild, member, periodKey) {
     snapshot.messageCounts.get(member.id) || 0;
 
   const rank =
-    !isRankHidden && rankIndex >= 0
-      ? rankIndex + 1
+    !isRankHidden &&
+    rankIndex >=
+      0
+      ? rankIndex +
+        1
       : null;
+
+  if (
+    rank !==
+    null
+  ) {
+    const rankingRow =
+      rows[
+        rankIndex
+      ];
+
+    console.log(
+      `[RANK ORDER] ${member.id}: rank=${rank}/${rows.length}, ` +
+        `points=${rankingRow.activityScore}, ` +
+        `ticketPoints=${rankingRow.ticketPoints}, ` +
+        `messagePoints=${rankingRow.messagePoints}, period=${periodKey}`,
+    );
+  }
 
   const xp = getXpState(
     tickets,
@@ -215,11 +325,23 @@ async function renderRankCard(guild, member, periodKey) {
   const warningCount =
     getWarningCount(member);
 
+  const rankedRow =
+    rankIndex >=
+      0
+      ? rows[
+          rankIndex
+        ]
+      : null;
+
   const score =
-    tickets *
-      pointSettings.ticketClaimPoints +
-    messages *
-      pointSettings.trackedMessagePoints;
+    rankedRow
+      ?.activityScore ??
+    (
+      tickets *
+        pointSettings.ticketClaimPoints +
+      messages *
+        pointSettings.trackedMessagePoints
+    );
 
   const avatarPng =
     await fetchAvatarPng(member);
