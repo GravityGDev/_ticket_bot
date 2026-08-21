@@ -309,7 +309,7 @@ async function promoteLegacyOverride(
               : null
           ),
     updatedAt:
-      now,
+      new Date().toISOString(),
     updatedBy:
       legacy.updatedBy
         ? String(
@@ -441,12 +441,21 @@ async function getStaffPointOverride(
     );
   }
 
-  return promoteLegacyOverride(
-    coll,
-    guildId,
-    userId,
-    periodKey,
-  );
+  try {
+    return await promoteLegacyOverride(
+      coll,
+      guildId,
+      userId,
+      periodKey,
+    );
+  } catch (error) {
+    console.error(
+      `[STAFF POINT OVERRIDE READ/MIGRATION ERROR] ${userId}`,
+      error,
+    );
+
+    return null;
+  }
 }
 
 async function getStaffPointOverridesForPeriod(
@@ -531,13 +540,22 @@ async function getStaffPointOverridesForPeriod(
       continue;
     }
 
-    const migrated =
-      await promoteLegacyOverride(
-        coll,
-        guildKey,
-        userId,
-        periodKey,
+    let migrated = null;
+
+    try {
+      migrated =
+        await promoteLegacyOverride(
+          coll,
+          guildKey,
+          userId,
+          periodKey,
+        );
+    } catch (error) {
+      console.error(
+        `[STAFF POINT OVERRIDE MIGRATION ERROR] ${userId}`,
+        error,
       );
+    }
 
     if (migrated) {
       map.set(
@@ -631,7 +649,7 @@ async function setStaffPointOverride(
     periodKey:
       GLOBAL_PERIOD,
     updatedAt:
-      new Date().toISOString(),
+      now,
     updatedBy:
       String(
         updatedBy,
