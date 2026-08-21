@@ -1631,6 +1631,12 @@ function assertTicketRuntimeHelpers() {
       typeof handleInGameIdModal,
     updateInGameIdControlState:
       typeof updateInGameIdControlState,
+    refreshClickedTicketControlMessage:
+      typeof refreshClickedTicketControlMessage,
+    refreshTicketControlMessage:
+      typeof refreshTicketControlMessage,
+    claimTicketUnlocked:
+      typeof claimTicketUnlocked,
   };
 
   const missing =
@@ -2006,6 +2012,41 @@ async function findTicketControlMessage(
     ) ||
     null
   );
+}
+
+async function refreshClickedTicketControlMessage(
+  interaction,
+  data,
+) {
+  const message =
+    interaction?.message;
+
+  if (
+    !message ||
+    !data ||
+    data.typeKey ===
+      'report_staff'
+  ) {
+    return false;
+  }
+
+  const remainingRows =
+    message.components.slice(
+      1,
+    );
+
+  await message.edit({
+    components: [
+      getTicketButtons(
+        data.typeKey,
+        data.unmuteDecision,
+        data.claimedById,
+      ),
+      ...remainingRows,
+    ],
+  });
+
+  return true;
 }
 
 async function refreshTicketControlMessage(
@@ -6936,7 +6977,9 @@ async function claimTicket(interaction) {
   );
 }
 
-async function claimTicketUnlocked(interaction) {
+async function claimTicketUnlocked(
+  interaction,
+) {
   const data =
     await getLiveTicketData(
       interaction.channel,
@@ -6954,7 +6997,7 @@ async function claimTicketUnlocked(interaction) {
 
   if (
     data.typeKey ===
-    'report_staff'
+      'report_staff'
   ) {
     await interaction.reply({
       content:
@@ -6976,11 +7019,15 @@ async function claimTicketUnlocked(interaction) {
   }
 
   const member =
-    await interaction.guild.members
+    interaction.member ||
+    interaction.guild.members.cache.get(
+      interaction.user.id,
+    ) ||
+    (await interaction.guild.members
       .fetch(
         interaction.user.id,
       )
-      .catch(() => null);
+      .catch(() => null));
 
   if (
     !isTicketStaffMember(
@@ -6996,11 +7043,69 @@ async function claimTicketUnlocked(interaction) {
     return;
   }
 
+  // A stale Claim button can remain visible if an older claim committed but a
+  // later UI side-effect failed. Administrators/developer/server owner bypass
+  // that stale-control rejection and are taken straight into Assist.
   if (data.claimedById) {
+    const administrator =
+      isTicketAdministrator(
+        member,
+      );
+
+    if (administrator) {
+      await interaction.deferReply({
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      await refreshClickedTicketControlMessage(
+        interaction,
+        data,
+      ).catch((error) => {
+        console.error(
+          '[TICKET ADMIN STALE CLAIM BUTTON REPAIR ERROR]',
+          error,
+        );
+      });
+
+      await refreshTicketControlMessage(
+        interaction.channel,
+        data,
+      ).catch((error) => {
+        console.error(
+          '[TICKET ADMIN CONTROL REFRESH ERROR]',
+          error,
+        );
+      });
+
+      await setTicketStaffTyping(
+        interaction.channel,
+        interaction.user.id,
+        true,
+        `Administrator/developer Assist bypass for ${interaction.user.tag}`,
+      ).catch((error) => {
+        console.error(
+          '[TICKET ADMIN CLAIM BYPASS PERMISSION ERROR]',
+          error,
+        );
+      });
+
+      const payload =
+        buildAssistActionMenu();
+
+      delete payload.flags;
+
+      await interaction.editReply(
+        payload,
+      );
+
+      return;
+    }
+
     await interaction.reply({
       content:
         `This ticket is already claimed by <@${data.claimedById}>. ` +
-        'The current claimer can use **Assist → Handover** if ownership needs to change.',
+        'The current claimer or an Administrator can use **Assist → Handover** if ownership needs to change.',
       flags:
         MessageFlags.Ephemeral,
       allowedMentions: {
@@ -7037,6 +7142,10 @@ async function claimTicketUnlocked(interaction) {
 
   let nextData;
 
+  // -----------------------------------------------------------------------
+  // CRITICAL COMMIT
+  // Only failure to persist ownership means the claim itself failed.
+  // -----------------------------------------------------------------------
   try {
     nextData =
       await updateTicketTopic(
@@ -7051,94 +7160,119 @@ async function claimTicketUnlocked(interaction) {
         },
         `Ticket claimed by ${interaction.user.tag}`,
       );
-
-    await setTicketStaffTyping(
-      interaction.channel,
-      interaction.user.id,
-      true,
-      `Ticket claimed by ${interaction.user.tag}`,
-    );
-
-    // First eligible non-creator claim gets the ticket stat. Handover never
-    // awards another claim point. Dev test tickets deliberately award nothing.
-    if (
-      TICKET_TYPES[
-        data.typeKey
-      ]?.awardsClaimPoints !==
-        false &&
-      String(
-        interaction.user.id,
-      ) !==
-      String(
-        data.creatorId,
-      )
-    ) {
-      const counted =
-        await recordTicketClaim({
-          guildId:
-            interaction.guild.id,
-          staffId:
-            interaction.user.id,
-          ticketNumber:
-            data.number,
-          typeKey:
-            data.typeKey,
-          channelId:
-            interaction.channel.id,
-          claimedAt,
-        }).catch((error) => {
-          console.error(
-            '[STAFF TRACKING CLAIM ERROR]',
-            error,
-          );
-          return false;
-        });
-
-      if (counted) {
-        await evaluateStaffGoalsForMember(
-          interaction.guild,
-          interaction.user.id,
-        ).catch((error) => {
-          console.error(
-            '[STAFF GOAL CLAIM EVALUATION ERROR]',
-            error,
-          );
-        });
-      }
-    }
-
-    if (
-      TICKET_TYPES[
-        data.typeKey
-      ]?.awardsClaimPoints ===
-        false
-    ) {
-      console.log(
-        `[TICKET CLAIM] Claim points skipped for test ticket #${data.number} (${data.typeKey}).`,
-      );
-    }
-
-    await refreshTicketControlMessage(
-      interaction.channel,
-      nextData,
-    );
   } catch (error) {
     console.error(
-      '[TICKET CLAIM ERROR]',
+      '[TICKET CLAIM STATE COMMIT ERROR]',
       error,
     );
 
     await interaction.followUp({
       content:
-        'I could not claim this ticket. Please try again.',
+        'I could not save the ticket claim. Please try again.',
       flags:
         MessageFlags.Ephemeral,
     }).catch(() => {});
+
     return;
   }
 
-  // Public ticket notices should be ordinary channel messages, not interaction
-  // replies. Keep the claim notice intentionally short.
+  // From this point onward the claim IS successful. Every operation below is
+  // independent so a Discord permission/UI/stat error cannot roll it back or
+  // suppress the public success message.
+
+  // 1) Change the exact button that was clicked immediately.
+  await refreshClickedTicketControlMessage(
+    interaction,
+    nextData,
+  ).catch((error) => {
+    console.error(
+      '[TICKET CLAIM CLICKED CONTROL REFRESH ERROR]',
+      error,
+    );
+  });
+
+  // 2) Repair/enable the claimer's speaking access.
+  await setTicketStaffTyping(
+    interaction.channel,
+    interaction.user.id,
+    true,
+    `Ticket claimed by ${interaction.user.tag}`,
+  ).catch((error) => {
+    console.error(
+      '[TICKET CLAIM PERMISSION ERROR]',
+      error,
+    );
+  });
+
+  // 3) Award the first eligible claim stat. This is deliberately non-critical.
+  if (
+    TICKET_TYPES[
+      data.typeKey
+    ]?.awardsClaimPoints !==
+      false &&
+    String(
+      interaction.user.id,
+    ) !==
+      String(
+        data.creatorId,
+      )
+  ) {
+    const counted =
+      await recordTicketClaim({
+        guildId:
+          interaction.guild.id,
+        staffId:
+          interaction.user.id,
+        ticketNumber:
+          data.number,
+        typeKey:
+          data.typeKey,
+        channelId:
+          interaction.channel.id,
+        claimedAt,
+      }).catch((error) => {
+        console.error(
+          '[STAFF TRACKING CLAIM ERROR]',
+          error,
+        );
+        return false;
+      });
+
+    if (counted) {
+      evaluateStaffGoalsForMember(
+        interaction.guild,
+        interaction.user.id,
+      ).catch((error) => {
+        console.error(
+          '[STAFF GOAL CLAIM EVALUATION ERROR]',
+          error,
+        );
+      });
+    }
+  } else if (
+    TICKET_TYPES[
+      data.typeKey
+    ]?.awardsClaimPoints ===
+      false
+  ) {
+    console.log(
+      `[TICKET CLAIM] Claim points skipped for test ticket #${data.number} (${data.typeKey}).`,
+    );
+  }
+
+  // 4) Fallback repair of the stored/pinned control message. Do not block the
+  // success notice on this.
+  refreshTicketControlMessage(
+    interaction.channel,
+    nextData,
+  ).catch((error) => {
+    console.error(
+      '[TICKET CLAIM CONTROL FALLBACK REFRESH ERROR]',
+      error,
+    );
+  });
+
+  // 5) Always send the public claim notice once ownership committed.
   await interaction.channel
     .send({
       content:
@@ -7155,7 +7289,13 @@ async function claimTicketUnlocked(interaction) {
         error,
       );
     });
+
+  console.log(
+    `[TICKET CLAIM SUCCESS] Ticket #${data.number} claimed by ${interaction.user.id}; ` +
+      'ownership committed and side-effects processed independently.',
+  );
 }
+
 
 function buildAssistActionMenu() {
   const menu =
