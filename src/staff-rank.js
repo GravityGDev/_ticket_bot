@@ -7,6 +7,9 @@ const {
 const { getStaffSnapshot } = require('./staff-tracking-store');
 const { getStaffTrackingSettings } = require('./staff-settings-store');
 const {
+  getStaffPointOverridesForPeriod,
+} = require('./staff-point-overrides-store');
+const {
   isStaffMember,
 } = require('./staff-role-hierarchy');
 
@@ -69,14 +72,9 @@ function getWarningCount(member) {
   ).length;
 }
 
-function getXpState(tickets, messages, pointSettings) {
-  // Performance XP uses the same owner-editable weighting as Activity Score.
-  const totalXp =
-    tickets * pointSettings.ticketClaimPoints +
-    messages * pointSettings.trackedMessagePoints;
-
+function getXpState(totalXp) {
   let level = 1;
-  let remaining = totalXp;
+  let remaining = Math.max(0, Number(totalXp) || 0);
   let required = 500;
 
   while (remaining >= required && level < 999) {
@@ -86,7 +84,7 @@ function getXpState(tickets, messages, pointSettings) {
   }
 
   return {
-    totalXp,
+    totalXp: Math.max(0, Number(totalXp) || 0),
     level,
     currentXp: remaining,
     requiredXp: required,
@@ -130,6 +128,7 @@ async function getRankRows(
   guild,
   snapshot,
   pointSettings,
+  pointOverrides,
   hiddenStaffUserIds = [],
 ) {
   try {
@@ -178,13 +177,32 @@ async function getRankRows(
           ) ||
           0;
 
-        const ticketPoints =
+        const pointOverride =
+          pointOverrides?.get(
+            member.id,
+          ) || null;
+
+        const calculatedTicketPoints =
           tickets *
           pointSettings.ticketClaimPoints;
 
-        const messagePoints =
+        const calculatedMessagePoints =
           messages *
           pointSettings.trackedMessagePoints;
+
+        const ticketPoints =
+          Number.isFinite(
+            pointOverride?.ticketPoints,
+          )
+            ? pointOverride.ticketPoints
+            : calculatedTicketPoints;
+
+        const messagePoints =
+          Number.isFinite(
+            pointOverride?.messagePoints,
+          )
+            ? pointOverride.messagePoints
+            : calculatedMessagePoints;
 
         return {
           member,
@@ -260,9 +278,17 @@ function posterNameFontSize(value) {
 }
 
 async function renderRankCard(guild, member, periodKey) {
-  const [snapshot, pointSettings] = await Promise.all([
+  const [
+    snapshot,
+    pointSettings,
+    pointOverrides,
+  ] = await Promise.all([
     getStaffSnapshot(guild.id, periodKey),
     getStaffTrackingSettings(guild.id),
+    getStaffPointOverridesForPeriod(
+      guild.id,
+      periodKey,
+    ),
   ]);
 
   const hiddenStaffIds = new Set(
@@ -275,6 +301,7 @@ async function renderRankCard(guild, member, periodKey) {
       guild,
       snapshot,
       pointSettings,
+      pointOverrides,
       pointSettings.hiddenStaffUserIds,
     );
 
@@ -313,12 +340,6 @@ async function renderRankCard(guild, member, periodKey) {
     );
   }
 
-  const xp = getXpState(
-    tickets,
-    messages,
-    pointSettings,
-  );
-
   const starLevel =
     getStarLevel(member);
 
@@ -341,6 +362,11 @@ async function renderRankCard(guild, member, periodKey) {
         pointSettings.ticketClaimPoints +
       messages *
         pointSettings.trackedMessagePoints
+    );
+
+  const xp =
+    getXpState(
+      score,
     );
 
   const avatarPng =

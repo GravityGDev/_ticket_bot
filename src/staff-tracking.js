@@ -4,8 +4,11 @@ const {
   ButtonStyle,
   EmbedBuilder,
   MessageFlags,
+  ModalBuilder,
   PermissionFlagsBits,
   StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const {
   getStaffSnapshot,
@@ -26,6 +29,10 @@ const {
 const {
   getStaffTrackingSettings,
 } = require('./staff-settings-store');
+const {
+  getStaffPointOverridesForPeriod,
+  setStaffPointOverride,
+} = require('./staff-point-overrides-store');
 
 const WARNING_ROLE_IDS = Object.freeze([
   '961199921841713162',
@@ -167,26 +174,56 @@ function getActivityScore(row, pointSettings) {
   );
 }
 
-function withActivityPoints(row, pointSettings) {
-  const ticketPoints =
+function withActivityPoints(
+  row,
+  pointSettings,
+  pointOverride = null,
+) {
+  const calculatedTicketPoints =
     row.claims *
     pointSettings.ticketClaimPoints;
 
-  const messagePoints =
+  const calculatedMessagePoints =
     row.messages *
     pointSettings.trackedMessagePoints;
+
+  const ticketPointsManual =
+    Number.isFinite(
+      pointOverride?.ticketPoints,
+    );
+
+  const messagePointsManual =
+    Number.isFinite(
+      pointOverride?.messagePoints,
+    );
+
+  const ticketPoints =
+    ticketPointsManual
+      ? pointOverride.ticketPoints
+      : calculatedTicketPoints;
+
+  const messagePoints =
+    messagePointsManual
+      ? pointOverride.messagePoints
+      : calculatedMessagePoints;
 
   return {
     ...row,
     ticketPoints,
     messagePoints,
+    ticketPointsManual,
+    messagePointsManual,
     activityScore:
       ticketPoints +
       messagePoints,
   };
 }
 
-function sortLeaderboard(rows, pointSettings) {
+function sortLeaderboard(
+  rows,
+  pointSettings,
+  pointOverrides = null,
+) {
   return rows
     .map((row) =>
       row.activityScore !== undefined
@@ -194,6 +231,9 @@ function sortLeaderboard(rows, pointSettings) {
         : withActivityPoints(
             row,
             pointSettings,
+            pointOverrides?.get(
+              row.member.id,
+            ) || null,
           ),
     )
     .sort((a, b) => {
@@ -261,9 +301,13 @@ function getBestActiveStaff(allRows, pointSettings) {
         return b.activityScore - a.activityScore;
       }
 
-      // Stable tie-breakers when two staff have the same combined score.
-      if (b.claims !== a.claims) return b.claims - a.claims;
-      if (b.messages !== a.messages) return b.messages - a.messages;
+      // Same point tie-breakers as the leaderboard.
+      if (b.ticketPoints !== a.ticketPoints) {
+        return b.ticketPoints - a.ticketPoints;
+      }
+      if (b.messagePoints !== a.messagePoints) {
+        return b.messagePoints - a.messagePoints;
+      }
 
       return (a.member.displayName || a.member.user.username).localeCompare(
         b.member.displayName || b.member.user.username,
@@ -432,23 +476,23 @@ function buildLeaderboardEmbed({
             .filter(Boolean)
             .join('');
 
+          // Keep each staff member to one compact line. This prevents the 10th
+          // entry being cut by Discord's 1024-character embed-field limit and
+          // avoids showing the same points twice.
           return (
             `**${rank}.** <@${row.member.id}>${badges ? ` ${badges}` : ''} — ` +
-            `**${row.activityScore.toLocaleString()} pts**\n` +
-            `└ **${row.claims}** ticket${row.claims === 1 ? '' : 's'} claimed ` +
-            `(${row.ticketPoints.toLocaleString()} pts) • ` +
-            `**${row.messages}** tracked message${row.messages === 1 ? '' : 's'} ` +
-            `(${row.messagePoints.toLocaleString()} pts)`
+            `**${row.activityScore.toLocaleString()} pts** • ` +
+            `${row.claims} ticket${row.claims === 1 ? '' : 's'} • ` +
+            `${row.messages} msg${row.messages === 1 ? '' : 's'}`
           );
         })
-        .join('\n\n')
+        .join('\n')
     : '*No staff match this filter for the selected period.*';
 
   const bestActiveText = bestActive
     ? `${bestActive.hasStar ? `${getStarBadge(bestActive.starLevel)} ` : ''}<@${bestActive.member.id}> — ` +
-      `**${bestActive.activityScore.toLocaleString()} activity points**\n` +
-      `└ ${bestActive.claims} claimed = ${bestActive.ticketPoints.toLocaleString()} pts • ` +
-      `${bestActive.messages} messages = ${bestActive.messagePoints.toLocaleString()} pts`
+      `**${bestActive.activityScore.toLocaleString()} activity points** • ` +
+      `${bestActive.claims} claimed • ${bestActive.messages} messages`
     : 'No active staff in this period.';
 
   const trackedCategories = trackingRules.trackedCategoryIds.map((id) => {
@@ -512,12 +556,17 @@ async function buildLeaderboardPayload(guild, state = {}) {
     trackingRules,
     viewerCanManageSettings,
     pointSettings,
+    pointOverrides,
   ] = await Promise.all([
     getCurrentStaffMembers(guild),
     getStaffSnapshot(guild.id, periodKey),
     getCurrentTrackingRules(guild.id),
     viewerId ? canManageStaffSettings(guild.id, viewerId) : Promise.resolve(false),
     getStaffTrackingSettings(guild.id),
+    getStaffPointOverridesForPeriod(
+      guild.id,
+      periodKey,
+    ),
   ]);
 
   const hiddenStaffIds = new Set(
@@ -529,6 +578,7 @@ async function buildLeaderboardPayload(guild, state = {}) {
       (row) => !hiddenStaffIds.has(row.member.id),
     ),
     pointSettings,
+    pointOverrides,
   );
 
   const filteredRows = sortLeaderboard(
@@ -624,6 +674,76 @@ function detailNavRow(periodKey, filterKey, memberId, rows) {
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(!next),
   );
+}
+
+function canAdjustStaffPointsMember(member) {
+  return Boolean(
+    member?.permissions.has(
+      PermissionFlagsBits.Administrator,
+    ),
+  );
+}
+
+function buildPointAdjustmentRow(
+  periodKey,
+  filterKey,
+  memberId,
+) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(
+        `staffstats:setpoints:ticket:${periodKey}:${filterKey}:${memberId}`,
+      )
+      .setLabel('Set Ticket Points')
+      .setEmoji('🎫')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(
+        `staffstats:setpoints:message:${periodKey}:${filterKey}:${memberId}`,
+      )
+      .setLabel('Set Message Points')
+      .setEmoji('💬')
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function buildPointAdjustmentModal(
+  pointType,
+  periodKey,
+  filterKey,
+  memberId,
+) {
+  const ticketMode =
+    pointType === 'ticket';
+
+  const input =
+    new TextInputBuilder()
+      .setCustomId('points_value')
+      .setLabel(
+        ticketMode
+          ? 'Ticket points (number or AUTO)'
+          : 'Message points (number or AUTO)',
+      )
+      .setPlaceholder(
+        'Example: 50  •  AUTO = use automatic scoring',
+      )
+      .setStyle(TextInputStyle.Short)
+      .setMinLength(1)
+      .setMaxLength(12)
+      .setRequired(true);
+
+  return new ModalBuilder()
+    .setCustomId(
+      `staffstats:pointmodal:${pointType}:${periodKey}:${filterKey}:${memberId}`,
+    )
+    .setTitle(
+      ticketMode
+        ? 'Set Ticket Points'
+        : 'Set Message Points',
+    )
+    .addComponents(
+      new ActionRowBuilder().addComponents(input),
+    );
 }
 
 function buildDetailEmbed({
@@ -726,8 +846,8 @@ function buildDetailEmbed({
         name: '🎯 Activity Points',
         value:
           `**${row.activityScore.toLocaleString()} total**\n` +
-          `${row.claims} claim${row.claims === 1 ? '' : 's'} × ${pointSettings.ticketClaimPoints} = **${row.ticketPoints.toLocaleString()}**\n` +
-          `${row.messages} message${row.messages === 1 ? '' : 's'} × ${pointSettings.trackedMessagePoints} = **${row.messagePoints.toLocaleString()}**`,
+          `Ticket points: **${row.ticketPoints.toLocaleString()}**${row.ticketPointsManual ? ' *(manual)*' : ''} • ` +
+          `Message points: **${row.messagePoints.toLocaleString()}**${row.messagePointsManual ? ' *(manual)*' : ''}`,
         inline: false,
       },
       {
@@ -780,12 +900,17 @@ async function buildDetailPayload(
     detail,
     trackingRules,
     pointSettings,
+    pointOverrides,
   ] = await Promise.all([
     getCurrentStaffMembers(guild),
     getStaffSnapshot(guild.id, periodKey),
     getStaffDetail(guild.id, memberId, periodKey),
     getCurrentTrackingRules(guild.id),
     getStaffTrackingSettings(guild.id),
+    getStaffPointOverridesForPeriod(
+      guild.id,
+      periodKey,
+    ),
   ]);
 
   const hiddenStaffIds = new Set(
@@ -797,6 +922,7 @@ async function buildDetailPayload(
       (row) => !hiddenStaffIds.has(row.member.id),
     ),
     pointSettings,
+    pointOverrides,
   );
 
   const filteredRows = sortLeaderboard(
@@ -854,6 +980,26 @@ async function buildDetailPayload(
     buildPeriodRow(periodKey, filterKey, page),
     buildFilterRow(periodKey, filterKey, page),
   );
+
+  if (viewerId) {
+    const viewer =
+      guild.members.cache.get(
+        String(viewerId),
+      ) ||
+      (await guild.members
+        .fetch(String(viewerId))
+        .catch(() => null));
+
+    if (canAdjustStaffPointsMember(viewer)) {
+      components.push(
+        buildPointAdjustmentRow(
+          periodKey,
+          filterKey,
+          memberId,
+        ),
+      );
+    }
+  }
 
   return {
     embeds: [
@@ -959,6 +1105,176 @@ async function handleStaffTrackingInteraction(interaction) {
     return true;
   }
 
+  const parts =
+    customId.split(':');
+  const action =
+    parts[1];
+
+  // Admin point buttons must show the modal before any defer/update response.
+  if (
+    action === 'setpoints' &&
+    interaction.isButton()
+  ) {
+    if (
+      !interaction.memberPermissions?.has(
+        PermissionFlagsBits.Administrator,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'Only Administrators can manually set staff points.',
+        flags:
+          MessageFlags.Ephemeral,
+      }).catch(() => {});
+      return true;
+    }
+
+    const [
+      ,
+      ,
+      pointType,
+      periodKey,
+      filterKey,
+      memberId,
+    ] = parts;
+
+    await interaction.showModal(
+      buildPointAdjustmentModal(
+        pointType,
+        cleanPeriod(periodKey),
+        cleanFilter(filterKey),
+        memberId,
+      ),
+    );
+
+    return true;
+  }
+
+  if (
+    action === 'pointmodal' &&
+    interaction.isModalSubmit()
+  ) {
+    if (
+      !interaction.memberPermissions?.has(
+        PermissionFlagsBits.Administrator,
+      )
+    ) {
+      await interaction.reply({
+        content:
+          'Only Administrators can manually set staff points.',
+        flags:
+          MessageFlags.Ephemeral,
+      }).catch(() => {});
+      return true;
+    }
+
+    await interaction.deferUpdate();
+
+    try {
+      const [
+        ,
+        ,
+        pointType,
+        rawPeriodKey,
+        rawFilterKey,
+        memberId,
+      ] = parts;
+
+      const periodKey =
+        cleanPeriod(rawPeriodKey);
+      const filterKey =
+        cleanFilter(rawFilterKey);
+      const rawValue =
+        interaction.fields
+          .getTextInputValue('points_value')
+          .trim();
+
+      let value = null;
+
+      if (
+        rawValue.toLowerCase() !== 'auto'
+      ) {
+        if (
+          !/^-?\d+$/.test(rawValue)
+        ) {
+          await interaction.followUp({
+            content:
+              'Enter a whole-number point value, or `AUTO` to return to automatic scoring.',
+            flags:
+              MessageFlags.Ephemeral,
+          });
+          return true;
+        }
+
+        value =
+          Number(rawValue);
+
+        if (
+          !Number.isSafeInteger(value) ||
+          value < 0 ||
+          value > 10000000
+        ) {
+          await interaction.followUp({
+            content:
+              'Points must be a whole number from **0** to **10,000,000**, or `AUTO`.',
+            flags:
+              MessageFlags.Ephemeral,
+          });
+          return true;
+        }
+      }
+
+      await setStaffPointOverride(
+        interaction.guild.id,
+        memberId,
+        periodKey,
+        pointType,
+        value,
+        interaction.user.id,
+      );
+
+      const payload =
+        await buildDetailPayload(
+          interaction.guild,
+          {
+            periodKey,
+            filterKey,
+            memberId,
+            viewerId:
+              interaction.user.id,
+          },
+        );
+
+      await interaction.editReply(payload);
+
+      await interaction.followUp({
+        content:
+          value === null
+            ? `✅ ${pointType === 'ticket' ? 'Ticket' : 'Message'} points returned to **automatic scoring** for <@${memberId}> (${PERIODS[periodKey].label}).`
+            : `✅ Set ${pointType === 'ticket' ? 'ticket' : 'message'} points to **${value.toLocaleString()}** for <@${memberId}> (${PERIODS[periodKey].label}).`,
+        flags:
+          MessageFlags.Ephemeral,
+        allowedMentions: {
+          parse: [],
+        },
+      });
+    } catch (error) {
+      console.error(
+        '[STAFF POINT OVERRIDE ERROR]',
+        error,
+      );
+
+      await interaction.followUp({
+        content:
+          'I could not save that manual point value.',
+        flags:
+          MessageFlags.Ephemeral,
+      }).catch(() => {});
+    }
+
+    return true;
+  }
+
   if (!(await canViewStaffPanel(interaction))) {
     await interaction.reply({
       content: 'You need **View Audit Log** staff permission to use this panel.',
@@ -975,9 +1291,6 @@ async function handleStaffTrackingInteraction(interaction) {
   await interaction.deferUpdate();
 
   try {
-    const parts = customId.split(':');
-    const action = parts[1];
-
     if (action === 'page') {
       const [, , periodKey, filterKey, rawPage] = parts;
       const payload = await buildLeaderboardPayload(interaction.guild, {
