@@ -3427,11 +3427,31 @@ async function processTicketChannelRename(state) {
 async function closeTicket(interaction) {
   const baseData = getTicketData(interaction.channel);
   if (!baseData) {
-    await interaction.reply({
-      content: 'This button can only be used inside a ticket channel.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
+    const liveData =
+      await getLiveTicketData(
+        interaction.channel,
+      ).catch(
+        () =>
+          null,
+      );
+
+    if (
+      !liveData
+    ) {
+      console.warn(
+        `[TICKET CLOSE STALE CONTROL] Ignored Close outside a ticket in ` +
+          `${interaction.channelId || interaction.channel?.id || 'unknown'}.`,
+      );
+
+      await interaction
+        .deferUpdate()
+        .catch(
+          () =>
+            {},
+        );
+
+      return;
+    }
   }
 
   const data =
@@ -6808,10 +6828,18 @@ async function sendTranscript(interaction) {
     baseData;
 
   if (!data) {
-    await interaction.reply({
-      content: 'This button can only be used inside a ticket channel.',
-      flags: MessageFlags.Ephemeral,
-    });
+    console.warn(
+      `[TICKET TRANSCRIPT STALE CONTROL] Ignored Transcript outside a ticket in ` +
+        `${interaction.channelId || interaction.channel?.id || 'unknown'}.`,
+    );
+
+    await interaction
+      .deferUpdate()
+      .catch(
+        () =>
+          {},
+      );
+
     return;
   }
 
@@ -7044,12 +7072,18 @@ async function claimTicketUnlocked(
     );
 
   if (!data) {
-    await interaction.reply({
-      content:
-        'This button can only be used inside a ticket channel.',
-      flags:
-        MessageFlags.Ephemeral,
-    });
+    console.warn(
+      `[TICKET CLAIM STALE CONTROL] Ignored Claim outside a ticket in ` +
+        `${interaction.channelId || interaction.channel?.id || 'unknown'}.`,
+    );
+
+    await interaction
+      .deferUpdate()
+      .catch(
+        () =>
+          {},
+      );
+
     return;
   }
 
@@ -9353,11 +9387,17 @@ async function openRoleMenu(
       );
 
     if (!data) {
-      await interaction.editReply({
-        content:
-          'This button can only be used inside a ticket channel.',
-        components: [],
-      });
+      console.warn(
+        `[TICKET ROLE STALE CONTROL] Ignored Role outside a ticket in ` +
+          `${interaction.channelId || interaction.channel?.id || 'unknown'}.`,
+      );
+
+      await interaction
+        .deleteReply()
+        .catch(
+          () =>
+            {},
+        );
 
       return;
     }
@@ -10322,7 +10362,174 @@ async function handleTicketMessageCreate(
   return true;
 }
 
+function isTicketChannelScopedInteraction(
+  interaction,
+) {
+  const customId =
+    String(
+      interaction?.customId ||
+      '',
+    );
+
+  if (
+    !customId
+  ) {
+    return false;
+  }
+
+  if (
+    interaction.isButton?.()
+  ) {
+    return (
+      customId ===
+        'ticket_close' ||
+      customId ===
+        'ticket_transcript' ||
+      customId ===
+        'ticket_reopen' ||
+      customId ===
+        'ticket_delete' ||
+      customId ===
+        'ticket_claim' ||
+      customId ===
+        'ticket_assist' ||
+      customId ===
+        'ticket_assist_page_label' ||
+      customId ===
+        'ticket_role' ||
+      customId ===
+        'ticket_unmute_approve' ||
+      customId ===
+        'ticket_unmute_reject' ||
+      customId.startsWith(
+        'ticket_assist_staff_page:',
+      ) ||
+      customId.startsWith(
+        'ticket_handover_staff_page:',
+      ) ||
+      customId.startsWith(
+        'ticket_handover_accept:',
+      ) ||
+      customId.startsWith(
+        'ticket_role_page:',
+      ) ||
+      customId.startsWith(
+        'ticket_ingame_id:',
+      )
+    );
+  }
+
+  if (
+    interaction.isStringSelectMenu?.()
+  ) {
+    return (
+      customId ===
+        'ticket_assist_action' ||
+      customId.startsWith(
+        'ticket_assist_staff_select:',
+      ) ||
+      customId.startsWith(
+        'ticket_handover_staff_select:',
+      ) ||
+      customId.startsWith(
+        'ticket_role_select:',
+      ) ||
+      customId.startsWith(
+        'ticket_report_staff_select:',
+      ) ||
+      customId.startsWith(
+        'ticket_muted_staff_select:',
+      ) ||
+      customId.startsWith(
+        'ticket_youtube_range:',
+      )
+    );
+  }
+
+  return false;
+}
+
+async function hasLiveTicketInteractionContext(
+  interaction,
+) {
+  if (
+    !interaction?.channel
+  ) {
+    return false;
+  }
+
+  const localData =
+    getTicketData(
+      interaction.channel,
+    );
+
+  if (
+    localData
+  ) {
+    return true;
+  }
+
+  const liveData =
+    await getLiveTicketData(
+      interaction.channel,
+    ).catch(
+      () =>
+        null,
+    );
+
+  return Boolean(
+    liveData,
+  );
+}
+
+async function ignoreStaleTicketControlOutsideTicket(
+  interaction,
+) {
+  if (
+    !isTicketChannelScopedInteraction(
+      interaction,
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    await hasLiveTicketInteractionContext(
+      interaction,
+    )
+  ) {
+    return false;
+  }
+
+  console.warn(
+    `[TICKET STALE CONTROL IGNORED] ${interaction.customId} in non-ticket channel ` +
+      `${interaction.channelId || interaction.channel?.id || 'unknown'} by ${interaction.user?.id || 'unknown'}.`,
+  );
+
+  if (
+    interaction.isButton?.() ||
+    interaction.isStringSelectMenu?.()
+  ) {
+    await interaction
+      .deferUpdate()
+      .catch(
+        () =>
+          {},
+      );
+  }
+
+  return true;
+}
+
 async function handleTicketInteraction(interaction) {
+  if (
+    await ignoreStaleTicketControlOutsideTicket(
+      interaction,
+    )
+  ) {
+    return true;
+  }
+
   if (interaction.isButton()) {
     if (interaction.customId === 'ticket_create') {
       const member =
