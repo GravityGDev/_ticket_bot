@@ -8,6 +8,7 @@ const {
   GatewayIntentBits,
   Events,
   MessageFlags,
+  PermissionFlagsBits,
   Partials,
   REST,
   Routes,
@@ -45,6 +46,9 @@ const {
   initializeGuildPermissions,
   handleStaffPermissionInteraction,
 } = require('./staff-command-permissions');
+const {
+  isStaffMember,
+} = require('./staff-role-hierarchy');
 
 const {
   initializeSkinReview,
@@ -376,6 +380,82 @@ client.once(Events.ClientReady, (readyClient) => {
   timer.unref?.();
 });
 
+const STAFF_TICKET_CONTROL_IDS = new Set([
+  'ticket_close',
+  'ticket_delete',
+  'ticket_reopen',
+  'ticket_transcript',
+]);
+
+function isReportStaffTicketChannel(channel) {
+  const topic = String(channel?.topic || '');
+  const name = String(channel?.name || '');
+
+  return (
+    topic.includes('Type=report_staff') ||
+    name.includes('_report-staff')
+  );
+}
+
+async function handleTicketInteractionWithStaffPermissionShim(interaction) {
+  if (
+    !interaction?.guild ||
+    !interaction?.channel ||
+    !STAFF_TICKET_CONTROL_IDS.has(String(interaction.customId || '')) ||
+    isReportStaffTicketChannel(interaction.channel)
+  ) {
+    return handleTicketInteraction(interaction);
+  }
+
+  const member =
+    interaction.member?.roles?.cache
+      ? interaction.member
+      : await interaction.guild.members
+          .fetch(interaction.user.id)
+          .catch(() => null);
+
+  if (!member || !isStaffMember(member)) {
+    return handleTicketInteraction(interaction);
+  }
+
+  const channel = interaction.channel;
+  const hadOwnPermissionsFor = Object.prototype.hasOwnProperty.call(
+    channel,
+    'permissionsFor',
+  );
+  const originalOwnPermissionsFor = channel.permissionsFor;
+  const originalPermissionsFor = channel.permissionsFor.bind(channel);
+
+  channel.permissionsFor = (memberOrRole, checkAdmin) => {
+    const permissions = originalPermissionsFor(memberOrRole, checkAdmin);
+
+    if (!permissions) {
+      return permissions;
+    }
+
+    const targetId =
+      typeof memberOrRole === 'string'
+        ? memberOrRole
+        : memberOrRole?.id;
+
+    if (String(targetId || '') === String(member.id)) {
+      return permissions.add(PermissionFlagsBits.ManageMessages);
+    }
+
+    return permissions;
+  };
+
+  try {
+    return await handleTicketInteraction(interaction);
+  } finally {
+    if (hadOwnPermissionsFor) {
+      channel.permissionsFor = originalOwnPermissionsFor;
+    } else {
+      delete channel.permissionsFor;
+    }
+  }
+}
+
 // Application commands, ticket buttons, and ticket select menus.
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -431,7 +511,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    await handleTicketInteraction(interaction);
+    await handleTicketInteractionWithStaffPermissionShim(interaction);
   } catch (error) {
     console.error('[INTERACTION ERROR]', error);
 
