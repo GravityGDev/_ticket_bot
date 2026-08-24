@@ -250,18 +250,127 @@ function parseModoPackEntries(embed) {
   );
 }
 
-function buildModoPackListDescription(entries) {
+function sanitizeFallbackMentionName(value) {
+  return String(
+    value ||
+    'Unknown User',
+  )
+    .replace(
+      /[\r\n|<>@]/g,
+      ' ',
+    )
+    .replace(
+      /\s+/g,
+      ' ',
+    )
+    .trim()
+    .slice(
+      0,
+      60,
+    ) ||
+    'Unknown User';
+}
+
+async function resolveModoPackUserLabel(
+  guild,
+  userId,
+) {
+  const id =
+    String(
+      userId ||
+      '',
+    );
+
+  if (
+    !id
+  ) {
+    return '@Unknown User';
+  }
+
+  const member =
+    guild?.members?.cache?.get(
+      id,
+    ) ||
+    (await guild?.members
+      ?.fetch({
+        user:
+          id,
+        force:
+          true,
+      })
+      .catch(
+        () =>
+          null,
+      ));
+
+  if (
+    member
+  ) {
+    // Use the real Discord mention syntax when the user is still a guild member.
+    return `<@${id}>`;
+  }
+
+  const user =
+    guild?.client?.users?.cache?.get(
+      id,
+    ) ||
+    (await guild?.client?.users
+      ?.fetch(
+        id,
+        {
+          force:
+            true,
+        },
+      )
+      .catch(
+        () =>
+          null,
+      ));
+
+  if (
+    user
+  ) {
+    return (
+      '@' +
+      sanitizeFallbackMentionName(
+        user.globalName ||
+        user.username,
+      )
+    );
+  }
+
+  return '@Unknown User';
+}
+
+async function buildModoPackListDescription(
+  entries,
+  guild,
+) {
   if (
     !entries.length
   ) {
     return 'No pack requests yet.';
   }
 
-  return entries
-    .map(
-      (entry) =>
-        `> <@${entry.userId}> | ${entry.packName}`,
-    )
+  const lines =
+    [];
+
+  for (
+    const entry of
+      entries
+  ) {
+    const userLabel =
+      await resolveModoPackUserLabel(
+        guild,
+        entry.userId,
+      );
+
+    lines.push(
+      `> ${userLabel} | ${entry.packName}`,
+    );
+  }
+
+  return lines
     .join(
       '\n',
     )
@@ -328,8 +437,9 @@ async function migrateModoPackMessage(message) {
     );
 
   const desiredDescription =
-    buildModoPackListDescription(
+    await buildModoPackListDescription(
       entries,
+      message.guild,
     );
 
   const alreadyClean =
@@ -574,8 +684,9 @@ async function submitPackModal(
         0x57f287,
       )
       .setDescription(
-        buildModoPackListDescription(
+        await buildModoPackListDescription(
           entries,
+          interaction.guild,
         ),
       );
 
@@ -664,4 +775,6 @@ module.exports = {
   migrateModoPackMessage,
   parseModoPackEntries,
   parseValidPackName,
+  resolveModoPackUserLabel,
+  buildModoPackListDescription,
 };
