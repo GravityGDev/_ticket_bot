@@ -133,7 +133,7 @@ function sanitizeModoPackDisplayName(value) {
     'Unknown User';
 }
 
-function parseModoPackEntries(embed) {
+function parseLegacyModoPackFooterState(embed) {
   const footerText =
     String(
       embed?.footer?.text ||
@@ -185,10 +185,6 @@ function parseModoPackEntries(embed) {
             String(
               entry.userId,
             ),
-          displayName:
-            sanitizeModoPackDisplayName(
-              entry.displayName,
-            ),
           packName:
             String(
               entry.packName,
@@ -200,35 +196,56 @@ function parseModoPackEntries(embed) {
   }
 }
 
-function encodeModoPackEntries(entries) {
-  const compact =
-    entries.map(
-      (entry) => ({
-        userId:
-          String(
-            entry.userId,
-          ),
-        displayName:
-          sanitizeModoPackDisplayName(
-            entry.displayName,
-          ),
-        packName:
-          String(
-            entry.packName,
-          ),
-      }),
+function parseModoPackEntries(embed) {
+  const description =
+    String(
+      embed?.description ||
+      '',
     );
 
-  return (
-    'modo-pack-state:' +
-    Buffer.from(
-      JSON.stringify(
-        compact,
-      ),
-      'utf8',
-    ).toString(
-      'base64url',
-    )
+  const entries =
+    [];
+
+  for (
+    const line of
+      description.split(
+        /\r?\n/,
+      )
+  ) {
+    const match =
+      /^\s*>\s*<@!?(\d{16,22})>\s*\|\s*(pack\d+)\s*$/i.exec(
+        line,
+      );
+
+    if (
+      !match
+    ) {
+      continue;
+    }
+
+    entries.push({
+      userId:
+        String(
+          match[1],
+        ),
+      packName:
+        String(
+          match[2],
+        ).toLowerCase(),
+    });
+  }
+
+  if (
+    entries.length
+  ) {
+    return entries;
+  }
+
+  // Backwards compatibility for messages created by the previous build.
+  // The next edit/startup migration converts this old footer data into the
+  // clean visible mention list and then removes the footer completely.
+  return parseLegacyModoPackFooterState(
+    embed,
   );
 }
 
@@ -242,9 +259,7 @@ function buildModoPackListDescription(entries) {
   return entries
     .map(
       (entry) =>
-        `> ${sanitizeModoPackDisplayName(
-          entry.displayName,
-        )} | ${entry.packName}`,
+        `> <@${entry.userId}> | ${entry.packName}`,
     )
     .join(
       '\n',
@@ -253,6 +268,120 @@ function buildModoPackListDescription(entries) {
       0,
       4096,
     );
+}
+
+function isModoPackMessage(message) {
+  return Boolean(
+    message?.components?.some(
+      (row) =>
+        row.components?.some(
+          (component) =>
+            String(
+              component.customId ||
+              component.custom_id ||
+              '',
+            ) ===
+              SUBMIT_BUTTON_ID,
+        ),
+    ),
+  );
+}
+
+async function migrateModoPackMessage(message) {
+  if (
+    !message ||
+    !isModoPackMessage(
+      message,
+    )
+  ) {
+    return false;
+  }
+
+  const statusEmbed =
+    message.embeds?.[1] ||
+    null;
+
+  if (
+    !statusEmbed
+  ) {
+    return false;
+  }
+
+  const entries =
+    parseModoPackEntries(
+      statusEmbed,
+    );
+
+  if (
+    !entries.length
+  ) {
+    return false;
+  }
+
+  const hasLegacyFooter =
+    String(
+      statusEmbed.footer?.text ||
+      '',
+    ).startsWith(
+      'modo-pack-state:',
+    );
+
+  const desiredDescription =
+    buildModoPackListDescription(
+      entries,
+    );
+
+  const alreadyClean =
+    !hasLegacyFooter &&
+    String(
+      statusEmbed.description ||
+      '',
+    ) ===
+      desiredDescription;
+
+  if (
+    alreadyClean
+  ) {
+    return false;
+  }
+
+  const imageEmbed =
+    getImageEmbed(
+      message,
+    );
+
+  if (
+    !imageEmbed
+  ) {
+    return false;
+  }
+
+  const cleanStatusEmbed =
+    new EmbedBuilder()
+      .setColor(
+        0x57f287,
+      )
+      .setDescription(
+        desiredDescription,
+      );
+
+  await message.edit({
+    embeds: [
+      imageEmbed,
+      cleanStatusEmbed,
+    ],
+    components:
+      buildModoPackComponents(),
+    allowedMentions: {
+      users:
+        entries.map(
+          (entry) =>
+            entry.userId,
+        ),
+    },
+  });
+
+  return true;
 }
 
 function getImageEmbed(message) {
@@ -406,13 +535,6 @@ async function submitPackModal(
       existingStatusEmbed,
     );
 
-  const displayName =
-    sanitizeModoPackDisplayName(
-      interaction.member?.displayName ||
-      interaction.user.globalName ||
-      interaction.user.username,
-    );
-
   const existingIndex =
     entries.findIndex(
       (entry) =>
@@ -427,7 +549,6 @@ async function submitPackModal(
   const nextEntry = {
     userId:
       interaction.user.id,
-    displayName,
     packName:
       parsed.packName,
   };
@@ -455,13 +576,7 @@ async function submitPackModal(
         buildModoPackListDescription(
           entries,
         ),
-      )
-      .setFooter({
-        text:
-          encodeModoPackEntries(
-            entries,
-          ),
-      });
+      );
 
   await message.edit({
     embeds: [
@@ -471,7 +586,11 @@ async function submitPackModal(
     components:
       buildModoPackComponents(),
     allowedMentions: {
-      parse: [],
+      users:
+        entries.map(
+          (entry) =>
+            entry.userId,
+        ),
     },
   });
 
@@ -540,5 +659,8 @@ module.exports = {
   buildModoPackComponents,
   handleModoPackInteraction,
   isModoPackInteraction,
+  isModoPackMessage,
+  migrateModoPackMessage,
+  parseModoPackEntries,
   parseValidPackName,
 };
