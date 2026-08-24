@@ -7,35 +7,11 @@ const {
   migrateModoPackMessage,
 } = require('../modo-pack');
 
+const FOCUSED_MODO_PACK_CHANNEL_ID =
+  '1541522095287042208';
+
 const MESSAGE_SCAN_LIMIT =
   100;
-
-function isLikelyModoPackChannel(channel) {
-  if (
-    !channel?.isTextBased?.() ||
-    !channel?.messages?.fetch
-  ) {
-    return false;
-  }
-
-  const name =
-    String(
-      channel.name ||
-      '',
-    ).toLowerCase();
-
-  return (
-    name.includes(
-      'modo-pack',
-    ) ||
-    name.includes(
-      'modo_packs',
-    ) ||
-    name.includes(
-      'modopack',
-    )
-  );
-}
 
 module.exports = {
   name:
@@ -47,6 +23,51 @@ module.exports = {
   async execute(
     client,
   ) {
+    const channel =
+      await client.channels
+        .fetch(
+          FOCUSED_MODO_PACK_CHANNEL_ID,
+        )
+        .catch(
+          () =>
+            null,
+        );
+
+    if (
+      !channel?.isTextBased?.() ||
+      !channel?.messages?.fetch
+    ) {
+      console.warn(
+        '[MODO PACK STARTUP] Focused Modo Pack channel unavailable.',
+      );
+
+      return;
+    }
+
+    const messages =
+      await channel.messages
+        .fetch({
+          limit:
+            MESSAGE_SCAN_LIMIT,
+        })
+        .catch(
+          (error) => {
+            console.error(
+              '[MODO PACK STARTUP SCAN ERROR]',
+              channel.id,
+              error,
+            );
+
+            return null;
+          },
+        );
+
+    if (
+      !messages
+    ) {
+      return;
+    }
+
     let scanned =
       0;
 
@@ -54,89 +75,47 @@ module.exports = {
       0;
 
     for (
-      const guild of
-        client.guilds.cache.values()
+      const message of
+        messages.values()
     ) {
-      for (
-        const channel of
-          guild.channels.cache.values()
+      if (
+        message.author?.id !==
+          client.user.id ||
+        !isModoPackMessage(
+          message,
+        )
       ) {
-        if (
-          !isLikelyModoPackChannel(
-            channel,
-          )
-        ) {
-          continue;
-        }
+        continue;
+      }
 
-        const messages =
-          await channel.messages
-            .fetch({
-              limit:
-                MESSAGE_SCAN_LIMIT,
-            })
-            .catch(
-              (error) => {
-                console.error(
-                  '[MODO PACK STARTUP SCAN ERROR]',
-                  channel.id,
-                  error,
-                );
+      scanned +=
+        1;
 
-                return null;
-              },
+      const changed =
+        await migrateModoPackMessage(
+          message,
+        ).catch(
+          (error) => {
+            console.error(
+              '[MODO PACK STARTUP MIGRATION ERROR]',
+              message.id,
+              error,
             );
 
-        if (
-          !messages
-        ) {
-          continue;
-        }
+            return false;
+          },
+        );
 
-        for (
-          const message of
-            messages.values()
-        ) {
-          if (
-            message.author?.id !==
-              client.user.id ||
-            !isModoPackMessage(
-              message,
-            )
-          ) {
-            continue;
-          }
-
-          scanned +=
-            1;
-
-          const changed =
-            await migrateModoPackMessage(
-              message,
-            ).catch(
-              (error) => {
-                console.error(
-                  '[MODO PACK STARTUP MIGRATION ERROR]',
-                  message.id,
-                  error,
-                );
-
-                return false;
-              },
-            );
-
-          if (
-            changed
-          ) {
-            migrated +=
-              1;
-          }
-        }
+      if (
+        changed
+      ) {
+        migrated +=
+          1;
       }
     }
 
     console.log(
-      `[MODO PACK STARTUP] Checked ${scanned} Modo pack message(s); cleaned ${migrated}.`,
+      `[MODO PACK STARTUP] Focused channel checked ${scanned} Modo pack message(s); cleaned ${migrated}.`,
     );
   },
 };
