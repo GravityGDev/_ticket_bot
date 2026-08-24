@@ -115,7 +115,7 @@ module.exports = {
     }
 
     console.log(
-      `[MODO PACK STARTUP] Focused channel checked ${scanned} Modo pack message(s); cleaned ${migrated}.`,
+      `[MODO PACK STARTUP] Focused channel checked ${scanned} Modo pack message(s); refreshed ${migrated}.`,
     );
   },
 };
