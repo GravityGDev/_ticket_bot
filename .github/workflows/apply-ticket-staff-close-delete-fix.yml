@@ -1,0 +1,142 @@
+name: Apply ticket staff close-delete fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-ticket-staff-close-delete-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch ticket staff permissions
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('src/ticket-system.js')
+          text = path.read_text(encoding='utf-8')
+
+          old_helper = """function isStaffForTicket(interaction, member) {
+            return Boolean(
+              member &&
+                interaction.channel.permissionsFor(member)?.has(PermissionFlagsBits.ManageMessages),
+            );
+          }
+          """
+
+          new_helper = """function isStaffForTicket(
+            interaction,
+            member,
+          ) {
+            if (
+              !interaction?.guild ||
+              !member
+            ) {
+              return false;
+            }
+
+            // Ticket staff access follows the configured Snay.io staff hierarchy.
+            // Staff do NOT need Discord's raw Manage Messages permission just to use
+            // bot-managed Close / Delete / Reopen / Transcript controls.
+            return isTicketStaffMember(
+              member,
+            );
+          }
+          """
+
+          if old_helper in text:
+              text = text.replace(old_helper, new_helper, 1)
+          elif new_helper not in text:
+              raise SystemExit('Could not locate isStaffForTicket permission helper')
+
+          old_close = """  } else {
+            const isCreator = data.creatorId === interaction.user.id;
+            const isStaff =
+              interaction.channel
+                .permissionsFor(member)
+                ?.has(PermissionFlagsBits.ManageMessages) || false;
+
+            if (!isCreator && !isStaff) {
+              await interaction.reply({
+                content:
+                  'Only the ticket creator or staff with **Manage Messages** can close this ticket.',
+                flags: MessageFlags.Ephemeral,
+              });
+              return;
+            }
+          }
+          """
+
+          new_close = """  } else {
+            const isCreator =
+              data.creatorId ===
+              interaction.user.id;
+
+            const isStaff =
+              isStaffForTicket(
+                interaction,
+                member,
+              );
+
+            if (
+              !isCreator &&
+              !isStaff
+            ) {
+              await interaction.reply({
+                content:
+                  'Only the ticket creator or a member of the **staff team** can close this ticket.',
+                flags:
+                  MessageFlags.Ephemeral,
+              });
+              return;
+            }
+          }
+          """
+
+          if old_close in text:
+              text = text.replace(old_close, new_close, 1)
+          elif new_close not in text:
+              raise SystemExit('Could not locate normal ticket close permission block')
+
+          replacements = {
+              'You need **Manage Messages** to delete tickets.':
+                  'Only a member of the **staff team** can delete normal tickets.',
+              'You need **Manage Messages** to reopen tickets.':
+                  'Only a member of the **staff team** can reopen normal tickets.',
+              'You need **Manage Messages** to download ticket transcripts.':
+                  'Only a member of the **staff team** can download normal ticket transcripts.',
+          }
+
+          for old, new in replacements.items():
+              if old in text:
+                  text = text.replace(old, new)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Validate JavaScript
+        run: node --check src/ticket-system.js
+
+      - name: Commit fix and remove one-time workflow
+        run: |
+          rm -f .github/workflows/apply-ticket-staff-close-delete-fix.yml
+          git config user.name "ChatGPT Bot Update"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes required."
+            exit 0
+          fi
+          git commit -m "Fix staff ticket close/delete permissions"
+          git push origin HEAD:main
