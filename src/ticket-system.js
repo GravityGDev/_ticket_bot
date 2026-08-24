@@ -1637,6 +1637,10 @@ function assertTicketRuntimeHelpers() {
       typeof refreshTicketControlMessage,
     claimTicketUnlocked:
       typeof claimTicketUnlocked,
+    isStaffForTicket:
+      typeof isStaffForTicket,
+    isTicketStaffMember:
+      typeof isTicketStaffMember,
   };
 
   const missing =
@@ -3497,17 +3501,25 @@ async function closeTicket(interaction) {
       return;
     }
   } else {
-    const isCreator = data.creatorId === interaction.user.id;
-    const isStaff =
-      interaction.channel
-        .permissionsFor(member)
-        ?.has(PermissionFlagsBits.ManageMessages) || false;
+    const isCreator =
+      data.creatorId ===
+      interaction.user.id;
 
-    if (!isCreator && !isStaff) {
+    const isStaff =
+      isStaffForTicket(
+        interaction,
+        member,
+      );
+
+    if (
+      !isCreator &&
+      !isStaff
+    ) {
       await interaction.reply({
         content:
-          'Only the ticket creator or staff with **Manage Messages** can close this ticket.',
-        flags: MessageFlags.Ephemeral,
+          'Only the ticket creator or a member of the **staff team** can close this ticket.',
+        flags:
+          MessageFlags.Ephemeral,
       });
       return;
     }
@@ -3530,26 +3542,60 @@ async function closeTicket(interaction) {
   const closedName = `${CLOSED_TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
 
   try {
-    // Closed means closed for the ticket creator: explicitly remove their
-    // channel visibility and ability to send messages.
-    //
-    // Discord members with Administrator bypass channel overwrites, so server
-    // admins will still be able to view/manage the closed ticket as expected.
-    // Other support staff continue to see it through their staff-role
-    // permission overwrite, unless that same staff member is the ticket
-    // creator (their member-specific deny intentionally wins until reopened).
-    await interaction.channel.permissionOverwrites.edit(
-      data.creatorId,
-      {
-        ViewChannel: false,
-        SendMessages: false,
-      },
-      `Ticket closed by ${interaction.user.tag}`,
-    );
+    const creatorMember =
+      interaction.guild.members.cache.get(
+        String(
+          data.creatorId,
+        ),
+      ) ||
+      (await interaction.guild.members
+        .fetch(
+          String(
+            data.creatorId,
+          ),
+        )
+        .catch(() => null));
 
-    console.log(
-      `[TICKET CLOSE] Creator ${data.creatorId} hidden from ticket #${ticketNumber}.`,
-    );
+    const creatorIsStaff =
+      !isReportStaff &&
+      isTicketStaffMember(
+        creatorMember,
+      );
+
+    if (creatorIsStaff) {
+      // A staff member who created their own normal ticket keeps full access
+      // after closing it. This lets them continue talking and use the closed
+      // ticket controls (Transcript/Delete/Reopen) like any other staff member.
+      await interaction.channel.permissionOverwrites.edit(
+        data.creatorId,
+        {
+          ViewChannel: true,
+          ReadMessageHistory: true,
+          AttachFiles: true,
+          EmbedLinks: true,
+          SendMessages: true,
+        },
+        `Staff ticket creator retained access after close by ${interaction.user.tag}`,
+      );
+
+      console.log(
+        `[TICKET CLOSE] Staff creator ${data.creatorId} kept access to closed ticket #${ticketNumber}.`,
+      );
+    } else {
+      // Normal customers are hidden from the ticket after it is closed.
+      await interaction.channel.permissionOverwrites.edit(
+        data.creatorId,
+        {
+          ViewChannel: false,
+          SendMessages: false,
+        },
+        `Ticket closed by ${interaction.user.tag}`,
+      );
+
+      console.log(
+        `[TICKET CLOSE] Creator ${data.creatorId} hidden from ticket #${ticketNumber}.`,
+      );
+    }
 
     const closedAt = new Date();
 
@@ -3581,10 +3627,22 @@ async function closeTicket(interaction) {
   }
 }
 
-function isStaffForTicket(interaction, member) {
-  return Boolean(
-    member &&
-      interaction.channel.permissionsFor(member)?.has(PermissionFlagsBits.ManageMessages),
+function isStaffForTicket(
+  interaction,
+  member,
+) {
+  if (
+    !interaction?.guild ||
+    !member
+  ) {
+    return false;
+  }
+
+  // Ticket staff access follows the configured Snay.io staff hierarchy.
+  // Staff do NOT need Discord's raw Manage Messages permission just to use
+  // bot-managed Close / Delete / Reopen / Transcript controls.
+  return isTicketStaffMember(
+    member,
   );
 }
 
@@ -3630,7 +3688,7 @@ async function reopenTicket(interaction) {
     !isStaffForTicket(interaction, member)
   ) {
     await interaction.reply({
-      content: 'You need **Manage Messages** to reopen tickets.',
+      content: 'Only a member of the **staff team** can reopen normal tickets.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -6760,7 +6818,7 @@ async function sendTranscript(interaction) {
   const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
   if (!isStaffForTicket(interaction, member)) {
     await interaction.reply({
-      content: 'You need **Manage Messages** to download ticket transcripts.',
+      content: 'Only a member of the **staff team** can download normal ticket transcripts. Staff ticket creators can use this on their own ticket too.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -6848,7 +6906,7 @@ async function deleteTicket(interaction) {
     !isStaffForTicket(interaction, member)
   ) {
     await interaction.reply({
-      content: 'You need **Manage Messages** to delete tickets.',
+      content: 'Only a member of the **staff team** can delete normal tickets. Staff ticket creators can delete their own closed ticket too.',
       flags: MessageFlags.Ephemeral,
     });
     return;
