@@ -16,6 +16,9 @@ const { getMongoDb } = require('./database');
 const {
   canMemberUseCommandSync,
 } = require('./staff-command-permissions');
+const {
+  notifyRestoreReactionBot,
+} = require('./restore-reaction-webhook');
 
 const SKIN_REVIEW_CHANNEL_ID = '1193625435796422657';
 const SOURCE_MEDIA_BOT_ID = '891220330817912852';
@@ -3444,6 +3447,9 @@ async function restoreMediaId(
   let failed = 0;
   let cursor = 0;
 
+  const restoredMessageIds =
+    [];
+
   // Restore a few at once so large IDs do not take ages, while still avoiding
   // an uncontrolled burst of Discord REST requests.
   async function worker() {
@@ -3478,6 +3484,10 @@ async function restoreMediaId(
         );
 
         restored += 1;
+
+        restoredMessageIds.push(
+          messageId,
+        );
       } catch (error) {
         failed += 1;
 
@@ -3505,6 +3515,58 @@ async function restoreMediaId(
     ),
   );
 
+  let secondaryReaction = {
+    configured:
+      false,
+    requested:
+      restoredMessageIds.length,
+    reacted:
+      0,
+    missing:
+      0,
+    rejected:
+      0,
+    failed:
+      0,
+  };
+
+  if (
+    restoredMessageIds.length
+  ) {
+    try {
+      secondaryReaction =
+        await notifyRestoreReactionBot({
+          channelId:
+            SKIN_REVIEW_CHANNEL_ID,
+          mediaId:
+            id,
+          messageIds:
+            restoredMessageIds,
+          restoredById,
+        });
+    } catch (error) {
+      console.error(
+        `[SKIN RESTORE SECONDARY REACTION ERROR] ${id}`,
+        error,
+      );
+
+      secondaryReaction = {
+        configured:
+          true,
+        requested:
+          restoredMessageIds.length,
+        reacted:
+          0,
+        missing:
+          0,
+        rejected:
+          0,
+        failed:
+          restoredMessageIds.length,
+      };
+    }
+  }
+
   invalidateStatusFilterCache(
     id,
   );
@@ -3515,6 +3577,11 @@ async function restoreMediaId(
         restoredById
           ? `, requestedBy=${restoredById}`
           : ''
+      ) +
+      (
+        secondaryReaction.configured
+          ? `, secondaryCheck=${secondaryReaction.reacted}/${secondaryReaction.requested}`
+          : ', secondaryCheck=not-configured'
       ),
   );
 
@@ -3526,6 +3593,7 @@ async function restoreMediaId(
     restored,
     missing,
     failed,
+    secondaryReaction,
   };
 }
 
@@ -4401,7 +4469,12 @@ async function handleSkinReviewInteraction(interaction, client) {
             `• Associated media: **${restoreResult.total}**\n` +
             `• Restored: **${restoreResult.restored}**\n` +
             `• Missing/deleted: **${restoreResult.missing}**\n` +
-            `• Failed: **${restoreResult.failed}**\n\n` +
+            `• Failed: **${restoreResult.failed}**\n` +
+            (
+              restoreResult.secondaryReaction?.configured
+                ? `• Secondary ✔️: **${restoreResult.secondaryReaction.reacted}/${restoreResult.secondaryReaction.requested}**\n\n`
+                : '\n'
+            ) +
             'Every available ❌ reaction was removed and ✔️ was added back where required.',
           flags:
             MessageFlags.Ephemeral,
