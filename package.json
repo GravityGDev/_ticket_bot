@@ -13,6 +13,7 @@
     "node": ">=24.17.0"
   },
   "dependencies": {
+    "dejavu-fonts-ttf": "^2.37.3",
     "discord.js": "^14.27.0",
     "dotenv": "^16.4.7",
     "mongodb": "^7.5.0",
