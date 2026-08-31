@@ -1,3 +1,9 @@
+const {
+  configureRankFonts,
+} = require('./rank-font-runtime');
+
+configureRankFonts();
+
 const sharp = require('sharp');
 const {
   AttachmentBuilder,
@@ -634,14 +640,14 @@ async function renderRankCard(guild, member, periodKey) {
 
     <!-- name -->
     <text x="402" y="175"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="${nameFontSize}"
           font-weight="800"
           letter-spacing="1"
           fill="#ffffff">${displayName}</text>
 
     <text x="404" y="226"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="34"
           fill="#9ba9bc">${username}</text>
 
@@ -655,14 +661,14 @@ async function renderRankCard(guild, member, periodKey) {
 
     <text x="1322" y="137"
           text-anchor="middle"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="28"
           font-weight="800"
           fill="#ffffff">${period}</text>
 
     <!-- Level / rank -->
     <text x="404" y="320"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="58"
           font-weight="800">
       <tspan fill="url(#accentGradient)">LEVEL</tspan>
@@ -670,7 +676,7 @@ async function renderRankCard(guild, member, periodKey) {
     </text>
 
     <text x="406" y="370"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="34"
           fill="#adb8c8">
       XP ${xp.currentXp.toLocaleString()} / ${xp.requiredXp.toLocaleString()}
@@ -683,13 +689,13 @@ async function renderRankCard(guild, member, periodKey) {
           stroke-width="2"/>
 
     <text x="927" y="323"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="${isRankHidden ? 48 : 58}"
           font-weight="800"
           fill="#ffffff">${escapeXml(displayRank)}</text>
 
     <text x="927" y="370"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="30"
           font-weight="700"
           fill="#adb8c8">
@@ -732,7 +738,7 @@ async function renderRankCard(guild, member, periodKey) {
           stroke-opacity=".55"/>
 
     <text x="220" y="622"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="30"
           font-weight="800"
           fill="#35dbd4">${escapeXml(starText)}</text>
@@ -750,7 +756,7 @@ async function renderRankCard(guild, member, periodKey) {
           stroke-opacity=".55"/>
 
     <text x="220" y="716"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="30"
           font-weight="800"
           fill="${warningCount ? '#ffb65c' : '#78dda5'}">${escapeXml(warningText)}</text>
@@ -762,13 +768,13 @@ async function renderRankCard(guild, member, periodKey) {
 
     <!-- Performance XP -->
     <text x="94" y="823"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="26"
           letter-spacing="1"
           fill="#8291a7">PERFORMANCE XP</text>
 
     <text x="94" y="895"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="64"
           font-weight="800">
       <tspan fill="url(#accentGradient)">${xp.totalXp.toLocaleString()}</tspan>
@@ -810,12 +816,12 @@ async function renderRankCard(guild, member, periodKey) {
           stroke-linecap="round"/>
 
     <text x="724" y="589"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="24"
           font-weight="800"
           fill="#ffffff">${ticketStatLine1}</text>
     <text x="724" y="621"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="24"
           font-weight="800"
           fill="#ffffff">${ticketStatLine2}</text>
@@ -829,7 +835,7 @@ async function renderRankCard(guild, member, periodKey) {
 
     <text x="738" y="724"
           text-anchor="middle"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="68"
           font-weight="800"
           fill="#ffffff">${displayedTicketValue.toLocaleString()}</text>
@@ -864,12 +870,12 @@ async function renderRankCard(guild, member, periodKey) {
     <circle cx="966" cy="598" r="2.4" fill="#31d9dc"/>
 
     <text x="1006" y="589"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="23"
           font-weight="800"
           fill="#ffffff">${messageStatLine1}</text>
     <text x="1006" y="621"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="23"
           font-weight="800"
           fill="#ffffff">${messageStatLine2}</text>
@@ -883,7 +889,7 @@ async function renderRankCard(guild, member, periodKey) {
 
     <text x="1022" y="724"
           text-anchor="middle"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="68"
           font-weight="800"
           fill="#ffffff">${displayedMessageValue.toLocaleString()}</text>
@@ -916,12 +922,12 @@ async function renderRankCard(guild, member, periodKey) {
               stroke-linejoin="round"/>
 
     <text x="1290" y="589"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="22"
           font-weight="800"
           fill="#ffffff">ACTIVITY</text>
     <text x="1290" y="621"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="22"
           font-weight="800"
           fill="#ffffff">SCORE</text>
@@ -935,7 +941,7 @@ async function renderRankCard(guild, member, periodKey) {
 
     <text x="1307" y="724"
           text-anchor="middle"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="68"
           font-weight="800"
           fill="#ffffff">${score.toLocaleString()}</text>
@@ -974,13 +980,13 @@ async function renderRankCard(guild, member, periodKey) {
           stroke="#668cff" stroke-width="4"/>
 
     <text x="738" y="829"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="28"
           font-weight="800"
           fill="#ffffff">SCORING MODEL</text>
 
     <text x="738" y="868"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="25"
           fill="#aeb9c9">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}${escapeXml(manualOverrideLabel)}</text>
 
@@ -997,7 +1003,7 @@ async function renderRankCard(guild, member, periodKey) {
 
     <text x="768" y="966"
           text-anchor="middle"
-          font-family="Arial, Helvetica, sans-serif"
+          font-family="DejaVu Sans, sans-serif"
           font-size="28"
           font-weight="700"
           fill="#8f9db1">Snay.io</text>
