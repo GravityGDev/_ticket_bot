@@ -1,3 +1,4 @@
+const { createHash } = require('node:crypto');
 const { gzipSync } = require('node:zlib');
 const {
   ActionRowBuilder,
@@ -6184,6 +6185,192 @@ function isDiscordUploadTooLarge(error) {
   );
 }
 
+function isDiscordUploadTimeout(error) {
+  const code =
+    String(
+      error?.code ||
+      error?.cause?.code ||
+      '',
+    );
+
+  const name =
+    String(
+      error?.name ||
+      error?.cause?.name ||
+      '',
+    ).toLowerCase();
+
+  const message =
+    String(
+      error?.message ||
+      error?.cause?.message ||
+      '',
+    ).toLowerCase();
+
+  return (
+    code ===
+      '20' ||
+    code ===
+      'ETIMEDOUT' ||
+    code ===
+      'UND_ERR_CONNECT_TIMEOUT' ||
+    name ===
+      'aborterror' ||
+    message.includes(
+      'operation was aborted',
+    ) ||
+    message.includes(
+      'request aborted',
+    ) ||
+    message.includes(
+      'timed out',
+    ) ||
+    message.includes(
+      'timeout',
+    )
+  );
+}
+
+function isTransientDiscordUploadError(error) {
+  const code =
+    String(
+      error?.code ||
+      error?.cause?.code ||
+      '',
+    );
+
+  const message =
+    String(
+      error?.message ||
+      error?.cause?.message ||
+      '',
+    ).toLowerCase();
+
+  return (
+    isDiscordUploadTimeout(
+      error,
+    ) ||
+    code ===
+      'ECONNRESET' ||
+    code ===
+      'ECONNREFUSED' ||
+    code ===
+      'EAI_AGAIN' ||
+    code ===
+      'ENETUNREACH' ||
+    code ===
+      'UND_ERR_SOCKET' ||
+    message.includes(
+      'socket hang up',
+    ) ||
+    message.includes(
+      'fetch failed',
+    ) ||
+    message.includes(
+      'connection reset',
+    )
+  );
+}
+
+function makeTranscriptUploadNonce(transcriptId) {
+  return createHash(
+    'sha256',
+  )
+    .update(
+      String(
+        transcriptId ||
+        'unknown-transcript',
+      ),
+    )
+    .digest(
+      'hex',
+    )
+    .slice(
+      0,
+      24,
+    );
+}
+
+async function sendTranscriptArchiveAttempt({
+  logChannel,
+  buffer,
+  filename,
+  embed,
+  nonce,
+  attempts = 2,
+  compressed = false,
+}) {
+  let lastError =
+    null;
+
+  for (
+    let attempt =
+      1;
+    attempt <=
+      attempts;
+    attempt +=
+      1
+  ) {
+    try {
+      return await logChannel.send({
+        files: [
+          new AttachmentBuilder(
+            buffer,
+            {
+              name:
+                filename,
+            },
+          ),
+        ],
+        embeds: [
+          embed,
+        ],
+        allowedMentions: {
+          parse: [],
+        },
+
+        // Discord's nonce + enforceNonce support makes retries idempotent:
+        // if the first upload actually reached Discord but our REST request
+        // timed out locally, the retry returns the original message rather
+        // than creating a duplicate archive.
+        nonce,
+        enforceNonce:
+          true,
+      });
+    } catch (error) {
+      lastError =
+        error;
+
+      if (
+        !isTransientDiscordUploadError(
+          error,
+        ) ||
+        attempt >=
+          attempts
+      ) {
+        throw error;
+      }
+
+      console.warn(
+        `[TICKET TRANSCRIPT UPLOAD RETRY] ${compressed ? 'gzip' : 'html'} ` +
+          `attempt ${attempt}/${attempts} failed for ${filename}:`,
+        error?.message ||
+          error,
+      );
+
+      await delay(
+        1250 *
+          attempt,
+      );
+    }
+  }
+
+  throw lastError ||
+    new Error(
+      'Transcript upload failed without an error object.',
+    );
+}
+
 function getTranscriptArchiveFailureMessage(error) {
   const code =
     error?.transcriptArchiveCode ||
@@ -6226,6 +6413,13 @@ function getTranscriptArchiveFailureMessage(error) {
     return (
       'The generated transcript is too large for Discord to upload, even after compression. ' +
       'This usually happens when the ticket contains many large images.'
+    );
+  }
+
+  if (code === 'UPLOAD_TIMEOUT') {
+    return (
+      'The transcript upload timed out after automatic retry and compressed fallback. ' +
+      'The ticket was kept so no transcript data was lost. Please try Delete again in a moment.'
     );
   }
 
@@ -6540,86 +6734,81 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
   let logMessage;
   let uploadedFilename =
     artifact.filename;
-  let compressed = false;
+  let compressed =
+    false;
 
-  try {
-    logMessage = await logChannel.send({
-      files: [
-        new AttachmentBuilder(
-          htmlBuffer,
-          {
-            name:
-              artifact.filename,
-          },
-        ),
-      ],
-      embeds: [embed],
-      allowedMentions: {
-        parse: [],
+  const uploadNonce =
+    makeTranscriptUploadNonce(
+      artifact.integrity.transcriptId,
+    );
+
+  // Build the compressed fallback up front. Large self-contained transcripts
+  // can contain embedded image data and may hit discord.js' REST timeout
+  // before Discord returns a normal API response.
+  const gzipBuffer =
+    gzipSync(
+      htmlBuffer,
+      {
+        level:
+          9,
       },
+    );
+
+  const gzipFilename =
+    `${artifact.filename}.gz`;
+
+  // Prefer the compressed archive when the HTML is already several MiB or
+  // compression meaningfully reduces the payload. This avoids waiting for a
+  // large plain-HTML upload to time out before trying the smaller version.
+  const preferCompressed =
+    htmlBuffer.length >=
+      4 *
+        1024 *
+        1024 ||
+    gzipBuffer.length <=
+      Math.floor(
+        htmlBuffer.length *
+          0.85,
+      );
+
+  const compressedEmbed =
+    EmbedBuilder.from(
+      embed,
+    ).setFooter({
+      text:
+        `Final transcript • ${artifact.messages.length} messages • GZIP compressed`,
     });
-  } catch (error) {
-    if (
-      !isDiscordUploadTooLarge(
-        error,
-      )
-    ) {
-      throw transcriptArchiveError(
-        'DISCORD_UPLOAD',
-        error?.message ||
-          'Discord rejected the transcript upload.',
-        {
-          discordCode:
-            error?.code ||
-            error?.rawError?.code ||
-            null,
-        },
-      );
-    }
 
-    // Self-contained transcripts can become large because images are embedded
-    // directly in the HTML. Gzip usually reduces the base64/HTML overhead
-    // substantially while preserving every byte needed by /verify-transcript.
-    const gzipBuffer =
-      gzipSync(
-        htmlBuffer,
-        {
-          level: 9,
-        },
-      );
-
-    uploadedFilename =
-      `${artifact.filename}.gz`;
-    compressed = true;
-
+  if (
+    preferCompressed
+  ) {
     try {
       logMessage =
-        await logChannel.send({
-          files: [
-            new AttachmentBuilder(
-              gzipBuffer,
-              {
-                name:
-                  uploadedFilename,
-              },
-            ),
-          ],
-          embeds: [
-            EmbedBuilder.from(
-              embed,
-            ).setFooter({
-              text:
-                `Final transcript • ${artifact.messages.length} messages • GZIP compressed`,
-            }),
-          ],
-          allowedMentions: {
-            parse: [],
-          },
+        await sendTranscriptArchiveAttempt({
+          logChannel,
+          buffer:
+            gzipBuffer,
+          filename:
+            gzipFilename,
+          embed:
+            compressedEmbed,
+          nonce:
+            uploadNonce,
+          attempts:
+            3,
+          compressed:
+            true,
         });
-    } catch (gzipError) {
+
+      uploadedFilename =
+        gzipFilename;
+
+      compressed =
+        true;
+    } catch (error) {
       if (
         isDiscordUploadTooLarge(
-          gzipError,
+          error,
         )
       ) {
         throw transcriptArchiveError(
@@ -6634,17 +6823,165 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
         );
       }
 
+      if (
+        isDiscordUploadTimeout(
+          error,
+        )
+      ) {
+        throw transcriptArchiveError(
+          'UPLOAD_TIMEOUT',
+          'Transcript upload timed out after compressed retries.',
+          {
+            htmlBytes:
+              htmlBuffer.length,
+            gzipBytes:
+              gzipBuffer.length,
+            discordCode:
+              error?.code ||
+              error?.cause?.code ||
+              null,
+          },
+        );
+      }
+
       throw transcriptArchiveError(
         'DISCORD_UPLOAD',
-        gzipError?.message ||
+        error?.message ||
           'Discord rejected the compressed transcript upload.',
         {
           discordCode:
-            gzipError?.code ||
-            gzipError?.rawError?.code ||
+            error?.code ||
+            error?.rawError?.code ||
+            error?.cause?.code ||
             null,
         },
       );
+    }
+  } else {
+    try {
+      logMessage =
+        await sendTranscriptArchiveAttempt({
+          logChannel,
+          buffer:
+            htmlBuffer,
+          filename:
+            artifact.filename,
+          embed,
+          nonce:
+            uploadNonce,
+          attempts:
+            2,
+          compressed:
+            false,
+        });
+    } catch (error) {
+      const shouldTryCompressed =
+        isDiscordUploadTooLarge(
+          error,
+        ) ||
+        isTransientDiscordUploadError(
+          error,
+        );
+
+      if (
+        !shouldTryCompressed
+      ) {
+        throw transcriptArchiveError(
+          'DISCORD_UPLOAD',
+          error?.message ||
+            'Discord rejected the transcript upload.',
+          {
+            discordCode:
+              error?.code ||
+              error?.rawError?.code ||
+              error?.cause?.code ||
+              null,
+          },
+        );
+      }
+
+      console.warn(
+        `[TICKET TRANSCRIPT COMPRESSED FALLBACK] Plain HTML upload failed for ` +
+          `${artifact.filename}; retrying as GZIP.`,
+        error?.message ||
+          error,
+      );
+
+      try {
+        logMessage =
+          await sendTranscriptArchiveAttempt({
+            logChannel,
+            buffer:
+              gzipBuffer,
+            filename:
+              gzipFilename,
+            embed:
+              compressedEmbed,
+            nonce:
+              uploadNonce,
+            attempts:
+              3,
+            compressed:
+              true,
+          });
+
+        uploadedFilename =
+          gzipFilename;
+
+        compressed =
+          true;
+      } catch (gzipError) {
+        if (
+          isDiscordUploadTooLarge(
+            gzipError,
+          )
+        ) {
+          throw transcriptArchiveError(
+            'UPLOAD_TOO_LARGE',
+            'Transcript remained too large after GZIP compression.',
+            {
+              htmlBytes:
+                htmlBuffer.length,
+              gzipBytes:
+                gzipBuffer.length,
+            },
+          );
+        }
+
+        if (
+          isDiscordUploadTimeout(
+            gzipError,
+          )
+        ) {
+          throw transcriptArchiveError(
+            'UPLOAD_TIMEOUT',
+            'Transcript upload timed out after plain and compressed retries.',
+            {
+              htmlBytes:
+                htmlBuffer.length,
+              gzipBytes:
+                gzipBuffer.length,
+              discordCode:
+                gzipError?.code ||
+                gzipError?.cause?.code ||
+                null,
+            },
+          );
+        }
+
+        throw transcriptArchiveError(
+          'DISCORD_UPLOAD',
+          gzipError?.message ||
+            'Discord rejected the compressed transcript upload.',
+          {
+            discordCode:
+              gzipError?.code ||
+              gzipError?.rawError?.code ||
+              gzipError?.cause?.code ||
+              null,
+          },
+        );
+      }
     }
   }
 
@@ -6660,9 +6997,24 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
         .setURL(uploadedTranscript.url),
     );
 
-    await logMessage.edit({
-      components: [directLinkRow],
-    });
+    // The archive is already safely stored at this point. A transient failure
+    // while adding the convenience Direct Link button must never make the bot
+    // pretend the archive failed or keep the ticket unnecessarily.
+    await logMessage
+      .edit({
+        components: [
+          directLinkRow,
+        ],
+      })
+      .catch(
+        (error) => {
+          console.warn(
+            '[TICKET TRANSCRIPT DIRECT LINK EDIT WARNING]',
+            error?.message ||
+              error,
+          );
+        },
+      );
   }
 
   console.log(
