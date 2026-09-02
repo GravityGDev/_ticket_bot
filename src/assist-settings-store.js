@@ -8,6 +8,11 @@ function normalizeRoleId(value) {
   return /^\d+$/.test(roleId) ? roleId : null;
 }
 
+function normalizeRoleIds(value) {
+  const values = Array.isArray(value) ? value : [];
+  return [...new Set(values.map(normalizeRoleId).filter(Boolean))];
+}
+
 async function collection() {
   return (await getMongoDb()).collection(COLLECTION_NAME);
 }
@@ -20,14 +25,27 @@ function documentId(guildId) {
   return `${DOCUMENT_PREFIX}${id}`;
 }
 
-async function getAssistBypassRoleId(guildId) {
-  if (!guildId) return null;
+function rolesFromDocument(document) {
+  return [
+    ...new Set([
+      ...normalizeRoleIds(document?.roleIds),
+      normalizeRoleId(document?.roleId),
+    ].filter(Boolean)),
+  ];
+}
+
+async function getAssistBypassRoleIds(guildId) {
+  if (!guildId) return [];
 
   const document = await (await collection()).findOne({
     _id: documentId(guildId),
   });
 
-  return normalizeRoleId(document?.roleId);
+  return rolesFromDocument(document);
+}
+
+async function getAssistBypassRoleId(guildId) {
+  return (await getAssistBypassRoleIds(guildId))[0] || null;
 }
 
 async function setAssistBypassRole(guildId, roleId, updatedBy) {
@@ -36,35 +54,64 @@ async function setAssistBypassRole(guildId, roleId, updatedBy) {
     throw new Error('A valid role is required.');
   }
 
+  const existingRoleIds = await getAssistBypassRoleIds(guildId);
+  const roleIds = [...new Set([...existingRoleIds, normalizedRoleId])];
+
   await (await collection()).updateOne(
     { _id: documentId(guildId) },
     {
       $set: {
-        roleId: normalizedRoleId,
+        roleIds,
         updatedAt: new Date().toISOString(),
         updatedBy: String(updatedBy || '') || null,
+      },
+      $unset: {
+        roleId: '',
       },
     },
     { upsert: true },
   );
 
-  return normalizedRoleId;
+  return roleIds;
 }
 
-async function removeAssistBypassRole(guildId, roleId) {
+async function removeAssistBypassRole(guildId, roleId, updatedBy) {
   const normalizedRoleId = normalizeRoleId(roleId);
   if (!normalizedRoleId) return false;
 
-  const result = await (await collection()).deleteOne({
-    _id: documentId(guildId),
-    roleId: normalizedRoleId,
-  });
+  const existingRoleIds = await getAssistBypassRoleIds(guildId);
+  if (!existingRoleIds.includes(normalizedRoleId)) return false;
 
-  return result.deletedCount > 0;
+  const roleIds = existingRoleIds.filter((id) => id !== normalizedRoleId);
+  const settingsCollection = await collection();
+
+  if (!roleIds.length) {
+    await settingsCollection.deleteOne({
+      _id: documentId(guildId),
+    });
+    return true;
+  }
+
+  await settingsCollection.updateOne(
+    { _id: documentId(guildId) },
+    {
+      $set: {
+        roleIds,
+        updatedAt: new Date().toISOString(),
+        updatedBy: String(updatedBy || '') || null,
+      },
+      $unset: {
+        roleId: '',
+      },
+    },
+  );
+
+  return true;
 }
 
 module.exports = {
   getAssistBypassRoleId,
+  getAssistBypassRoleIds,
   setAssistBypassRole,
   removeAssistBypassRole,
 };

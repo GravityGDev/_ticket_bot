@@ -35,7 +35,7 @@ const {
   isBotDeveloper,
 } = require('./staff-role-hierarchy');
 const {
-  getAssistBypassRoleId,
+  getAssistBypassRoleIds,
 } = require('./assist-settings-store');
 const {
   TRANSCRIPT_INTEGRITY_SLOT,
@@ -792,19 +792,18 @@ async function isTicketAssistManager(member) {
     return true;
   }
 
-  const roleId =
-    await getAssistBypassRoleId(
+  const roleIds =
+    await getAssistBypassRoleIds(
       member?.guild?.id,
     ).catch((error) => {
       console.error(
         '[TICKET ASSIST BYPASS ROLE READ ERROR]',
         error,
       );
-      return null;
+      return [];
     });
 
-  return Boolean(
-    roleId &&
+  return roleIds.some((roleId) =>
     member?.roles?.cache?.has(
       roleId,
     ),

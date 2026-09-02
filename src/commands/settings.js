@@ -7,7 +7,7 @@ const {
   isBotDeveloper,
 } = require('../staff-role-hierarchy');
 const {
-  getAssistBypassRoleId,
+  getAssistBypassRoleIds,
   setAssistBypassRole,
   removeAssistBypassRole,
 } = require('../assist-settings-store');
@@ -72,20 +72,20 @@ module.exports = {
       );
 
       await interaction.editReply(
-        `✅ <@&${role.id}> can now bypass ticket Assist ownership checks and use every Assist function.`,
+        `✅ <@&${role.id}> has been added to the Assist bypass roles and can use every Assist function.`,
       );
       return;
     }
 
-    const configuredRoleId =
-      await getAssistBypassRoleId(
+    const configuredRoleIds =
+      await getAssistBypassRoleIds(
         interaction.guild.id,
       );
 
-    if (configuredRoleId !== role.id) {
+    if (!configuredRoleIds.includes(role.id)) {
       await interaction.editReply(
-        configuredRoleId
-          ? `❌ <@&${role.id}> is not the configured Assist bypass role. The current role is <@&${configuredRoleId}>.`
+        configuredRoleIds.length
+          ? `❌ <@&${role.id}> is not a configured Assist bypass role. Current roles: ${configuredRoleIds.map((id) => `<@&${id}>`).join(', ')}.`
           : '❌ No Assist bypass role is currently configured.',
       );
       return;
@@ -94,6 +94,7 @@ module.exports = {
     await removeAssistBypassRole(
       interaction.guild.id,
       role.id,
+      interaction.user.id,
     );
 
     await interaction.editReply(
