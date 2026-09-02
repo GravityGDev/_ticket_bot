@@ -35,6 +35,9 @@ const {
   isBotDeveloper,
 } = require('./staff-role-hierarchy');
 const {
+  getAssistBypassRoleId,
+} = require('./assist-settings-store');
+const {
   TRANSCRIPT_INTEGRITY_SLOT,
   signAndStoreTranscript,
 } = require('./transcript-integrity');
@@ -781,6 +784,30 @@ function isTicketAdministrator(member) {
       role.permissions.has(
         PermissionFlagsBits.Administrator,
       ),
+  );
+}
+
+async function isTicketAssistManager(member) {
+  if (isTicketAdministrator(member)) {
+    return true;
+  }
+
+  const roleId =
+    await getAssistBypassRoleId(
+      member?.guild?.id,
+    ).catch((error) => {
+      console.error(
+        '[TICKET ASSIST BYPASS ROLE READ ERROR]',
+        error,
+      );
+      return null;
+    });
+
+  return Boolean(
+    roleId &&
+    member?.roles?.cache?.has(
+      roleId,
+    ),
   );
 }
 
@@ -7491,12 +7518,12 @@ async function claimTicketUnlocked(
   // later UI side-effect failed. Administrators/developer/server owner bypass
   // that stale-control rejection and are taken straight into Assist.
   if (data.claimedById) {
-    const administrator =
-      isTicketAdministrator(
+    const assistManager =
+      await isTicketAssistManager(
         member,
       );
 
-    if (administrator) {
+    if (assistManager) {
       await interaction.deferReply({
         flags:
           MessageFlags.Ephemeral,
@@ -7526,7 +7553,7 @@ async function claimTicketUnlocked(
         interaction.channel,
         interaction.user.id,
         true,
-        `Administrator/developer Assist bypass for ${interaction.user.tag}`,
+        `Administrator/developer/configured-role Assist bypass for ${interaction.user.tag}`,
       ).catch((error) => {
         console.error(
           '[TICKET ADMIN CLAIM BYPASS PERMISSION ERROR]',
@@ -7549,7 +7576,7 @@ async function claimTicketUnlocked(
     await interaction.reply({
       content:
         `This ticket is already claimed by <@${data.claimedById}>. ` +
-        'The current claimer or an Administrator can use **Assist → Handover** if ownership needs to change.',
+        'The current claimer, an Administrator, or the configured Assist bypass role can use **Assist → Handover** if ownership needs to change.',
       flags:
         MessageFlags.Ephemeral,
       allowedMentions: {
@@ -7868,13 +7895,13 @@ async function assertCurrentTicketOwner(
       )
       .catch(() => null);
 
-  const administrator =
-    isTicketAdministrator(
+  const assistManager =
+    await isTicketAssistManager(
       member,
     );
 
   if (
-    !administrator &&
+    !assistManager &&
     String(
       data.claimedById ||
       '',
@@ -7888,7 +7915,7 @@ async function assertCurrentTicketOwner(
       {
         content:
           data.claimedById
-            ? `Only the current claimer <@${data.claimedById}> or an Administrator can manage **Assist**.`
+            ? `Only the current claimer <@${data.claimedById}>, an Administrator, or the configured Assist bypass role can manage **Assist**.`
             : 'This ticket must be claimed before Assist can be used.',
         allowedMentions: {
           parse: [],
@@ -7899,17 +7926,17 @@ async function assertCurrentTicketOwner(
     return null;
   }
 
-  // Admins can manage Assist, but a ticket still needs a real owner before
+  // Administrators and the configured bypass role can manage Assist, but a ticket still needs a real owner before
   // Add Staff / Handover has meaningful ownership context.
   if (
-    administrator &&
+    assistManager &&
     !data.claimedById
   ) {
     await respondAssistAccessDenied(
       interaction,
       {
         content:
-          'An Administrator can manage **Assist** after the ticket has been claimed.',
+          'An Administrator or the configured Assist bypass role can manage **Assist** after the ticket has been claimed.',
       },
     );
 
@@ -7946,7 +7973,7 @@ async function openAssistMenu(
       .catch(() => null);
 
   if (
-    isTicketAdministrator(
+    await isTicketAssistManager(
       actingMember,
     )
   ) {
@@ -7954,7 +7981,7 @@ async function openAssistMenu(
       interaction.channel,
       interaction.user.id,
       true,
-      `Administrator/developer Assist access repair for ${interaction.user.tag}`,
+      `Administrator/developer/configured-role Assist access repair for ${interaction.user.tag}`,
     ).catch((error) => {
       console.error(
         '[TICKET ADMIN ASSIST ACCESS REPAIR ERROR]',
