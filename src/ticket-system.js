@@ -47,6 +47,7 @@ const CLOSED_TICKET_NAME_PREFIX = 'closed-';
 const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
 const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
+const TICKET_ALERT_ROLE_ID = '950864708066476062';
 const REPORT_STAFF_PAGE_SIZE = 23;
 // 22 leaves room for Back + Next + Skip/Not sure inside Discord's 25-option limit.
 const MUTED_STAFF_PAGE_SIZE = 22;
@@ -3244,6 +3245,26 @@ async function createTicket(interaction, typeKey) {
         components: [],
       });
       return;
+    }
+
+    // This must be the first message in normal tickets so the staff alert is
+    // delivered before the ticket welcome and controls. Report Staff remains
+    // private and never pings the general ticket alert role.
+    if (!isReportStaff) {
+      await channel.send({
+        content:
+          `<@&${TICKET_ALERT_ROLE_ID}>`,
+        allowedMentions: {
+          roles: [
+            TICKET_ALERT_ROLE_ID,
+          ],
+        },
+      }).catch((error) => {
+        console.error(
+          '[TICKET ALERT ROLE PING ERROR]',
+          error,
+        );
+      });
     }
 
     try {
