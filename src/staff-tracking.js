@@ -800,7 +800,7 @@ function buildPointAdjustmentModal(
           : 'Message points (number or AUTO)',
       )
       .setPlaceholder(
-        'Example: 50  •  AUTO = use automatic scoring',
+        'Example: 50 or 0.5  •  AUTO = automatic',
       )
       .setStyle(TextInputStyle.Short)
       .setMinLength(1)
@@ -1321,29 +1321,17 @@ async function handleStaffTrackingInteraction(interaction) {
       if (
         rawValue.toLowerCase() !== 'auto'
       ) {
-        if (
-          !/^-?\d+$/.test(rawValue)
-        ) {
-          await interaction.followUp({
-            content:
-              'Enter a whole-number point value, or `AUTO` to return to automatic scoring.',
-            flags:
-              MessageFlags.Ephemeral,
-          });
-          return true;
-        }
-
         value =
           Number(rawValue);
 
         if (
-          !Number.isSafeInteger(value) ||
+          !Number.isFinite(value) ||
           value < 0 ||
           value > 10000000
         ) {
           await interaction.followUp({
             content:
-              'Points must be a whole number from **0** to **10,000,000**, or `AUTO`.',
+              'Points must be a number from **0** to **10,000,000**, or `AUTO`. Decimals such as `0.5` are allowed.',
             flags:
               MessageFlags.Ephemeral,
           });

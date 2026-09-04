@@ -593,7 +593,7 @@ async function setStaffPointOverride(
     value !==
       null &&
     (
-      !Number.isSafeInteger(
+      !Number.isFinite(
         value,
       ) ||
       value <

@@ -295,7 +295,7 @@ function buildPointsModal(settings) {
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setValue(String(settings.ticketClaimPoints))
-          .setPlaceholder('Example: 100')
+          .setPlaceholder('Example: 100 or 0.5')
           .setMaxLength(7),
       ),
       new ActionRowBuilder().addComponents(
@@ -305,7 +305,7 @@ function buildPointsModal(settings) {
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setValue(String(settings.trackedMessagePoints))
-          .setPlaceholder('Example: 1')
+          .setPlaceholder('Example: 1 or 0.5')
           .setMaxLength(7),
       ),
     );
@@ -314,9 +314,9 @@ function buildPointsModal(settings) {
 function parsePointSetting(value, label) {
   const parsed = Number(String(value || '').trim());
 
-  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 1_000_000) {
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1_000_000) {
     throw new Error(
-      `${label} must be a whole number between 0 and 1,000,000.`,
+      `${label} must be a number between 0 and 1,000,000. Decimals such as 0.5 are allowed.`,
     );
   }
 

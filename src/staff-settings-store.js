@@ -26,7 +26,7 @@ function uniqueSnowflakes(values) {
 
 function normalizePointValue(value, fallback) {
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 1_000_000) {
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1_000_000) {
     return fallback;
   }
   return parsed;
