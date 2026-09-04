@@ -979,6 +979,42 @@ function isTicketStaffMember(member) {
   );
 }
 
+async function wasTicketCreatedByStaff(
+  guild,
+  data,
+) {
+  if (
+    typeof data?.creatorWasStaff ===
+      'boolean'
+  ) {
+    return data.creatorWasStaff;
+  }
+
+  const creatorId =
+    String(
+      data?.creatorId ||
+      '',
+    );
+
+  if (!creatorId) {
+    return false;
+  }
+
+  const creatorMember =
+    guild.members.cache.get(
+      creatorId,
+    ) ||
+    (await guild.members
+      .fetch(
+        creatorId,
+      )
+      .catch(() => null));
+
+  return isTicketStaffMember(
+    creatorMember,
+  );
+}
+
 async function getTicketStaffMembers(
   guild,
   creatorId = null,
@@ -2521,6 +2557,7 @@ function getTicketData(channel) {
     number: numberMatch ? Number(numberMatch[1]) : null,
     typeKey,
     creatorId: creatorMatch[1],
+    creatorWasStaff: null,
     inGameIdStatus: igMatch?.[1]?.toLowerCase() || fallbackState.inGameIdStatus,
     youtubeStatus: ytMatch?.[1]?.toLowerCase() || fallbackState.youtubeStatus,
     staffSelectionStatus: fallbackState.staffSelectionStatus,
@@ -2555,6 +2592,10 @@ async function updateTicketTopic(
     number: next.number,
     typeKey: next.typeKey,
     creatorId: next.creatorId,
+    creatorWasStaff:
+      typeof next.creatorWasStaff === 'boolean'
+        ? next.creatorWasStaff
+        : null,
     claimedById: next.claimedById || null,
     claimHistory: Array.isArray(next.claimHistory)
       ? next.claimHistory
@@ -2639,6 +2680,10 @@ async function getLiveTicketData(channel) {
 
     const live = {
       ...base,
+      creatorWasStaff:
+        typeof stored.creatorWasStaff === 'boolean'
+          ? stored.creatorWasStaff
+          : base.creatorWasStaff,
       claimedById:
         stored.claimedById ??
         base.claimedById,
@@ -3005,24 +3050,30 @@ async function createTicket(interaction, typeKey) {
       typeKey
     ];
 
+  const creatorMember =
+    interaction.member?.roles?.cache
+      ? interaction.member
+      : guild.members.cache.get(
+          interaction.user.id,
+        ) ||
+        (await guild.members
+          .fetch(
+            interaction.user.id,
+          )
+          .catch(() => null));
+
+  const creatorWasStaff =
+    isTicketStaffMember(
+      creatorMember,
+    );
+
   if (
     selectedType
       ?.restrictedToAdministrators
   ) {
-    const member =
-      interaction.member ||
-      guild.members.cache.get(
-        interaction.user.id,
-      ) ||
-      (await guild.members
-        .fetch(
-          interaction.user.id,
-        )
-        .catch(() => null));
-
     if (
       !isTicketAdministrator(
-        member,
+        creatorMember,
       )
     ) {
       await interaction.editReply({
@@ -3201,6 +3252,7 @@ async function createTicket(interaction, typeKey) {
         number: ticketNumber,
         typeKey,
         creatorId: interaction.user.id,
+        creatorWasStaff,
         claimedById: null,
         claimHistory: [],
         assistStaffIds: [],
@@ -3247,6 +3299,7 @@ async function createTicket(interaction, typeKey) {
           typeKey,
           creatorId:
             interaction.user.id,
+          creatorWasStaff,
           claimedById:
             null,
           claimHistory: [],
@@ -7513,6 +7566,12 @@ async function claimTicketUnlocked(
     return;
   }
 
+  const creatorWasStaff =
+    await wasTicketCreatedByStaff(
+      interaction.guild,
+      data,
+    );
+
   // A stale Claim button can remain visible if an older claim committed but a
   // later UI side-effect failed. Administrators/developer/server owner bypass
   // that stale-control rejection and are taken straight into Assist.
@@ -7627,6 +7686,7 @@ async function claimTicketUnlocked(
           claimHistory,
           pendingHandover:
             null,
+          creatorWasStaff,
         },
         `Ticket claimed by ${interaction.user.tag}`,
       );
@@ -7680,6 +7740,7 @@ async function claimTicketUnlocked(
       data.typeKey
     ]?.awardsClaimPoints !==
       false &&
+    !creatorWasStaff &&
     String(
       interaction.user.id,
     ) !==
@@ -7719,6 +7780,10 @@ async function claimTicketUnlocked(
         );
       });
     }
+  } else if (creatorWasStaff) {
+    console.log(
+      `[TICKET CLAIM] Claim points skipped because ticket #${data.number} was created by a staff member.`,
+    );
   } else if (
     TICKET_TYPES[
       data.typeKey

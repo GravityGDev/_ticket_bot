@@ -259,6 +259,10 @@ function normalizeState(
       stringOrNull(
         value.creatorId,
       ),
+    creatorWasStaff:
+      typeof value.creatorWasStaff === 'boolean'
+        ? value.creatorWasStaff
+        : null,
     claimedById:
       stringOrNull(
         value.claimedById,
