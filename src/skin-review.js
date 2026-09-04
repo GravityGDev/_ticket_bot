@@ -587,8 +587,8 @@ async function reconcileBlacklistedMediaOnStartup(client) {
       continue;
     }
 
-    // Blacklisted media must contain no approve/check reaction at all,
-    // including the source bot's original ✔️ / ✅ reaction.
+    // Blacklisted media keeps the source bot's original approve reaction,
+    // while every approve/check reaction from other users is removed.
     // The bot then ensures ❌ is present.
     await rejectBlacklistedMessage(
       message,
@@ -791,20 +791,15 @@ async function rejectBlacklistedMessage(message) {
     throw new Error('The source media message no longer exists.');
   }
 
-  // A blacklisted ID must have NO approve/check reaction at all, including
-  // the original reaction created by SOURCE_MEDIA_BOT_ID.
+  // Keep only the source bot's original approve reaction. Removing users
+  // individually avoids deleting the protected bot reaction with the group.
   for (const reaction of message.reactions.cache.values()) {
     if (!isApproveReactionName(reaction.emoji.name)) continue;
 
-    await reaction.remove().catch(async (error) => {
-      console.error(
-        `[SKIN REVIEW] Could not remove entire ${reaction.emoji.name} reaction; ` +
-          'falling back to removing every reaction user:',
-        error,
-      );
-
-      await removeReactionUsers(reaction);
-    });
+    await removeReactionUsers(
+      reaction,
+      new Set([PROTECTED_REACTION_BOT_ID]),
+    );
   }
 
   // Ensure the blacklist rejection marker is present.
@@ -986,16 +981,12 @@ async function handleSkinReviewReactionAdd(reaction, user) {
   const blacklisted = await getBlacklistedIds(mediaIds);
   if (!blacklisted.size) return;
 
-  // Any ✔️ / ✅ added to a blacklisted media message is removed entirely,
-  // regardless of who added it — including SOURCE_MEDIA_BOT_ID.
-  await reaction.remove().catch(async (error) => {
-    console.error(
-      '[SKIN REVIEW BLACKLIST REACTION REMOVE ERROR]',
-      error,
-    );
-
-    await removeReactionUsers(reaction);
-  });
+  // Remove every user's approve reaction while preserving the source
+  // media bot's own reaction.
+  await removeReactionUsers(
+    reaction,
+    new Set([PROTECTED_REACTION_BOT_ID]),
+  );
 
   await message.react(REJECT_EMOJI).catch((error) => {
     console.error('[SKIN REVIEW BLACKLIST REJECT REACTION ERROR]', error);
