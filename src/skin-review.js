@@ -823,7 +823,8 @@ async function restoreUnblacklistedMessage(
     );
   }
 
-  // Restore = remove ALL reject reactions, then ensure ✔️ exists again.
+  // Keep the source media bot's neutral ❌ and remove every other
+  // reject vote individually.
   for (
     const reaction of
     message.reactions.cache.values()
@@ -836,24 +837,109 @@ async function restoreUnblacklistedMessage(
       continue;
     }
 
-    await reaction
-      .remove()
-      .catch(
-        async (error) => {
-          console.error(
-            `[SKIN RESTORE] Could not remove entire ${reaction.emoji.name} reaction; ` +
-              'falling back to removing reaction users:',
-            error,
-          );
-
-          await removeReactionUsers(
-            reaction,
-          );
-        },
-      );
+    await removeReactionUsers(
+      reaction,
+      new Set([PROTECTED_REACTION_BOT_ID]),
+    );
   }
 
-  const botApproveReaction =
+  const currentBotId =
+    String(
+      message.client.user.id,
+    );
+
+  let sourceBotApproveReaction =
+    null;
+
+  let currentBotIsOnSourceReaction =
+    false;
+
+  const strayCurrentBotReactions =
+    [];
+
+  for (
+    const reaction of
+    message.reactions.cache.values()
+  ) {
+    if (
+      !isApproveReactionName(
+        reaction.emoji.name,
+      )
+    ) {
+      continue;
+    }
+
+    const users =
+      await fetchAllReactionUsers(
+        reaction,
+      );
+
+    const userIds =
+      new Set(
+        users.map(
+          (user) =>
+            String(
+              user.id,
+            ),
+        ),
+      );
+
+    if (
+      userIds.has(
+        PROTECTED_REACTION_BOT_ID,
+      )
+    ) {
+      sourceBotApproveReaction =
+        reaction;
+
+      currentBotIsOnSourceReaction =
+        userIds.has(
+          currentBotId,
+        );
+    } else if (
+      userIds.has(
+        currentBotId,
+      )
+    ) {
+      strayCurrentBotReactions.push(
+        reaction,
+      );
+    }
+  }
+
+  // Repair older unblacklist results that placed our checkmark on a separate
+  // Unicode variant instead of the source bot's original reaction group.
+  if (sourceBotApproveReaction) {
+    for (
+      const reaction of
+      strayCurrentBotReactions
+    ) {
+      await reaction.users
+        .remove(
+          currentBotId,
+        )
+        .catch((error) => {
+          console.error(
+            '[SKIN RESTORE STRAY APPROVE REACTION REMOVE ERROR]',
+            error,
+          );
+        });
+    }
+
+    if (
+      !currentBotIsOnSourceReaction
+    ) {
+      await message.react(
+        sourceBotApproveReaction.emoji,
+      );
+    }
+
+    return;
+  }
+
+  // Legacy fallback for a message where the source bot's approve reaction is
+  // genuinely missing.
+  const currentBotApproveReaction =
     [
       ...message.reactions.cache.values(),
     ].find(
@@ -864,7 +950,7 @@ async function restoreUnblacklistedMessage(
         reaction.me,
     );
 
-  if (!botApproveReaction) {
+  if (!currentBotApproveReaction) {
     await message.react(
       APPROVE_EMOJI,
     );
