@@ -2780,6 +2780,31 @@ function createSearchIdModal() {
     );
 }
 
+function createRestoreIdModal(
+  page = 0,
+) {
+  return new ModalBuilder()
+    .setCustomId(
+      managerCustomId(
+        'restore-submit',
+        page,
+      ),
+    )
+    .setTitle('Restore All Media for ID')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('media_id')
+          .setLabel('Skin / Clan / Badge ID')
+          .setPlaceholder('6a5099b92064ec052cd0187b')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMinLength(24)
+          .setMaxLength(24),
+      ),
+    );
+}
+
 function createBlacklistModal({
   mediaId = '',
   page = 0,
@@ -2920,6 +2945,18 @@ async function buildBlacklistManagerPanel(
         .setEmoji('🔎')
         .setStyle(
           ButtonStyle.Primary,
+        ),
+      new ButtonBuilder()
+        .setCustomId(
+          managerCustomId(
+            'restore',
+            page,
+          ),
+        )
+        .setLabel('Restore ID')
+        .setEmoji('♻️')
+        .setStyle(
+          ButtonStyle.Success,
         ),
       new ButtonBuilder()
         .setCustomId(
@@ -3984,6 +4021,108 @@ async function handleSkinReviewInteraction(interaction, client) {
       }
 
       if (
+        managerAction === 'restore' &&
+        interaction.isButton()
+      ) {
+        await interaction.showModal(
+          createRestoreIdModal(
+            managerPage,
+          ),
+        );
+
+        return true;
+      }
+
+      if (
+        managerAction === 'restore-submit' &&
+        interaction.isModalSubmit()
+      ) {
+        const mediaId =
+          normalizeMediaId(
+            interaction.fields.getTextInputValue(
+              'media_id',
+            ),
+          );
+
+        await interaction.deferUpdate();
+
+        const blacklistRecord =
+          await getBlacklistRecord(
+            mediaId,
+          );
+
+        if (blacklistRecord) {
+          const manager =
+            await buildBlacklistManagerPanel(
+              managerPage,
+              {
+                notice:
+                  `🚫 \`${mediaId}\` is still blacklisted. UnBlacklist it before restoring its reactions.`,
+              },
+            );
+
+          await interaction.editReply(
+            manager.payload,
+          );
+
+          return true;
+        }
+
+        try {
+          const restoreResult =
+            await restoreMediaId(
+              client,
+              mediaId,
+              interaction.user.id,
+            );
+
+          const secondary =
+            restoreResult.secondaryReaction;
+
+          const secondarySummary =
+            secondary?.configured
+              ? `Connected bot: **${secondary.reacted}/${secondary.requested}** restored`
+              : 'Connected bot: **not configured**';
+
+          const manager =
+            await buildBlacklistManagerPanel(
+              managerPage,
+              {
+                notice:
+                  `♻️ **Restore complete for \`${mediaId}\`**\n` +
+                  `Primary bot: **${restoreResult.restored}/${restoreResult.total}** restored • ` +
+                  `Missing: **${restoreResult.missing}** • Failed: **${restoreResult.failed}**\n` +
+                  secondarySummary,
+              },
+            );
+
+          await interaction.editReply(
+            manager.payload,
+          );
+        } catch (error) {
+          console.error(
+            '[SKIN MANAGER BULK RESTORE ERROR]',
+            error,
+          );
+
+          const manager =
+            await buildBlacklistManagerPanel(
+              managerPage,
+              {
+                notice:
+                  `❌ Restore failed for \`${mediaId}\`: ${error?.message || 'Unknown error'}`,
+              },
+            );
+
+          await interaction.editReply(
+            manager.payload,
+          );
+        }
+
+        return true;
+      }
+
+      if (
         managerAction === 'search-submit' &&
         interaction.isModalSubmit()
       ) {
@@ -4100,7 +4239,7 @@ async function handleSkinReviewInteraction(interaction, client) {
               notice:
                 `✅ UnBlacklisted **${name}** | \`${selectedId}\`.\n` +
                 `♻️ Restored **${restoreResult?.restored ?? 0}/${restoreResult?.total ?? 0}** associated media item(s). ` +
-                'Removed ❌ and added ✔️ back.',
+                'Removed non-source ❌ reactions and restored ✔️ on the original reaction group.',
             },
           );
 
@@ -4477,7 +4616,7 @@ async function handleSkinReviewInteraction(interaction, client) {
         content:
           `♻️ **${mediaId} restored** — ` +
           `**${restoreResult?.restored ?? 0}/${restoreResult?.total ?? 0}** associated media item(s) repaired. ` +
-          'All available ❌ reactions were removed and ✔️ was added back.',
+          'Non-source ❌ reactions were removed and ✔️ was restored on the original reaction group.',
         flags:
           MessageFlags.Ephemeral,
         allowedMentions: {
@@ -4552,7 +4691,7 @@ async function handleSkinReviewInteraction(interaction, client) {
                 ? `• Secondary ✔️: **${restoreResult.secondaryReaction.reacted}/${restoreResult.secondaryReaction.requested}**\n\n`
                 : '\n'
             ) +
-            'Every available ❌ reaction was removed and ✔️ was added back where required.',
+            'Every non-source ❌ reaction was removed and ✔️ was restored on the original reaction group where required.',
           flags:
             MessageFlags.Ephemeral,
           allowedMentions: {
