@@ -3881,7 +3881,60 @@ async function closeTicket(interaction) {
         CLOSED_TICKET_NAME_PREFIX,
       )
   ) {
-    await interaction.editReply('This ticket is already closed.');
+    // A previous Close may have saved the closed state but been interrupted
+    // before its Transcript / Open / Delete controls were posted. Repair that
+    // partial state when staff press the still-visible Close button again.
+    const recentMessages =
+      await interaction.channel.messages
+        .fetch({
+          limit:
+            50,
+        })
+        .catch(() => null);
+
+    const existingClosedControls =
+      recentMessages?.find(
+        (message) =>
+          message.author?.id ===
+            interaction.client.user.id &&
+          messageHasButton(
+            message,
+            'ticket_delete',
+          ) &&
+          messageHasButton(
+            message,
+            'ticket_reopen',
+          ),
+      );
+
+    if (!existingClosedControls) {
+      await interaction.channel.send(
+        buildClosedTicketMessage(
+          data.closedById ||
+          interaction.user.id,
+        ),
+      );
+
+      interaction.message
+        .edit({
+          components: [],
+        })
+        .catch((error) => {
+          console.error(
+            '[TICKET CLOSE RECOVERY CONTROL DISABLE ERROR]',
+            error,
+          );
+        });
+
+      await interaction.editReply(
+        '✅ Closed ticket controls restored. You can now use **Delete**.',
+      );
+      return;
+    }
+
+    await interaction.editReply(
+      'This ticket is already closed. Use the **Delete** button in the closed ticket controls.',
+    );
     return;
   }
 
