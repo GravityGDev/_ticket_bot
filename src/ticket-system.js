@@ -4233,9 +4233,6 @@ async function handleTicketRenameModal(
       MessageFlags.Ephemeral,
   });
 
-  let stateUpdated =
-    false;
-
   try {
     await updateTicketTopic(
       interaction.channel,
@@ -4247,51 +4244,34 @@ async function handleTicketRenameModal(
       `Ticket renamed by ${interaction.user.tag}`,
     );
 
-    stateUpdated =
-      true;
-
-    await interaction.channel.setName(
+    // Channel renames share Discord's heavily rate-limited Modify Channel
+    // route. Queue the request in the existing per-ticket worker so this modal
+    // can respond immediately instead of remaining on "thinking".
+    requestTicketChannelRename(
+      interaction.channel,
       newName,
       `Ticket renamed by ${interaction.user.tag}`,
     );
 
     await interaction.editReply({
       content:
-        `✅ Ticket renamed to **${newName}**.`,
+        `✅ Ticket rename queued as **${newName}**. Discord will apply it shortly.`,
       allowedMentions: {
         parse: [],
       },
     });
 
     console.log(
-      `[TICKET RENAME] ${interaction.channelId} renamed to ${newName} by ${interaction.user.id}.`,
+      `[TICKET RENAME QUEUED] ${interaction.channelId} -> ${newName} by ${interaction.user.id}.`,
     );
   } catch (error) {
     console.error(
-      '[TICKET RENAME ERROR]',
+      '[TICKET RENAME STATE ERROR]',
       error,
     );
 
-    if (stateUpdated) {
-      await updateTicketTopic(
-        interaction.channel,
-        context.data,
-        {
-          customChannelName:
-            context.data.customChannelName ||
-            null,
-        },
-        `Rolled back failed ticket rename by ${interaction.user.tag}`,
-      ).catch((rollbackError) => {
-        console.error(
-          '[TICKET RENAME STATE ROLLBACK ERROR]',
-          rollbackError,
-        );
-      });
-    }
-
     await interaction.editReply(
-      'I could not rename this ticket. Check my **Manage Channels** permission and try again.',
+      'I could not save this ticket rename. Please try again.',
     ).catch(() => {});
   }
 }
