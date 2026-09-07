@@ -24,17 +24,14 @@ const pendingChannelWrites = new Map();
 function isReportStaffChannel(channel) {
   if (!channel || !channel.guild) return false;
 
-  // Primary detection: Report Staff tickets always live in the dedicated
-  // Report Staff category. This remains available on the deleted channel
-  // object delivered with ChannelDelete.
-  if (String(channel.parentId || '') === REPORT_STAFF_CATEGORY_ID) {
-    return true;
-  }
-
-  // Fallback for any older/moved Report Staff ticket.
+  // A category can contain non-ticket channels. Only the immutable ticket
+  // topic marker proves this is a genuine Report Staff ticket. The topic is
+  // also retained on ChannelDelete events and survives staff channel renames.
   return Boolean(
     typeof channel.topic === 'string' &&
-      channel.topic.includes('Type=report_staff'),
+      /(?:^|\|)\s*Type=report_staff(?:\s*\||$)/i.test(
+        channel.topic,
+      ),
   );
 }
 
@@ -217,10 +214,6 @@ async function recordMessage(message) {
     { upsert: true },
   );
 
-  console.log(
-    `[REPORT STAFF TRACKER] Saved message ${snapshot.messageId} ` +
-      `from ${snapshot.authorUsername} in ${snapshot.channelId}.`,
-  );
 }
 
 async function recordMessageUpdate(oldMessage, newMessage) {
