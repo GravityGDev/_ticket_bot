@@ -9,8 +9,6 @@ const {
 const { getMongoDb } = require('./database');
 const { getTicketState } = require('./ticket-store');
 
-const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
-
 // This is a USER ID, not a guild channel ID.
 // Manual-deletion transcripts are sent directly to this user's DMs.
 const REPORT_STAFF_SECURITY_USER_ID =
