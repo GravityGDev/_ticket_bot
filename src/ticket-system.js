@@ -2644,14 +2644,35 @@ async function updateTicketTopic(
 
 
 async function getLiveTicketData(channel) {
+  if (
+    !channel ||
+    channel.type !==
+      ChannelType.GuildText
+  ) {
+    return null;
+  }
+
+  const channelName =
+    String(
+      channel.name ||
+      '',
+    ).toLowerCase();
+
+  if (
+    !channelName.startsWith(
+      TICKET_NAME_PREFIX,
+    ) &&
+    !channelName.startsWith(
+      CLOSED_TICKET_NAME_PREFIX,
+    )
+  ) {
+    return null;
+  }
+
   const base =
     getTicketData(
       channel,
     );
-
-  if (!base) {
-    return null;
-  }
 
   const cached =
     getLiveTicketStateCache(
@@ -2659,10 +2680,12 @@ async function getLiveTicketData(channel) {
     );
 
   if (cached) {
-    return {
-      ...base,
-      ...cached,
-    };
+    return base
+      ? {
+          ...base,
+          ...cached,
+        }
+      : cached;
   }
 
   try {
@@ -2670,6 +2693,13 @@ async function getLiveTicketData(channel) {
       await getTicketState(
         channel.id,
       );
+
+    if (
+      !base &&
+      !stored?.creatorId
+    ) {
+      return null;
+    }
 
     if (!stored) {
       setLiveTicketStateCache(
@@ -2679,62 +2709,109 @@ async function getLiveTicketData(channel) {
       return base;
     }
 
+    // Older tickets can have a valid MongoDB record while their historical
+    // topic is missing or no longer matches the newest topic format. Treat the
+    // stored creator ID as authoritative so their existing Close / Claim
+    // buttons keep working after upgrades.
+    const numberFromName =
+      channelName.match(
+        /^(?:ticket-|closed-)(\d+)/i,
+      );
+
+    const typeKey =
+      stored.typeKey ||
+      base?.typeKey ||
+      'bug_report';
+
+    const fallbackState =
+      initialSubmissionState(
+        typeKey,
+      );
+
+    const resolvedBase =
+      base || {
+        number:
+          stored.number ??
+          (numberFromName
+            ? Number(
+                numberFromName[1],
+              )
+            : null),
+        typeKey,
+        creatorId:
+          String(
+            stored.creatorId,
+          ),
+        creatorWasStaff:
+          null,
+        ...fallbackState,
+        claimedById:
+          null,
+      };
+
     const live = {
-      ...base,
+      ...resolvedBase,
+      number:
+        stored.number ??
+        resolvedBase.number,
+      typeKey,
+      creatorId:
+        stored.creatorId ||
+        resolvedBase.creatorId,
       creatorWasStaff:
         typeof stored.creatorWasStaff === 'boolean'
           ? stored.creatorWasStaff
-          : base.creatorWasStaff,
+          : resolvedBase.creatorWasStaff,
       claimedById:
         stored.claimedById ??
-        base.claimedById,
+        resolvedBase.claimedById,
       claimHistory:
         Array.isArray(stored.claimHistory) &&
         stored.claimHistory.length
           ? stored.claimHistory
-          : base.claimHistory,
+          : resolvedBase.claimHistory,
       assistStaffIds:
         Array.isArray(stored.assistStaffIds)
           ? stored.assistStaffIds.map(String)
-          : base.assistStaffIds,
+          : resolvedBase.assistStaffIds,
       assistHistory:
         Array.isArray(stored.assistHistory)
           ? stored.assistHistory
-          : base.assistHistory,
+          : resolvedBase.assistHistory,
       handoverHistory:
         Array.isArray(stored.handoverHistory)
           ? stored.handoverHistory
-          : base.handoverHistory,
+          : resolvedBase.handoverHistory,
       pendingHandover:
         stored.pendingHandover ||
-        base.pendingHandover,
+        resolvedBase.pendingHandover,
       controlMessageId:
         stored.controlMessageId ||
-        base.controlMessageId,
+        resolvedBase.controlMessageId,
       inGameIdStatus:
         stored.inGameIdStatus ||
-        base.inGameIdStatus,
+        resolvedBase.inGameIdStatus,
       youtubeStatus:
         stored.youtubeStatus ||
-        base.youtubeStatus,
+        resolvedBase.youtubeStatus,
       staffSelectionStatus:
         stored.staffSelectionStatus ||
-        base.staffSelectionStatus,
+        resolvedBase.staffSelectionStatus,
       reportedStaffId:
         stored.reportedStaffId ||
-        base.reportedStaffId,
+        resolvedBase.reportedStaffId,
       unmuteDecision:
         stored.unmuteDecision ||
-        base.unmuteDecision,
+        resolvedBase.unmuteDecision,
       unmuteDecisionBy:
         stored.unmuteDecisionBy ||
-        base.unmuteDecisionBy,
+        resolvedBase.unmuteDecisionBy,
       closedById:
         stored.closedById ||
-        base.closedById,
+        resolvedBase.closedById,
       closedAt:
         stored.closedAt ||
-        base.closedAt,
+        resolvedBase.closedAt,
     };
 
     setLiveTicketStateCache(
@@ -3653,7 +3730,17 @@ async function closeTicket(interaction) {
     flags: MessageFlags.Ephemeral,
   });
 
-  if (isTicketClosedForCreator(interaction.channel, data.creatorId)) {
+  if (
+    data.closedAt ||
+    String(
+      interaction.channel.name ||
+      '',
+    )
+      .toLowerCase()
+      .startsWith(
+        CLOSED_TICKET_NAME_PREFIX,
+      )
+  ) {
     await interaction.editReply('This ticket is already closed.');
     return;
   }
@@ -3733,6 +3820,20 @@ async function closeTicket(interaction) {
     // Send the controls BEFORE requesting the rename. This keeps close/reopen
     // instant even when Discord queues repeated channel-name changes.
     await interaction.channel.send(buildClosedTicketMessage(interaction.user.id));
+
+    // Disable the open-ticket controls that were clicked. Without this, an
+    // older Claim / Close row can remain active beside the new closed controls.
+    await interaction.message
+      .edit({
+        components: [],
+      })
+      .catch((error) => {
+        console.error(
+          '[TICKET CLOSE STALE CONTROL DISABLE ERROR]',
+          error,
+        );
+      });
+
     await interaction.editReply('✅ Ticket closed.');
 
     requestTicketChannelRename(
@@ -7602,7 +7703,18 @@ async function claimTicketUnlocked(
         member,
       );
 
-    if (assistManager) {
+    const isCurrentClaimer =
+      String(
+        data.claimedById,
+      ) ===
+      String(
+        interaction.user.id,
+      );
+
+    if (
+      assistManager ||
+      isCurrentClaimer
+    ) {
       await interaction.deferReply({
         flags:
           MessageFlags.Ephemeral,
