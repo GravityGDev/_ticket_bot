@@ -1704,6 +1704,18 @@ async function restoreOneTicketRuntimeState(
     };
   }
 
+  // Refresh existing open ticket messages during startup so controls added by
+  // newer deployments (including Rename) also appear on older active tickets.
+  await refreshTicketControlMessage(
+    channel,
+    live,
+  ).catch((error) => {
+    console.error(
+      `[TICKET REBOOT CONTROL REFRESH ERROR] ${channel.id}`,
+      error,
+    );
+  });
+
   const speakerIds =
     [
       ...new Set([
