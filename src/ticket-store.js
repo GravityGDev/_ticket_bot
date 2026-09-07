@@ -306,6 +306,10 @@ function normalizeState(
       stringOrNull(
         value.controlMessageId,
       ),
+    customChannelName:
+      stringOrNull(
+        value.customChannelName,
+      ),
     inGameIdStatus:
       stringOrNull(
         value.inGameIdStatus,
