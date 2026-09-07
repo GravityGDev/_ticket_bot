@@ -358,6 +358,92 @@ function getTicketButtons(
   return row;
 }
 
+function getTicketRenameButtonRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('ticket_rename')
+      .setLabel('Rename')
+      .setEmoji('✏️')
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function rowHasTicketRenameButton(row) {
+  return Boolean(
+    row?.components?.some(
+      (component) =>
+        component.customId ===
+        'ticket_rename',
+    ),
+  );
+}
+
+function normalizeTicketChannelLabel(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/^(?:ticket-|closed-)\d+[\s_-]*/i, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+function getTicketChannelLabel(channel, data) {
+  const currentName =
+    String(
+      channel?.name ||
+      '',
+    );
+
+  const existing =
+    currentName.match(
+      /^(?:ticket-|closed-)\d+[\s_-]*(.*)$/i,
+    )?.[1];
+
+  return (
+    normalizeTicketChannelLabel(
+      existing,
+    ) ||
+    normalizeTicketChannelLabel(
+      TICKET_TYPES[data?.typeKey]?.slug ||
+      'support',
+    )
+  );
+}
+
+function buildTicketChannelName(
+  prefix,
+  ticketNumber,
+  label,
+) {
+  const safeNumber =
+    Number.isFinite(
+      Number(
+        ticketNumber,
+      ),
+    )
+      ? Number(
+          ticketNumber,
+        )
+      : 0;
+
+  const safeLabel =
+    normalizeTicketChannelLabel(
+      label,
+    ) ||
+    'support';
+
+  return (
+    `${prefix}${safeNumber}_${safeLabel}`
+      .slice(
+        0,
+        100,
+      )
+  );
+}
+
+
 function getClosedTicketButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -2099,9 +2185,16 @@ async function refreshClickedTicketControlMessage(
   }
 
   const remainingRows =
-    message.components.slice(
-      1,
-    );
+    message.components
+      .slice(
+        1,
+      )
+      .filter(
+        (row) =>
+          !rowHasTicketRenameButton(
+            row,
+          ),
+      );
 
   await message.edit({
     components: [
@@ -2111,6 +2204,7 @@ async function refreshClickedTicketControlMessage(
         data.claimedById,
       ),
       ...remainingRows,
+      getTicketRenameButtonRow(),
     ],
   });
 
@@ -2143,7 +2237,14 @@ async function refreshTicketControlMessage(
   }
 
   const remainingRows =
-    message.components.slice(1);
+    message.components
+      .slice(1)
+      .filter(
+        (row) =>
+          !rowHasTicketRenameButton(
+            row,
+          ),
+      );
 
   await message.edit({
     components: [
@@ -2153,6 +2254,7 @@ async function refreshTicketControlMessage(
         data.claimedById,
       ),
       ...remainingRows,
+      getTicketRenameButtonRow(),
     ],
   });
 }
@@ -2210,6 +2312,10 @@ function buildTicketWelcome(ticketNumber, creator, typeKey, options = {}) {
         options.reportStaffMembers || [],
         0,
       ),
+    );
+  } else {
+    components.push(
+      getTicketRenameButtonRow(),
     );
   }
 
@@ -3747,7 +3853,16 @@ async function closeTicket(interaction) {
 
   const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
   const ticketNumber = data.number ?? 0;
-  const closedName = `${CLOSED_TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
+  const closedName =
+    buildTicketChannelName(
+      CLOSED_TICKET_NAME_PREFIX,
+      ticketNumber,
+      getTicketChannelLabel(
+        interaction.channel,
+        data,
+      ) ||
+        type.slug,
+    );
 
   try {
     const creatorMember =
@@ -3868,6 +3983,254 @@ function isStaffForTicket(
   );
 }
 
+async function getTicketRenameContext(
+  interaction,
+) {
+  const data =
+    await getLiveTicketData(
+      interaction.channel,
+    );
+
+  if (!data) {
+    return {
+      error:
+        'This Rename control is no longer attached to a ticket.',
+    };
+  }
+
+  if (
+    data.typeKey ===
+      'report_staff'
+  ) {
+    return {
+      error:
+        'Report Staff tickets cannot be renamed.',
+    };
+  }
+
+  if (
+    data.closedAt ||
+    String(
+      interaction.channel?.name ||
+      '',
+    )
+      .toLowerCase()
+      .startsWith(
+        CLOSED_TICKET_NAME_PREFIX,
+      )
+  ) {
+    return {
+      error:
+        'Reopen this ticket before renaming it.',
+    };
+  }
+
+  const member =
+    interaction.member?.roles?.cache
+      ? interaction.member
+      : await interaction.guild.members
+          .fetch(
+            interaction.user.id,
+          )
+          .catch(() => null);
+
+  if (
+    !isStaffForTicket(
+      interaction,
+      member,
+    )
+  ) {
+    return {
+      error:
+        'Only a member of the staff team can rename tickets.',
+    };
+  }
+
+  return {
+    data,
+    member,
+  };
+}
+
+async function openTicketRenameModal(
+  interaction,
+) {
+  const context =
+    await getTicketRenameContext(
+      interaction,
+    );
+
+  if (context.error) {
+    await interaction.reply({
+      content:
+        context.error,
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const input =
+    new TextInputBuilder()
+      .setCustomId(
+        'ticket_rename_value',
+      )
+      .setLabel(
+        'New ticket name',
+      )
+      .setPlaceholder(
+        'Example: payment-refund',
+      )
+      .setStyle(
+        TextInputStyle.Short,
+      )
+      .setRequired(
+        true,
+      )
+      .setMinLength(
+        1,
+      )
+      .setMaxLength(
+        80,
+      )
+      .setValue(
+        getTicketChannelLabel(
+          interaction.channel,
+          context.data,
+        ),
+      );
+
+  const modal =
+    new ModalBuilder()
+      .setCustomId(
+        `ticket_rename_modal:${interaction.channel.id}`,
+      )
+      .setTitle(
+        'Rename Ticket',
+      )
+      .addComponents(
+        new ActionRowBuilder()
+          .addComponents(
+            input,
+          ),
+      );
+
+  await interaction.showModal(
+    modal,
+  );
+}
+
+async function handleTicketRenameModal(
+  interaction,
+) {
+  const expectedChannelId =
+    interaction.customId.split(
+      ':',
+    )[1];
+
+  if (
+    expectedChannelId !==
+      interaction.channelId
+  ) {
+    await interaction.reply({
+      content:
+        'This Rename form belongs to a different ticket.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const context =
+    await getTicketRenameContext(
+      interaction,
+    );
+
+  if (context.error) {
+    await interaction.reply({
+      content:
+        context.error,
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const label =
+    normalizeTicketChannelLabel(
+      interaction.fields.getTextInputValue(
+        'ticket_rename_value',
+      ),
+    );
+
+  if (!label) {
+    await interaction.reply({
+      content:
+        'Enter a ticket name containing at least one letter or number.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const newName =
+    buildTicketChannelName(
+      TICKET_NAME_PREFIX,
+      context.data.number,
+      label,
+    );
+
+  if (
+    interaction.channel.name ===
+      newName
+  ) {
+    await interaction.reply({
+      content:
+        `The ticket is already named **${newName}**.`,
+      flags:
+        MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
+    });
+    return;
+  }
+
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
+
+  try {
+    await interaction.channel.setName(
+      newName,
+      `Ticket renamed by ${interaction.user.tag}`,
+    );
+
+    await interaction.editReply({
+      content:
+        `✅ Ticket renamed to **${newName}**.`,
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    console.log(
+      `[TICKET RENAME] ${interaction.channelId} renamed to ${newName} by ${interaction.user.id}.`,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET RENAME ERROR]',
+      error,
+    );
+
+    await interaction.editReply(
+      'I could not rename this ticket. Check my **Manage Channels** permission and try again.',
+    ).catch(() => {});
+  }
+}
+
+
 async function reopenTicket(interaction) {
   const baseData = getTicketData(interaction.channel);
   if (!baseData || !messageHasButton(interaction.message, 'ticket_reopen')) {
@@ -3924,7 +4287,16 @@ async function reopenTicket(interaction) {
   const data = (await getLiveTicketData(interaction.channel)) || baseData;
   const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
   const ticketNumber = data.number ?? 0;
-  const openName = `${TICKET_NAME_PREFIX}${ticketNumber}_${type.slug}`.slice(0, 100);
+  const openName =
+    buildTicketChannelName(
+      TICKET_NAME_PREFIX,
+      ticketNumber,
+      getTicketChannelLabel(
+        interaction.channel,
+        data,
+      ) ||
+        type.slug,
+    );
   const creatorCanSend = shouldCreatorBeUnlocked(data);
 
   console.log(
@@ -10441,6 +10813,7 @@ async function selectMutedSuspectedStaff(interaction) {
           staffMembers,
           Number(rawPage) || 0,
         ),
+        getTicketRenameButtonRow(),
       ],
     });
     return;
@@ -10469,6 +10842,7 @@ async function selectMutedSuspectedStaff(interaction) {
             creatorId,
             data.inGameIdStatus === 'done',
           ),
+          getTicketRenameButtonRow(),
         ],
       });
 
@@ -10527,6 +10901,7 @@ async function selectMutedSuspectedStaff(interaction) {
           creatorId,
           data.inGameIdStatus === 'done',
         ),
+        getTicketRenameButtonRow(),
       ],
     });
 
@@ -10974,6 +11349,8 @@ function isTicketChannelScopedInteraction(
       customId ===
         'ticket_role' ||
       customId ===
+        'ticket_rename' ||
+      customId ===
         'ticket_unmute_approve' ||
       customId ===
         'ticket_unmute_reject' ||
@@ -11143,6 +11520,7 @@ async function handleTicketInteraction(interaction) {
       return acceptTicketHandover(interaction);
     }
     if (interaction.customId === 'ticket_role') return openRoleMenu(interaction);
+    if (interaction.customId === 'ticket_rename') return openTicketRenameModal(interaction);
     if (interaction.customId === 'ticket_unmute_approve') {
       return handleUnmuteDecision(interaction, 'approved');
     }
@@ -11195,6 +11573,9 @@ async function handleTicketInteraction(interaction) {
   }
 
   if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith('ticket_rename_modal:')) {
+      return handleTicketRenameModal(interaction);
+    }
     if (interaction.customId.startsWith('ticket_ingame_id_modal:')) {
       return handleInGameIdModal(interaction);
     }
