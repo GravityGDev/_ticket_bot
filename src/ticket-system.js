@@ -386,7 +386,7 @@ function normalizeTicketChannelLabel(value) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 80);
+    .slice(0, 100);
 }
 
 function getTicketChannelLabel(channel, data) {
@@ -396,13 +396,19 @@ function getTicketChannelLabel(channel, data) {
       '',
     );
 
-  const existing =
+  const prefixedMatch =
     currentName.match(
       /^(?:ticket-|closed-)\d+[\s_-]*(.*)$/i,
-    )?.[1];
+    );
+
+  const existing =
+    prefixedMatch
+      ? prefixedMatch[1]
+      : currentName;
 
   return (
     normalizeTicketChannelLabel(
+      data?.customChannelName ||
       existing,
     ) ||
     normalizeTicketChannelLabel(
@@ -2636,6 +2642,7 @@ function initialSubmissionState(typeKey) {
     handoverHistory: [],
     pendingHandover: null,
     controlMessageId: null,
+    customChannelName: null,
   };
 }
 
@@ -2654,11 +2661,9 @@ function makeTicketTopic(ticketNumber, typeKey, creatorId) {
 
 function getTicketData(channel) {
   if (!channel || channel.type !== ChannelType.GuildText) return null;
-  if (
-    !channel.name.startsWith(TICKET_NAME_PREFIX) &&
-    !channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)
-  ) return null;
 
+  // The immutable ticket topic is the identity marker. Staff-renamed tickets
+  // no longer need to retain ticket-{number}_ in their visible channel name.
   const topic = channel.topic || '';
   const numberMatch = topic.match(/Ticket #(\d+)/i);
   const typeMatch = topic.match(/(?:^|\|)\s*Type=([a-z_]+)/i);
@@ -2667,7 +2672,12 @@ function getTicketData(channel) {
   const ytMatch = topic.match(/(?:^|\|)\s*YT=(pending|done|na)/i);
   const claimedMatch = topic.match(/Ticket claimed by <@!?(\d+)>/i);
 
-  if (!creatorMatch) return null;
+  if (
+    !creatorMatch ||
+    !numberMatch
+  ) {
+    return null;
+  }
 
   const typeKey = typeMatch?.[1] || 'bug_report';
   const fallbackState = initialSubmissionState(typeKey);
@@ -2692,6 +2702,7 @@ function getTicketData(channel) {
     handoverHistory: fallbackState.handoverHistory,
     pendingHandover: fallbackState.pendingHandover,
     controlMessageId: fallbackState.controlMessageId,
+    customChannelName: fallbackState.customChannelName,
   };
 }
 
@@ -2730,6 +2741,7 @@ async function updateTicketTopic(
       : [],
     pendingHandover: next.pendingHandover || null,
     controlMessageId: next.controlMessageId || null,
+    customChannelName: next.customChannelName || null,
     inGameIdStatus: next.inGameIdStatus,
     youtubeStatus: next.youtubeStatus,
     staffSelectionStatus: next.staffSelectionStatus,
@@ -2776,16 +2788,13 @@ async function getLiveTicketData(channel) {
       '',
     ).toLowerCase();
 
-  if (
-    !channelName.startsWith(
+  const looksLikeLegacyTicketName =
+    channelName.startsWith(
       TICKET_NAME_PREFIX,
-    ) &&
-    !channelName.startsWith(
+    ) ||
+    channelName.startsWith(
       CLOSED_TICKET_NAME_PREFIX,
-    )
-  ) {
-    return null;
-  }
+    );
 
   const base =
     getTicketData(
@@ -2804,6 +2813,16 @@ async function getLiveTicketData(channel) {
           ...cached,
         }
       : cached;
+  }
+
+  // Avoid a MongoDB read for every ordinary server message. A renamed ticket
+  // is recognized by its immutable topic; prefix-only legacy tickets may still
+  // fall back to their stored state.
+  if (
+    !base &&
+    !looksLikeLegacyTicketName
+  ) {
+    return null;
   }
 
   try {
@@ -2906,6 +2925,9 @@ async function getLiveTicketData(channel) {
       controlMessageId:
         stored.controlMessageId ||
         resolvedBase.controlMessageId,
+      customChannelName:
+        stored.customChannelName ||
+        resolvedBase.customChannelName,
       inGameIdStatus:
         stored.inGameIdStatus ||
         resolvedBase.inGameIdStatus,
@@ -4103,7 +4125,7 @@ async function openTicketRenameModal(
         1,
       )
       .setMaxLength(
-        80,
+        100,
       )
       .setValue(
         getTicketChannelLabel(
@@ -4185,12 +4207,10 @@ async function handleTicketRenameModal(
     return;
   }
 
+  // The staff input becomes the complete visible channel name. Ticket
+  // identity remains safely stored in the immutable topic and MongoDB.
   const newName =
-    buildTicketChannelName(
-      TICKET_NAME_PREFIX,
-      context.data.number,
-      label,
-    );
+    label;
 
   if (
     interaction.channel.name ===
@@ -4213,7 +4233,23 @@ async function handleTicketRenameModal(
       MessageFlags.Ephemeral,
   });
 
+  let stateUpdated =
+    false;
+
   try {
+    await updateTicketTopic(
+      interaction.channel,
+      context.data,
+      {
+        customChannelName:
+          newName,
+      },
+      `Ticket renamed by ${interaction.user.tag}`,
+    );
+
+    stateUpdated =
+      true;
+
     await interaction.channel.setName(
       newName,
       `Ticket renamed by ${interaction.user.tag}`,
@@ -4235,6 +4271,24 @@ async function handleTicketRenameModal(
       '[TICKET RENAME ERROR]',
       error,
     );
+
+    if (stateUpdated) {
+      await updateTicketTopic(
+        interaction.channel,
+        context.data,
+        {
+          customChannelName:
+            context.data.customChannelName ||
+            null,
+        },
+        `Rolled back failed ticket rename by ${interaction.user.tag}`,
+      ).catch((rollbackError) => {
+        console.error(
+          '[TICKET RENAME STATE ROLLBACK ERROR]',
+          rollbackError,
+        );
+      });
+    }
 
     await interaction.editReply(
       'I could not rename this ticket. Check my **Manage Channels** permission and try again.',
@@ -4300,14 +4354,11 @@ async function reopenTicket(interaction) {
   const type = TICKET_TYPES[data.typeKey] || TICKET_TYPES.bug_report;
   const ticketNumber = data.number ?? 0;
   const openName =
+    data.customChannelName ||
     buildTicketChannelName(
       TICKET_NAME_PREFIX,
       ticketNumber,
-      getTicketChannelLabel(
-        interaction.channel,
-        data,
-      ) ||
-        type.slug,
+      type.slug,
     );
   const creatorCanSend = shouldCreatorBeUnlocked(data);
 
