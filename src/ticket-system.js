@@ -3920,21 +3920,9 @@ async function closeTicket(interaction) {
       );
 
     if (creatorIsStaff) {
-      // A staff member who created their own normal ticket keeps full access
-      // after closing it. This lets them continue talking and use the closed
-      // ticket controls (Transcript/Delete/Reopen) like any other staff member.
-      await interaction.channel.permissionOverwrites.edit(
-        data.creatorId,
-        {
-          ViewChannel: true,
-          ReadMessageHistory: true,
-          AttachFiles: true,
-          EmbedLinks: true,
-          SendMessages: true,
-        },
-        `Staff ticket creator retained access after close by ${interaction.user.tag}`,
-      );
-
+      // The creator overwrite already grants a staff creator access. Avoid a
+      // redundant Discord permission request here because that request can be
+      // rate-limited and hold the Close interaction on "Closing ticket...".
       console.log(
         `[TICKET CLOSE] Staff creator ${data.creatorId} kept access to closed ticket #${ticketNumber}.`,
       );
@@ -3970,9 +3958,11 @@ async function closeTicket(interaction) {
     // instant even when Discord queues repeated channel-name changes.
     await interaction.channel.send(buildClosedTicketMessage(interaction.user.id));
 
-    // Disable the open-ticket controls that were clicked. Without this, an
-    // older Claim / Close row can remain active beside the new closed controls.
-    await interaction.message
+    // The closed controls now exist, so clear the ephemeral status immediately.
+    // Old-button cleanup is best effort and must never delay access to Delete.
+    await interaction.editReply('✅ Ticket closed.');
+
+    interaction.message
       .edit({
         components: [],
       })
@@ -3982,8 +3972,6 @@ async function closeTicket(interaction) {
           error,
         );
       });
-
-    await interaction.editReply('✅ Ticket closed.');
 
     requestTicketChannelRename(
       interaction.channel,
