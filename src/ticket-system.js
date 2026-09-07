@@ -3920,9 +3920,28 @@ async function closeTicket(interaction) {
       );
 
     if (creatorIsStaff) {
-      // The creator overwrite already grants a staff creator access. Avoid a
-      // redundant Discord permission request here because that request can be
-      // rate-limited and hold the Close interaction on "Closing ticket...".
+      // Keep the staff creator's overwrite repaired in the background. This
+      // request must not hold Close on "Closing ticket..." if Discord delays
+      // the permission route.
+      interaction.channel.permissionOverwrites
+        .edit(
+          data.creatorId,
+          {
+            ViewChannel: true,
+            ReadMessageHistory: true,
+            AttachFiles: true,
+            EmbedLinks: true,
+            SendMessages: true,
+          },
+          `Staff ticket creator retained access after close by ${interaction.user.tag}`,
+        )
+        .catch((error) => {
+          console.error(
+            '[TICKET CLOSE STAFF CREATOR ACCESS ERROR]',
+            error,
+          );
+        });
+
       console.log(
         `[TICKET CLOSE] Staff creator ${data.creatorId} kept access to closed ticket #${ticketNumber}.`,
       );
