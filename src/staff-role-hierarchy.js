@@ -4,10 +4,11 @@ const STAFF_ROLE_IDS = Object.freeze([
   '1288541260394659921',
   '950143139115585536',
   '954409212581138512',
-  '1258406734838497290',
   // Directly below Supervisor.
   '1546436573724283020',
   '1505615310986940446',
+  // Manager sits above Supervisor.
+  '1258406734838497290',
   // Directly below Co. Administrator.
   '1546841314350473297',
   '1035663004152369172',
