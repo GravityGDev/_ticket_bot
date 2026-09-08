@@ -408,9 +408,15 @@ module.exports = {
       return;
     }
 
+    const requester =
+      await interaction.guild.members
+        .fetch(
+          interaction.user.id,
+        )
+        .catch(() => null);
+
     if (
-      !interaction.__snayPermissionAuthorized &&
-      !interaction.memberPermissions?.has(
+      !requester?.permissions.has(
         PermissionFlagsBits.Administrator,
       )
     ) {
