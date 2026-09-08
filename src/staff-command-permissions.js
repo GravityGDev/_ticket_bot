@@ -5,6 +5,7 @@ const {
   ButtonStyle,
   EmbedBuilder,
   MessageFlags,
+  PermissionFlagsBits,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
 } = require('discord.js');
@@ -22,6 +23,12 @@ const COLLECTION_NAME =
   'staff_command_permissions';
 
 const COMMANDS_PER_PAGE = 20;
+
+// These commands are security-sensitive and cannot be delegated through the
+// configurable staff hierarchy.
+const ADMINISTRATOR_ONLY_COMMANDS = new Set([
+  'chat:warn',
+]);
 
 // null = developer only.
 // 0..8 = minimum hierarchy role index.
@@ -284,6 +291,16 @@ function canMemberUseCommandSync(
   if (!member) return false;
 
   if (
+    ADMINISTRATOR_ONLY_COMMANDS.has(
+      commandKey,
+    )
+  ) {
+    return member.permissions.has(
+      PermissionFlagsBits.Administrator,
+    );
+  }
+
+  if (
     isBotDeveloper(
       member,
     )
@@ -511,12 +528,16 @@ async function authorizeApplicationCommand(
     );
 
   const requirement =
-    minimum === null
-      ? 'Developer only'
-      : (
-          `<@&${STAFF_ROLE_IDS[minimum]}> ` +
-          `or a higher staff role`
-        );
+    ADMINISTRATOR_ONLY_COMMANDS.has(
+      commandKey,
+    )
+      ? 'Discord **Administrator** permission'
+      : minimum === null
+        ? 'Developer only'
+        : (
+            `<@&${STAFF_ROLE_IDS[minimum]}> ` +
+            `or a higher staff role`
+          );
 
   await interaction.reply({
     content:
@@ -589,7 +610,10 @@ function editableCommands(
     .filter(
       (entry) =>
         entry.commandKey !==
-        'chat:permissions',
+          'chat:permissions' &&
+        !ADMINISTRATOR_ONLY_COMMANDS.has(
+          entry.commandKey,
+        ),
     )
     .sort((a, b) =>
       commandDisplayName(
