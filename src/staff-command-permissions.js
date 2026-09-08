@@ -30,6 +30,36 @@ const ADMINISTRATOR_ONLY_COMMANDS = new Set([
   'chat:warn',
 ]);
 
+const HIERARCHY_SCHEMA_VERSION = 2;
+
+// This was the deployed order before the new roles were positioned. Saved
+// numeric permission levels are translated through these role IDs once so a
+// hierarchy reorder cannot silently grant a command to the wrong rank.
+const PREVIOUS_STAFF_ROLE_IDS = Object.freeze([
+  '1334635057180315752',
+  '1288541260394659921',
+  '950143139115585536',
+  '954409212581138512',
+  '1258406734838497290',
+  '1505615310986940446',
+  '1035663004152369172',
+  '950141448307740672',
+  '952042367026880583',
+  '1546841314350473297',
+  '1546436573724283020',
+]);
+
+const SENIOR_STAFF_ROLE_INDEX =
+  STAFF_ROLE_IDS.indexOf(
+    '952042367026880583',
+  );
+
+if (SENIOR_STAFF_ROLE_INDEX < 0) {
+  throw new Error(
+    'Lead Developer is missing from the staff hierarchy.',
+  );
+}
+
 // null = developer only.
 // Non-null values are zero-based minimum hierarchy role indexes.
 const DEFAULT_MINIMUM_ROLE = Object.freeze({
@@ -41,23 +71,23 @@ const DEFAULT_MINIMUM_ROLE = Object.freeze({
   'chat:search': 0,
   'message:Search Associated Media': 0,
 
-  // Previous "admin" command group starts at the established level 9 tier.
-  // Newly-added higher roles inherit access automatically.
-  'chat:staff-stats': 8,
-  'chat:ticket-panel': 8,
-  'chat:verify-transcript': 8,
-  'chat:warn': 8,
-  'chat:warnings': 8,
-  'chat:bot-status': 8,
-  'chat:botinfo': 8,
+  // Previous "admin" command group starts at the Lead Developer tier.
+  'chat:staff-stats': SENIOR_STAFF_ROLE_INDEX,
+  'chat:ticket-panel': SENIOR_STAFF_ROLE_INDEX,
+  'chat:verify-transcript': SENIOR_STAFF_ROLE_INDEX,
+  'chat:warn': SENIOR_STAFF_ROLE_INDEX,
+  'chat:warnings': SENIOR_STAFF_ROLE_INDEX,
+  'chat:bot-status': SENIOR_STAFF_ROLE_INDEX,
+  'chat:botinfo': SENIOR_STAFF_ROLE_INDEX,
 
   // The editor itself can never be delegated.
   'chat:permissions': null,
 });
 
-// Unknown future commands default to the established level 9 tier and all
-// higher roles until the developer explicitly changes them in /permissions.
-const UNKNOWN_COMMAND_DEFAULT = 8;
+// Unknown future commands default to the Lead Developer tier until the
+// developer explicitly changes them in /permissions.
+const UNKNOWN_COMMAND_DEFAULT =
+  SENIOR_STAFF_ROLE_INDEX;
 
 const permissionCache = new Map();
 const loadedGuilds = new Set();
@@ -210,11 +240,13 @@ async function loadGuildCommandPermissions(
   const db =
     await getMongoDb();
 
+  const collection =
+    db.collection(
+      COLLECTION_NAME,
+    );
+
   const rows =
-    await db
-      .collection(
-        COLLECTION_NAME,
-      )
+    await collection
       .find({
         guildId: guildKey,
       })
@@ -227,16 +259,98 @@ async function loadGuildCommandPermissions(
 
   cache.clear();
 
+  const migrations = [];
+
   for (const row of rows) {
-    cache.set(
+    const commandKey =
       String(
         row.commandKey,
-      ),
-      row.minRoleIndex === null
-        ? null
-        : Number(
-            row.minRoleIndex,
-          ),
+      );
+
+    let minimum = null;
+    let minimumRoleId = null;
+
+    if (
+      row.minRoleIndex !== null &&
+      row.minRoleIndex !== undefined
+    ) {
+      const savedIndex =
+        Number(
+          row.minRoleIndex,
+        );
+
+      minimumRoleId =
+        row.minRoleId
+          ? String(
+              row.minRoleId,
+            )
+          : (
+              PREVIOUS_STAFF_ROLE_IDS[
+                savedIndex
+              ] ||
+              null
+            );
+
+      const currentIndex =
+        minimumRoleId
+          ? STAFF_ROLE_IDS.indexOf(
+              minimumRoleId,
+            )
+          : -1;
+
+      minimum =
+        currentIndex >= 0
+          ? currentIndex
+          : defaultMinimumRole(
+              commandKey,
+            );
+    }
+
+    cache.set(
+      commandKey,
+      minimum,
+    );
+
+    if (
+      Number(
+        row.hierarchyVersion,
+      ) !==
+        HIERARCHY_SCHEMA_VERSION ||
+      row.minRoleId !==
+        minimumRoleId ||
+      row.minRoleIndex !==
+        minimum
+    ) {
+      migrations.push({
+        updateOne: {
+          filter: {
+            _id: row._id,
+          },
+          update: {
+            $set: {
+              minRoleIndex:
+                minimum,
+              minRoleId:
+                minimumRoleId,
+              hierarchyVersion:
+                HIERARCHY_SCHEMA_VERSION,
+            },
+          },
+        },
+      });
+    }
+  }
+
+  if (migrations.length) {
+    await collection.bulkWrite(
+      migrations,
+      {
+        ordered: false,
+      },
+    );
+
+    console.log(
+      `[STAFF PERMISSIONS] Migrated ${migrations.length} saved command permission(s) to hierarchy v${HIERARCHY_SCHEMA_VERSION} for guild ${guildKey}.`,
     );
   }
 
@@ -396,6 +510,14 @@ async function setMinimumRole(
           commandKey,
           minRoleIndex:
             normalized,
+          minRoleId:
+            normalized === null
+              ? null
+              : STAFF_ROLE_IDS[
+                  normalized
+                ],
+          hierarchyVersion:
+            HIERARCHY_SCHEMA_VERSION,
           updatedBy:
             String(updatedBy),
           updatedAt:
