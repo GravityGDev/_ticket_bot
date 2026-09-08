@@ -1710,6 +1710,22 @@ async function restoreOneTicketRuntimeState(
     };
   }
 
+  // Repair the creator's effective permission on existing open tickets.
+  // This is a no-op when the saved member overwrite is already correct.
+  await setCreatorTyping(
+    channel,
+    live.creatorId,
+    shouldCreatorBeUnlocked(
+      live,
+    ),
+    'Restored ticket creator access after bot restart',
+  ).catch((error) => {
+    console.error(
+      `[TICKET REBOOT CREATOR PERMISSION ERROR] ${channel.id}/${live.creatorId}`,
+      error,
+    );
+  });
+
   // Refresh existing open ticket messages during startup so controls added by
   // newer deployments (including Rename) also appear on older active tickets.
   await refreshTicketControlMessage(
@@ -3167,17 +3183,145 @@ function shouldCreatorBeUnlocked(data) {
 }
 
 async function setCreatorTyping(channel, creatorId, enabled, reason) {
+  const id =
+    String(
+      creatorId,
+    );
+
+  const member =
+    channel.guild.members.cache.get(
+      id,
+    ) ||
+    (await channel.guild.members
+      .fetch(
+        id,
+      )
+      .catch(() => null));
+
+  const desiredOverwrite = {
+    ViewChannel: true,
+    ReadMessageHistory: true,
+    AttachFiles: true,
+    EmbedLinks: true,
+    AddReactions: true,
+    UseApplicationCommands: true,
+    SendMessages:
+      Boolean(
+        enabled,
+      ),
+  };
+
+  const currentOverwrite =
+    channel.permissionOverwrites.cache.get(
+      id,
+    );
+
+  const explicitlyAllowsSend =
+    Boolean(
+      currentOverwrite?.allow?.has(
+        PermissionFlagsBits.SendMessages,
+      ) &&
+      !currentOverwrite?.deny?.has(
+        PermissionFlagsBits.SendMessages,
+      ),
+    );
+
+  const explicitlyDeniesSend =
+    Boolean(
+      currentOverwrite?.deny?.has(
+        PermissionFlagsBits.SendMessages,
+      ),
+    );
+
+  const effectiveCanSend =
+    member
+      ? Boolean(
+          channel.permissionsFor(
+            member,
+          )?.has(
+            PermissionFlagsBits.SendMessages,
+          ),
+        )
+      : null;
+
+  const alreadyCorrect =
+    enabled
+      ? (
+          explicitlyAllowsSend &&
+          effectiveCanSend !==
+            false
+        )
+      : explicitlyDeniesSend;
+
+  if (alreadyCorrect) {
+    return false;
+  }
+
   await channel.permissionOverwrites.edit(
-    creatorId,
-    {
-      ViewChannel: true,
-      ReadMessageHistory: true,
-      AttachFiles: true,
-      EmbedLinks: true,
-      SendMessages: enabled,
-    },
+    member ||
+    id,
+    desiredOverwrite,
     reason,
   );
+
+  if (
+    !enabled ||
+    !member
+  ) {
+    return true;
+  }
+
+  let effective =
+    channel.permissionsFor(
+      member,
+    );
+
+  if (
+    effective?.has(
+      PermissionFlagsBits.SendMessages,
+    )
+  ) {
+    return true;
+  }
+
+  console.warn(
+    `[TICKET CREATOR PERMISSION RETRY] ${id} still cannot SendMessages in ${channel.id}; rebuilding their member overwrite.`,
+  );
+
+  await channel.permissionOverwrites
+    .delete(
+      member,
+      `${reason} - clearing stale creator deny`,
+    )
+    .catch((error) => {
+      console.error(
+        '[TICKET CREATOR OVERWRITE DELETE RETRY ERROR]',
+        error,
+      );
+    });
+
+  await channel.permissionOverwrites.edit(
+    member,
+    desiredOverwrite,
+    `${reason} - rebuilt creator access`,
+  );
+
+  effective =
+    channel.permissionsFor(
+      member,
+    );
+
+  if (
+    !effective?.has(
+      PermissionFlagsBits.SendMessages,
+    )
+  ) {
+    throw new Error(
+      `Creator ${id} still lacks SendMessages after rebuilding their ticket overwrite.`,
+    );
+  }
+
+  return true;
 }
 
 async function findExistingTicketForCreator(
@@ -3463,6 +3607,21 @@ async function createTicket(interaction, typeKey) {
       });
       return;
     }
+
+    // Verify the creator's member overwrite after Discord creates the
+    // channel. If inherited category denies survived unexpectedly, rebuild the
+    // overwrite before the user begins using the ticket.
+    await setCreatorTyping(
+      channel,
+      interaction.user.id,
+      creatorCanSend,
+      `Verified ticket creator access for ticket #${ticketNumber}`,
+    ).catch((error) => {
+      console.error(
+        `[TICKET CREATE CREATOR PERMISSION ERROR] ${channel.id}/${interaction.user.id}`,
+        error,
+      );
+    });
 
     // This must be the first message in normal tickets so the staff alert is
     // delivered before the ticket welcome and controls. Report Staff remains
