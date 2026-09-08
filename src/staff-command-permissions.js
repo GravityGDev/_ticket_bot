@@ -31,7 +31,7 @@ const ADMINISTRATOR_ONLY_COMMANDS = new Set([
 ]);
 
 // null = developer only.
-// 0..8 = minimum hierarchy role index.
+// Non-null values are zero-based minimum hierarchy role indexes.
 const DEFAULT_MINIMUM_ROLE = Object.freeze({
   // Staff defaults.
   'chat:help': 0,
@@ -41,7 +41,8 @@ const DEFAULT_MINIMUM_ROLE = Object.freeze({
   'chat:search': 0,
   'message:Search Associated Media': 0,
 
-  // Previous "admin" command group defaults to the highest staff role.
+  // Previous "admin" command group starts at the established level 9 tier.
+  // Newly-added higher roles inherit access automatically.
   'chat:staff-stats': 8,
   'chat:ticket-panel': 8,
   'chat:verify-transcript': 8,
@@ -54,8 +55,8 @@ const DEFAULT_MINIMUM_ROLE = Object.freeze({
   'chat:permissions': null,
 });
 
-// Unknown future commands default to the highest staff role until the
-// developer explicitly changes them in /permissions.
+// Unknown future commands default to the established level 9 tier and all
+// higher roles until the developer explicitly changes them in /permissions.
 const UNKNOWN_COMMAND_DEFAULT = 8;
 
 const permissionCache = new Map();
