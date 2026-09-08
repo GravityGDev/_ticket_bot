@@ -9,6 +9,8 @@ const STAFF_ROLE_IDS = Object.freeze([
   '1035663004152369172',
   '950141448307740672',
   '952042367026880583',
+  '1546841314350473297',
+  '1546436573724283020',
 ]);
 
 // Bot developer / owner bypass. This account can never lock itself out of the
