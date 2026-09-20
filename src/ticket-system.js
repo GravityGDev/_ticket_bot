@@ -2302,6 +2302,22 @@ function getBottomPositionForCategory(category) {
   return Math.max(...positions) + 1;
 }
 
+function buildReportStaffGuidelinesEmbed() {
+  return new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle(
+      '⚠️ Report Staff Guidelines',
+    )
+    .setDescription(
+      [
+        'Your report must relate to activity within **this server** and comply with the **game guidelines**.',
+        'We do not handle disputes, incidents, or business involving any other server, even when that server is related to the same game.',
+      ].join(
+        '\n\n',
+      ),
+    );
+}
+
 function buildTicketWelcome(ticketNumber, creator, typeKey, options = {}) {
   const type = TICKET_TYPES[typeKey] || { label: 'Support', emoji: '🎫' };
   const embed = new EmbedBuilder()
@@ -3740,6 +3756,22 @@ async function createTicket(interaction, typeKey) {
       );
     } catch (error) {
       console.error('[TICKET WELCOME ERROR]', error);
+    }
+
+    if (isReportStaff) {
+      await channel.send({
+        embeds: [
+          buildReportStaffGuidelinesEmbed(),
+        ],
+        allowedMentions: {
+          parse: [],
+        },
+      }).catch((error) => {
+        console.error(
+          '[REPORT STAFF GUIDELINES ERROR]',
+          error,
+        );
+      });
     }
 
         await interaction.editReply({
