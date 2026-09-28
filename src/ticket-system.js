@@ -9854,6 +9854,494 @@ async function updateInGameIdControlState(
   });
 }
 
+function normalizeYouTubeChannelUrl(
+  value,
+) {
+  let parsed;
+
+  try {
+    parsed =
+      new URL(
+        String(
+          value ||
+          '',
+        ).trim(),
+      );
+  } catch {
+    return null;
+  }
+
+  if (
+    parsed.protocol !==
+      'https:' &&
+    parsed.protocol !==
+      'http:'
+  ) {
+    return null;
+  }
+
+  const hostname =
+    parsed.hostname
+      .toLowerCase()
+      .replace(
+        /^www\./,
+        '',
+      );
+
+  if (
+    hostname !==
+      'youtube.com' &&
+    hostname !==
+      'm.youtube.com' &&
+    hostname !==
+      'youtu.be'
+  ) {
+    return null;
+  }
+
+  return parsed.toString();
+}
+
+async function updateYouTubeControlState(
+  channel,
+  data,
+  rangeLabel,
+) {
+  const controlMessage =
+    await findTicketControlMessage(
+      channel,
+      data,
+    );
+
+  if (!controlMessage) {
+    console.warn(
+      `[TICKET YOUTUBE] Could not find control message in ${channel.id}.`,
+    );
+
+    return;
+  }
+
+  const targetCustomId =
+    `ticket_youtube_range:${data.creatorId}`;
+
+  const components =
+    controlMessage.components.map(
+      (row) => {
+        const rowJson =
+          row.toJSON();
+
+        rowJson.components =
+          rowJson.components.map(
+            (component) => {
+              if (
+                component.custom_id ===
+                targetCustomId
+              ) {
+                return {
+                  ...component,
+                  disabled: true,
+                  placeholder:
+                    `Submitted: ${rangeLabel}`
+                      .slice(
+                        0,
+                        150,
+                      ),
+                };
+              }
+
+              return component;
+            },
+          );
+
+        return rowJson;
+      },
+    );
+
+  await controlMessage.edit({
+    components,
+  });
+}
+
+async function openYouTubeLinkModal(
+  interaction,
+) {
+  try {
+    const [
+      ,
+      creatorId,
+    ] =
+      interaction.customId.split(
+        ':',
+      );
+
+    const rangeKey =
+      String(
+        interaction.values?.[0] ||
+        '',
+      );
+
+    const range =
+      YOUTUBE_RANGES[
+        rangeKey
+      ];
+
+    const data =
+      await getLiveTicketData(
+        interaction.channel,
+      );
+
+    if (
+      !data ||
+      data.typeKey !==
+        'youtuber_submission' ||
+      String(
+        data.creatorId,
+      ) !==
+        String(
+          creatorId,
+        ) ||
+      !range
+    ) {
+      await interaction.reply({
+        content:
+          'This subscriber selection is no longer valid for this ticket.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    if (
+      String(
+        interaction.user.id,
+      ) !==
+        String(
+          creatorId,
+        )
+    ) {
+      await interaction.reply({
+        content:
+          'Only the ticket creator can complete the YouTuber submission.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    if (data.closedAt) {
+      await interaction.reply({
+        content:
+          'This ticket is currently closed.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    if (
+      data.youtubeStatus ===
+        'done'
+    ) {
+      await interaction.reply({
+        content:
+          '✅ Your YouTube channel details have already been submitted.',
+        flags:
+          MessageFlags.Ephemeral,
+      });
+
+      return;
+    }
+
+    const channelLinkInput =
+      new TextInputBuilder()
+        .setCustomId(
+          'youtube_channel_link',
+        )
+        .setLabel(
+          'YouTube channel link',
+        )
+        .setPlaceholder(
+          'https://youtube.com/@yourchannel',
+        )
+        .setStyle(
+          TextInputStyle.Short,
+        )
+        .setMinLength(10)
+        .setMaxLength(500)
+        .setRequired(true);
+
+    const modal =
+      new ModalBuilder()
+        .setCustomId(
+          `ticket_youtube_link:${creatorId}:${rangeKey}`,
+        )
+        .setTitle(
+          'YouTuber Submission',
+        )
+        .addComponents(
+          new ActionRowBuilder()
+            .addComponents(
+              channelLinkInput,
+            ),
+        );
+
+    await interaction.showModal(
+      modal,
+    );
+  } catch (error) {
+    console.error(
+      '[TICKET YOUTUBE MODAL OPEN ERROR]',
+      error,
+    );
+
+    if (
+      !interaction.replied &&
+      !interaction.deferred
+    ) {
+      await interaction.reply({
+        content:
+          '❌ I could not open the YouTube channel form. Please try again.',
+        flags:
+          MessageFlags.Ephemeral,
+      }).catch(() => {});
+    }
+  }
+}
+
+async function handleYouTubeLinkModal(
+  interaction,
+) {
+  const [
+    ,
+    creatorId,
+    rangeKey,
+  ] =
+    interaction.customId.split(
+      ':',
+    );
+
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
+
+  try {
+    const range =
+      YOUTUBE_RANGES[
+        rangeKey
+      ];
+
+    const data =
+      await getLiveTicketData(
+        interaction.channel,
+      );
+
+    if (
+      !data ||
+      data.typeKey !==
+        'youtuber_submission' ||
+      String(
+        data.creatorId,
+      ) !==
+        String(
+          creatorId,
+        ) ||
+      !range
+    ) {
+      await interaction.editReply({
+        content:
+          'This YouTube submission form is no longer valid for this ticket.',
+      });
+
+      return;
+    }
+
+    if (
+      String(
+        interaction.user.id,
+      ) !==
+        String(
+          creatorId,
+        )
+    ) {
+      await interaction.editReply({
+        content:
+          'Only the ticket creator can complete the YouTuber submission.',
+      });
+
+      return;
+    }
+
+    if (data.closedAt) {
+      await interaction.editReply({
+        content:
+          'This ticket is currently closed.',
+      });
+
+      return;
+    }
+
+    if (
+      data.youtubeStatus ===
+        'done'
+    ) {
+      await interaction.editReply({
+        content:
+          '✅ Your YouTube channel details have already been submitted.',
+      });
+
+      return;
+    }
+
+    const submittedLink =
+      interaction.fields
+        .getTextInputValue(
+          'youtube_channel_link',
+        );
+
+    const channelUrl =
+      normalizeYouTubeChannelUrl(
+        submittedLink,
+      );
+
+    if (!channelUrl) {
+      await interaction.editReply({
+        content:
+          '❌ Enter a valid YouTube channel link using `youtube.com` or `youtu.be`.',
+      });
+
+      return;
+    }
+
+    const next =
+      await updateTicketTopic(
+        interaction.channel,
+        data,
+        {
+          youtubeStatus:
+            'done',
+        },
+        `YouTube details submitted by ${interaction.user.tag}`,
+      );
+
+    const creatorUnlocked =
+      shouldCreatorBeUnlocked(
+        next,
+      );
+
+    let permissionError =
+      null;
+
+    await setCreatorTyping(
+      interaction.channel,
+      creatorId,
+      creatorUnlocked,
+      `YouTube details submitted by ${interaction.user.tag}`,
+    ).catch((error) => {
+      permissionError =
+        error;
+
+      console.error(
+        '[TICKET YOUTUBE CREATOR PERMISSION ERROR]',
+        error,
+      );
+    });
+
+    await updateYouTubeControlState(
+      interaction.channel,
+      next,
+      range.label,
+    ).catch((error) => {
+      console.error(
+        '[TICKET YOUTUBE MENU UPDATE ERROR]',
+        error,
+      );
+    });
+
+    const detailsEmbed =
+      new EmbedBuilder()
+        .setColor(
+          0xff0000,
+        )
+        .setTitle(
+          '📺 YouTuber Submission Details',
+        )
+        .addFields(
+          {
+            name:
+              'Submitted by',
+            value:
+              `<@${creatorId}>`,
+            inline:
+              true,
+          },
+          {
+            name:
+              'Subscriber range',
+            value:
+              range.label,
+            inline:
+              true,
+          },
+          {
+            name:
+              'YouTube channel',
+            value:
+              channelUrl,
+            inline:
+              false,
+          },
+        );
+
+    await interaction.channel
+      .send({
+        embeds: [
+          detailsEmbed,
+        ],
+        allowedMentions: {
+          users: [
+            creatorId,
+          ],
+        },
+      })
+      .catch((error) => {
+        console.error(
+          '[TICKET YOUTUBE DETAILS NOTICE ERROR]',
+          error,
+        );
+      });
+
+    if (permissionError) {
+      await interaction.editReply({
+        content:
+          '⚠️ Your YouTube details were saved, but I could not update your typing permission. Please ask staff to check the ticket permissions.',
+      });
+
+      return;
+    }
+
+    await interaction.editReply({
+      content:
+        creatorUnlocked
+          ? '✅ YouTube details submitted. You can now type in this ticket.'
+          : '✅ YouTube details submitted. Submit your In-game ID before typing is unlocked.',
+    });
+  } catch (error) {
+    console.error(
+      '[TICKET YOUTUBE SUBMIT ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        '❌ I could not save your YouTube details. Please try again.',
+    }).catch(() => {});
+  }
+}
+
 async function openInGameIdModal(
   interaction,
 ) {
