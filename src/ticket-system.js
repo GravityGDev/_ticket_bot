@@ -48,6 +48,9 @@ const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
 const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
 const TICKET_ALERT_ROLE_ID = '950864708066476062';
+const TICKET_ACTION_BYPASS_ROLE_IDS = Object.freeze([
+  '1546436573724283020',
+]);
 const REPORT_STAFF_PAGE_SIZE = 23;
 // 22 leaves room for Back + Next + Skip/Not sure inside Discord's 25-option limit.
 const MUTED_STAFF_PAGE_SIZE = 22;
@@ -880,8 +883,29 @@ function isTicketAdministrator(member) {
   );
 }
 
+function hasTicketActionBypassRole(
+  member,
+) {
+  return Boolean(
+    member?.roles?.cache &&
+    TICKET_ACTION_BYPASS_ROLE_IDS.some(
+      (roleId) =>
+        member.roles.cache.has(
+          roleId,
+        ),
+    )
+  );
+}
+
 async function isTicketAssistManager(member) {
-  if (isTicketAdministrator(member)) {
+  if (
+    isTicketAdministrator(
+      member,
+    ) ||
+    hasTicketActionBypassRole(
+      member,
+    )
+  ) {
     return true;
   }
 
@@ -1063,6 +1087,9 @@ function isTicketStaffMember(member) {
     !member.user?.bot &&
     (
       isStaffMember(
+        member,
+      ) ||
+      hasTicketActionBypassRole(
         member,
       ) ||
       isTicketAdministrator(
