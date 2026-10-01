@@ -20,6 +20,12 @@ const AUDIT_LOOKUP_DELAYS_MS = [
 const AUDIT_MATCH_WINDOW_MS =
   15 * 1000;
 
+const RECENT_LOG_TTL_MS =
+  20 * 1000;
+
+const recentMoveLogs =
+  new Map();
+
 function wait(milliseconds) {
   return new Promise(
     (resolve) =>
@@ -38,6 +44,32 @@ function normalizeNullableId(value) {
     ).trim();
 
   return id || null;
+}
+
+function channelPosition(channel) {
+  const rawPosition =
+    Number(
+      channel?.rawPosition,
+    );
+
+  if (
+    Number.isInteger(
+      rawPosition,
+    )
+  ) {
+    return rawPosition;
+  }
+
+  const position =
+    Number(
+      channel?.position,
+    );
+
+  return Number.isInteger(
+    position,
+  )
+    ? position
+    : null;
 }
 
 function parentChangeMatches(
@@ -66,14 +98,67 @@ function parentChangeMatches(
   );
 }
 
+function positionChangeMatches(
+  entry,
+  oldPosition,
+  newPosition,
+) {
+  return Boolean(
+    entry?.changes?.some(
+      (change) => {
+        if (
+          change.key !==
+            'position'
+        ) {
+          return false;
+        }
+
+        const auditOld =
+          Number(
+            change.old,
+          );
+
+        const auditNew =
+          Number(
+            change.new,
+          );
+
+        if (
+          Number.isInteger(
+            auditOld,
+          ) &&
+          Number.isInteger(
+            auditNew,
+          )
+        ) {
+          return (
+            auditOld ===
+              oldPosition &&
+            auditNew ===
+              newPosition
+          );
+        }
+
+        return true;
+      },
+    ),
+  );
+}
+
 async function findChannelMoveAuditEntry(
   guild,
   channelId,
+  movementType,
   oldParentId,
   newParentId,
+  oldPosition,
+  newPosition,
   eventTimestamp,
 ) {
   let newestTargetEntry =
+    null;
+
+  let newestPositionEntry =
     null;
 
   for (
@@ -136,14 +221,36 @@ async function findChannelMoveAuditEntry(
         candidates[0];
     }
 
+    if (
+      !newestPositionEntry
+    ) {
+      newestPositionEntry =
+        candidates.find(
+          (entry) =>
+            entry?.changes?.some(
+              (change) =>
+                change.key ===
+                  'position',
+            ),
+        ) ||
+        null;
+    }
+
     const exactMatch =
       candidates.find(
         (entry) =>
-          parentChangeMatches(
-            entry,
-            oldParentId,
-            newParentId,
-          ),
+          movementType ===
+            'category'
+            ? parentChangeMatches(
+                entry,
+                oldParentId,
+                newParentId,
+              )
+            : positionChangeMatches(
+                entry,
+                oldPosition,
+                newPosition,
+              ),
       );
 
     if (exactMatch) {
@@ -151,7 +258,13 @@ async function findChannelMoveAuditEntry(
     }
   }
 
-  return newestTargetEntry;
+  // A category transfer is still useful to log if Discord omitted the parent
+  // change details. For same-category reorders, require a position audit entry
+  // so automatic shifts of neighbouring channels do not create false logs.
+  return movementType ===
+    'category'
+    ? newestTargetEntry
+    : newestPositionEntry;
 }
 
 function categoryLabel(
@@ -194,6 +307,80 @@ function actorLabel(
   );
 }
 
+function moveDirection(
+  oldPosition,
+  newPosition,
+) {
+  if (
+    newPosition <
+      oldPosition
+  ) {
+    return 'up';
+  }
+
+  if (
+    newPosition >
+      oldPosition
+  ) {
+    return 'down';
+  }
+
+  return 'within the category';
+}
+
+function isDuplicateMoveLog(
+  auditEntry,
+  channelId,
+  oldParentId,
+  newParentId,
+  oldPosition,
+  newPosition,
+) {
+  const now =
+    Date.now();
+
+  for (
+    const [
+      key,
+      createdAt,
+    ] of recentMoveLogs
+  ) {
+    if (
+      now -
+        createdAt >
+      RECENT_LOG_TTL_MS
+    ) {
+      recentMoveLogs.delete(
+        key,
+      );
+    }
+  }
+
+  const key =
+    auditEntry?.id
+      ? `audit:${auditEntry.id}`
+      : (
+          `event:${channelId}:` +
+          `${oldParentId || 'none'}:${newParentId || 'none'}:` +
+          `${oldPosition ?? 'none'}:${newPosition ?? 'none'}`
+        );
+
+  if (
+    recentMoveLogs.has(
+      key,
+    )
+  ) {
+    return true;
+  }
+
+  recentMoveLogs.set(
+    key,
+    now,
+  );
+
+  return false;
+}
+
 async function sendChannelMoveLog(
   oldChannel,
   newChannel,
@@ -208,17 +395,44 @@ async function sendChannelMoveLog(
       newChannel.parentId,
     );
 
-  if (
-    oldParentId ===
-      newParentId ||
+  const oldPosition =
+    channelPosition(
+      oldChannel,
+    );
+
+  const newPosition =
+    channelPosition(
+      newChannel,
+    );
+
+  const movedBetweenCategories =
+    oldParentId !==
+      newParentId &&
     (
-      !TRACKED_CATEGORY_IDS.has(
+      TRACKED_CATEGORY_IDS.has(
         oldParentId,
-      ) &&
-      !TRACKED_CATEGORY_IDS.has(
+      ) ||
+      TRACKED_CATEGORY_IDS.has(
         newParentId,
       )
-    )
+    );
+
+  const reorderedInsideCategory =
+    oldParentId ===
+      newParentId &&
+    TRACKED_CATEGORY_IDS.has(
+      newParentId,
+    ) &&
+    oldPosition !==
+      null &&
+    newPosition !==
+      null &&
+    oldPosition !==
+      newPosition;
+
+  if (
+    !movedBetweenCategories &&
+    !reorderedInsideCategory
   ) {
     return;
   }
@@ -231,6 +445,11 @@ async function sendChannelMoveLog(
     return;
   }
 
+  const movementType =
+    movedBetweenCategories
+      ? 'category'
+      : 'position';
+
   const eventTimestamp =
     Date.now();
 
@@ -238,10 +457,38 @@ async function sendChannelMoveLog(
     await findChannelMoveAuditEntry(
       guild,
       newChannel.id,
+      movementType,
       oldParentId,
       newParentId,
+      oldPosition,
+      newPosition,
       eventTimestamp,
     );
+
+  if (
+    movementType ===
+      'position' &&
+    !auditEntry
+  ) {
+    console.warn(
+      `[CHANNEL MOVE LOGGER] Ignored unmatched position shift for ${newChannel.id}; it may be a neighbouring channel moved automatically by Discord.`,
+    );
+
+    return;
+  }
+
+  if (
+    isDuplicateMoveLog(
+      auditEntry,
+      newChannel.id,
+      oldParentId,
+      newParentId,
+      oldPosition,
+      newPosition,
+    )
+  ) {
+    return;
+  }
 
   const logChannel =
     guild.channels.cache.get(
@@ -271,63 +518,111 @@ async function sendChannelMoveLog(
         0xfee75c,
       )
       .setTitle(
-        '📁 Channel Moved',
+        movementType ===
+          'category'
+          ? '📁 Channel Moved'
+          : '↕️ Channel Order Changed',
       )
       .setDescription(
-        `<#${newChannel.id}> was moved between categories.`,
-      )
-      .addFields(
-        {
-          name:
-            'Channel',
-          value:
-            `**Name:** ${newChannel.name}\n` +
-            `**ID:** \`${newChannel.id}\``,
-          inline:
-            false,
-        },
-        {
-          name:
-            'Previous category',
-          value:
-            categoryLabel(
-              guild,
-              oldParentId,
+        movementType ===
+          'category'
+          ? `<#${newChannel.id}> was moved between categories.`
+          : (
+              `<#${newChannel.id}> was moved **` +
+              `${moveDirection(oldPosition, newPosition)}** inside ` +
+              `<#${newParentId}>.`
             ),
-          inline:
-            true,
-        },
-        {
-          name:
-            'New category',
-          value:
-            categoryLabel(
-              guild,
-              newParentId,
-            ),
-          inline:
-            true,
-        },
-        {
-          name:
-            'Moved by',
-          value:
-            actorLabel(
-              auditEntry,
-            ),
-          inline:
-            false,
-        },
       )
-      .setTimestamp(
-        new Date(
-          eventTimestamp,
-        ),
-      )
-      .setFooter({
-        text:
-          'Snay.io channel update tracking',
+      .addFields({
+        name:
+          'Channel',
+        value:
+          `**Name:** ${newChannel.name}\n` +
+          `**ID:** \`${newChannel.id}\``,
+        inline:
+          false,
       });
+
+  if (
+    movementType ===
+      'category'
+  ) {
+    embed.addFields(
+      {
+        name:
+          'Previous category',
+        value:
+          categoryLabel(
+            guild,
+            oldParentId,
+          ),
+        inline:
+          true,
+      },
+      {
+        name:
+          'New category',
+        value:
+          categoryLabel(
+            guild,
+            newParentId,
+          ),
+        inline:
+          true,
+      },
+    );
+  } else {
+    embed.addFields(
+      {
+        name:
+          'Category',
+        value:
+          categoryLabel(
+            guild,
+            newParentId,
+          ),
+        inline:
+          false,
+      },
+      {
+        name:
+          'Previous position',
+        value:
+          `#${oldPosition + 1}`,
+        inline:
+          true,
+      },
+      {
+        name:
+          'New position',
+        value:
+          `#${newPosition + 1}`,
+        inline:
+          true,
+      },
+    );
+  }
+
+  embed
+    .addFields({
+      name:
+        'Moved by',
+      value:
+        actorLabel(
+          auditEntry,
+        ),
+      inline:
+        false,
+    })
+    .setTimestamp(
+      new Date(
+        eventTimestamp,
+      ),
+    )
+    .setFooter({
+      text:
+        'Snay.io channel update tracking',
+    });
 
   if (auditEntry?.reason) {
     embed.addFields({
@@ -355,7 +650,9 @@ async function sendChannelMoveLog(
   });
 
   console.log(
-    `[CHANNEL MOVE LOGGER] ${newChannel.id}: ${oldParentId || 'none'} -> ${newParentId || 'none'} by ${auditEntry?.executor?.id || 'unknown'}.`,
+    `[CHANNEL MOVE LOGGER] ${newChannel.id}: ` +
+    `${movementType === 'category' ? `${oldParentId || 'none'} -> ${newParentId || 'none'}` : `position ${oldPosition} -> ${newPosition}`} ` +
+    `by ${auditEntry?.executor?.id || 'unknown'}.`,
   );
 }
 
