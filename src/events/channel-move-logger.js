@@ -1,7 +1,11 @@
 const {
+  ActionRowBuilder,
   AuditLogEvent,
+  ButtonBuilder,
+  ButtonStyle,
   EmbedBuilder,
   Events,
+  MessageFlags,
 } = require('discord.js');
 
 const TRACKED_CATEGORY_IDS = new Set([
@@ -10,6 +14,21 @@ const TRACKED_CATEGORY_IDS = new Set([
 
 const CHANNEL_UPDATE_LOG_ID =
   '1203758463197651006';
+
+const CHANNEL_MOVE_REVERT_ROLE_ID =
+  '950141448307740672';
+
+const CHANNEL_MOVE_REVERT_PREFIX =
+  'cmr';
+
+const REVERT_SUPPRESSION_TTL_MS =
+  15 * 1000;
+
+const suppressedChannelUpdates =
+  new Map();
+
+const activeReverts =
+  new Set();
 
 const AUDIT_LOOKUP_DELAYS_MS = [
   350,
@@ -381,6 +400,459 @@ function isDuplicateMoveLog(
   return false;
 }
 
+function suppressChannelUpdates(
+  channelId,
+  count,
+) {
+  suppressedChannelUpdates.set(
+    String(channelId),
+    {
+      remaining:
+        Math.max(
+          1,
+          Number(count) || 1,
+        ),
+      expiresAt:
+        Date.now() +
+        REVERT_SUPPRESSION_TTL_MS,
+    },
+  );
+}
+
+function clearChannelUpdateSuppression(
+  channelId,
+) {
+  suppressedChannelUpdates.delete(
+    String(channelId),
+  );
+}
+
+function consumeChannelUpdateSuppression(
+  channelId,
+) {
+  const key =
+    String(channelId);
+
+  const suppression =
+    suppressedChannelUpdates.get(
+      key,
+    );
+
+  if (!suppression) {
+    return false;
+  }
+
+  if (
+    suppression.expiresAt <
+      Date.now()
+  ) {
+    suppressedChannelUpdates.delete(
+      key,
+    );
+
+    return false;
+  }
+
+  suppression.remaining -=
+    1;
+
+  if (
+    suppression.remaining <=
+      0
+  ) {
+    suppressedChannelUpdates.delete(
+      key,
+    );
+  } else {
+    suppressedChannelUpdates.set(
+      key,
+      suppression,
+    );
+  }
+
+  return true;
+}
+
+function buildChannelMoveRevertCustomId({
+  channelId,
+  oldParentId,
+  newParentId,
+  oldPosition,
+  newPosition,
+}) {
+  return [
+    CHANNEL_MOVE_REVERT_PREFIX,
+    String(channelId),
+    oldParentId || '0',
+    newParentId || '0',
+    Number.isInteger(oldPosition)
+      ? String(oldPosition)
+      : '-1',
+    Number.isInteger(newPosition)
+      ? String(newPosition)
+      : '-1',
+  ].join(':');
+}
+
+function parseChannelMoveRevertCustomId(
+  customId,
+) {
+  const parts =
+    String(customId || '')
+      .split(':');
+
+  if (
+    parts.length !== 6 ||
+    parts[0] !==
+      CHANNEL_MOVE_REVERT_PREFIX
+  ) {
+    return null;
+  }
+
+  const [
+    ,
+    channelId,
+    oldParentValue,
+    newParentValue,
+    oldPositionValue,
+    newPositionValue,
+  ] = parts;
+
+  if (
+    !/^\d{17,20}$/.test(
+      channelId,
+    ) ||
+    !/^(0|\d{17,20})$/.test(
+      oldParentValue,
+    ) ||
+    !/^(0|\d{17,20})$/.test(
+      newParentValue,
+    ) ||
+    !/^-?\d+$/.test(
+      oldPositionValue,
+    ) ||
+    !/^-?\d+$/.test(
+      newPositionValue,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    channelId,
+    oldParentId:
+      oldParentValue === '0'
+        ? null
+        : oldParentValue,
+    newParentId:
+      newParentValue === '0'
+        ? null
+        : newParentValue,
+    oldPosition:
+      Number(oldPositionValue),
+    newPosition:
+      Number(newPositionValue),
+  };
+}
+
+function buildChannelMoveRevertRow(
+  customId,
+  disabled = false,
+) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(
+          customId,
+        )
+        .setLabel(
+          disabled
+            ? 'Reverted'
+            : 'Revert',
+        )
+        .setEmoji('↩️')
+        .setStyle(
+          disabled
+            ? ButtonStyle.Success
+            : ButtonStyle.Secondary,
+        )
+        .setDisabled(
+          disabled,
+        ),
+    );
+}
+
+async function handleChannelMoveRevertInteraction(
+  interaction,
+) {
+  if (
+    !interaction.isButton?.() ||
+    !String(
+      interaction.customId ||
+      '',
+    ).startsWith(
+      `${CHANNEL_MOVE_REVERT_PREFIX}:`,
+    )
+  ) {
+    return;
+  }
+
+  const move =
+    parseChannelMoveRevertCustomId(
+      interaction.customId,
+    );
+
+  if (
+    !move ||
+    !interaction.guild ||
+    interaction.channelId !==
+      CHANNEL_UPDATE_LOG_ID
+  ) {
+    await interaction.reply({
+      content:
+        'This channel-move revert control is invalid.',
+      flags:
+        MessageFlags.Ephemeral,
+    }).catch(() => {});
+
+    return;
+  }
+
+  const member =
+    await interaction.guild.members
+      .fetch(
+        interaction.user.id,
+      )
+      .catch(() => null);
+
+  if (
+    !member?.roles?.cache?.has(
+      CHANNEL_MOVE_REVERT_ROLE_ID,
+    )
+  ) {
+    await interaction.reply({
+      content:
+        `Only <@&${CHANNEL_MOVE_REVERT_ROLE_ID}> can revert channel moves.`,
+      flags:
+        MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    return;
+  }
+
+  if (
+    activeReverts.has(
+      interaction.customId,
+    )
+  ) {
+    await interaction.reply({
+      content:
+        'That channel move is already being reverted.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+
+    return;
+  }
+
+  const channel =
+    interaction.guild.channels.cache.get(
+      move.channelId,
+    ) ||
+    (await interaction.guild.channels
+      .fetch(
+        move.channelId,
+      )
+      .catch(() => null));
+
+  if (
+    !channel ||
+    typeof channel.setParent !==
+      'function' ||
+    typeof channel.setPosition !==
+      'function'
+  ) {
+    await interaction.reply({
+      content:
+        'I could not find or manage the channel from this log.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+
+    return;
+  }
+
+  const currentParentId =
+    normalizeNullableId(
+      channel.parentId,
+    );
+
+  const currentPosition =
+    channelPosition(
+      channel,
+    );
+
+  const movedBetweenCategories =
+    move.oldParentId !==
+      move.newParentId;
+
+  const stillMatchesLoggedMove =
+    currentParentId ===
+      move.newParentId &&
+    (
+      movedBetweenCategories ||
+      currentPosition ===
+        move.newPosition
+    );
+
+  if (
+    !stillMatchesLoggedMove
+  ) {
+    await interaction.reply({
+      content:
+        'I did not revert this move because the channel has changed again since this log was created.',
+      flags:
+        MessageFlags.Ephemeral,
+    });
+
+    return;
+  }
+
+  activeReverts.add(
+    interaction.customId,
+  );
+
+  await interaction.deferReply({
+    flags:
+      MessageFlags.Ephemeral,
+  });
+
+  const reason =
+    `Channel move reverted by ${interaction.user.tag} (${interaction.user.id})`;
+
+  suppressChannelUpdates(
+    channel.id,
+    movedBetweenCategories
+      ? 4
+      : 2,
+  );
+
+  try {
+    if (
+      movedBetweenCategories
+    ) {
+      await channel.setParent(
+        move.oldParentId,
+        {
+          lockPermissions:
+            false,
+          reason,
+        },
+      );
+
+      if (
+        move.oldPosition >=
+          0
+      ) {
+        await channel.setPosition(
+          move.oldPosition,
+          {
+            reason,
+          },
+        );
+      }
+    } else {
+      if (
+        move.oldPosition <
+          0
+      ) {
+        throw new Error(
+          'The original channel position was not recorded.',
+        );
+      }
+
+      await channel.setPosition(
+        move.oldPosition,
+        {
+          reason,
+        },
+      );
+    }
+
+    const revertedEmbed =
+      interaction.message.embeds[0]
+        ? EmbedBuilder.from(
+            interaction.message.embeds[0],
+          )
+            .setColor(
+              0x57f287,
+            )
+            .addFields({
+              name:
+                'Reverted by',
+              value:
+                `<@${interaction.user.id}>\n` +
+                `**User:** ${interaction.user.tag}\n` +
+                `**ID:** \`${interaction.user.id}\``,
+              inline:
+                false,
+            })
+        : null;
+
+    await interaction.message.edit({
+      ...(revertedEmbed
+        ? {
+            embeds: [
+              revertedEmbed,
+            ],
+          }
+        : {}),
+      components: [
+        buildChannelMoveRevertRow(
+          interaction.customId,
+          true,
+        ),
+      ],
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    await interaction.editReply({
+      content:
+        `Reverted the logged move for <#${channel.id}>.`,
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+    console.log(
+      `[CHANNEL MOVE REVERT] ${channel.id} reverted by ${interaction.user.id}.`,
+    );
+  } catch (error) {
+    clearChannelUpdateSuppression(
+      channel.id,
+    );
+
+    console.error(
+      '[CHANNEL MOVE REVERT ERROR]',
+      error,
+    );
+
+    await interaction.editReply({
+      content:
+        'I could not revert that channel move. Check my **Manage Channels** permission and try again.',
+    }).catch(() => {});
+  } finally {
+    activeReverts.delete(
+      interaction.customId,
+    );
+  }
+}
+
 async function sendChannelMoveLog(
   oldChannel,
   newChannel,
@@ -433,6 +905,14 @@ async function sendChannelMoveLog(
   if (
     !movedBetweenCategories &&
     !reorderedInsideCategory
+  ) {
+    return;
+  }
+
+  if (
+    consumeChannelUpdateSuppression(
+      newChannel.id,
+    )
   ) {
     return;
   }
@@ -640,9 +1120,24 @@ async function sendChannelMoveLog(
     });
   }
 
+  const revertCustomId =
+    buildChannelMoveRevertCustomId({
+      channelId:
+        newChannel.id,
+      oldParentId,
+      newParentId,
+      oldPosition,
+      newPosition,
+    });
+
   await logChannel.send({
     embeds: [
       embed,
+    ],
+    components: [
+      buildChannelMoveRevertRow(
+        revertCustomId,
+      ),
     ],
     allowedMentions: {
       parse: [],
@@ -657,6 +1152,8 @@ async function sendChannelMoveLog(
 }
 
 module.exports = {
+  handleChannelMoveRevertInteraction,
+
   name:
     Events.ChannelUpdate,
 
