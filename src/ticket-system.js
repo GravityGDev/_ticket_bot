@@ -48,6 +48,7 @@ const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
 const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
 const TICKET_ALERT_ROLE_ID = '950864708066476062';
+const NORMAL_TICKET_DELETE_ROLE_ID = '950141448307740672';
 const TICKET_ACTION_BYPASS_ROLE_IDS = Object.freeze([
   '1546436573724283020',
 ]);
@@ -8177,11 +8178,15 @@ async function deleteTicket(interaction) {
 
   if (
     data.typeKey !== 'report_staff' &&
-    !isStaffForTicket(interaction, member)
+    !member?.roles?.cache?.has(NORMAL_TICKET_DELETE_ROLE_ID)
   ) {
     await interaction.reply({
-      content: 'Only a member of the **staff team** can delete normal tickets. Staff ticket creators can delete their own closed ticket too.',
+      content:
+        `Only <@&${NORMAL_TICKET_DELETE_ROLE_ID}> can delete normal tickets.`,
       flags: MessageFlags.Ephemeral,
+      allowedMentions: {
+        parse: [],
+      },
     });
     return;
   }
