@@ -6,6 +6,7 @@ const {
   EmbedBuilder,
   Events,
   MessageFlags,
+  escapeMarkdown,
 } = require('discord.js');
 
 const TRACKED_CATEGORY_IDS = new Set([
@@ -303,13 +304,42 @@ function categoryLabel(
   );
 }
 
+function displayAndUsername(
+  user,
+  member,
+) {
+  const username =
+    user?.username ||
+    member?.user?.username ||
+    'Unknown username';
+
+  const displayName =
+    member?.displayName ||
+    user?.globalName ||
+    username;
+
+  return (
+    `${escapeMarkdown(String(displayName))} - ` +
+    escapeMarkdown(String(username))
+  );
+}
+
 function actorLabel(
   auditEntry,
+  executorMember,
 ) {
   const executor =
-    auditEntry?.executor;
+    auditEntry?.executor ||
+    executorMember?.user ||
+    null;
 
-  if (!executor) {
+  const executorId =
+    executor?.id ||
+    auditEntry?.executorId ||
+    executorMember?.id ||
+    null;
+
+  if (!executorId) {
     return (
       'Unknown — the bot could not match a recent audit-log entry. ' +
       'Check that it has **View Audit Log** permission.'
@@ -317,9 +347,9 @@ function actorLabel(
   }
 
   return (
-    `<@${executor.id}>\n` +
-    `**User:** ${executor.tag || executor.username}\n` +
-    `**ID:** \`${executor.id}\``
+    `<@${executorId}>\n` +
+    `**Name:** ${displayAndUsername(executor, executorMember)}\n` +
+    `**ID:** \`${executorId}\``
   );
 }
 
@@ -712,7 +742,7 @@ async function handleChannelMoveRevertInteraction(
                 'Reverted by',
               value:
                 `<@${interaction.user.id}>\n` +
-                `**User:** ${interaction.user.tag}\n` +
+                `**Name:** ${displayAndUsername(interaction.user, member)}\n` +
                 `**ID:** \`${interaction.user.id}\``,
               inline:
                 false,
@@ -891,6 +921,25 @@ async function sendChannelMoveLog(
     return;
   }
 
+  const executorId =
+    auditEntry?.executor?.id ||
+    auditEntry?.executorId ||
+    null;
+
+  const executorMember =
+    executorId
+      ? (
+          guild.members.cache.get(
+            executorId,
+          ) ||
+          (await guild.members
+            .fetch(
+              executorId,
+            )
+            .catch(() => null))
+        )
+      : null;
+
   const logChannel =
     guild.channels.cache.get(
       CHANNEL_UPDATE_LOG_ID,
@@ -1011,6 +1060,7 @@ async function sendChannelMoveLog(
       value:
         actorLabel(
           auditEntry,
+          executorMember,
         ),
       inline:
         false,
