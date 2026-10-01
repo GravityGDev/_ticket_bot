@@ -21,11 +21,8 @@ const CHANNEL_MOVE_REVERT_ROLE_ID =
 const CHANNEL_MOVE_REVERT_PREFIX =
   'cmr';
 
-const REVERT_SUPPRESSION_TTL_MS =
-  15 * 1000;
-
-const suppressedChannelUpdates =
-  new Map();
+const REVERT_AUDIT_REASON_PREFIX =
+  'Channel move reverted by';
 
 const activeReverts =
   new Set();
@@ -400,79 +397,6 @@ function isDuplicateMoveLog(
   return false;
 }
 
-function suppressChannelUpdates(
-  channelId,
-  count,
-) {
-  suppressedChannelUpdates.set(
-    String(channelId),
-    {
-      remaining:
-        Math.max(
-          1,
-          Number(count) || 1,
-        ),
-      expiresAt:
-        Date.now() +
-        REVERT_SUPPRESSION_TTL_MS,
-    },
-  );
-}
-
-function clearChannelUpdateSuppression(
-  channelId,
-) {
-  suppressedChannelUpdates.delete(
-    String(channelId),
-  );
-}
-
-function consumeChannelUpdateSuppression(
-  channelId,
-) {
-  const key =
-    String(channelId);
-
-  const suppression =
-    suppressedChannelUpdates.get(
-      key,
-    );
-
-  if (!suppression) {
-    return false;
-  }
-
-  if (
-    suppression.expiresAt <
-      Date.now()
-  ) {
-    suppressedChannelUpdates.delete(
-      key,
-    );
-
-    return false;
-  }
-
-  suppression.remaining -=
-    1;
-
-  if (
-    suppression.remaining <=
-      0
-  ) {
-    suppressedChannelUpdates.delete(
-      key,
-    );
-  } else {
-    suppressedChannelUpdates.set(
-      key,
-      suppression,
-    );
-  }
-
-  return true;
-}
-
 function buildChannelMoveRevertCustomId({
   channelId,
   oldParentId,
@@ -731,14 +655,7 @@ async function handleChannelMoveRevertInteraction(
   });
 
   const reason =
-    `Channel move reverted by ${interaction.user.tag} (${interaction.user.id})`;
-
-  suppressChannelUpdates(
-    channel.id,
-    movedBetweenCategories
-      ? 4
-      : 2,
-  );
+    `${REVERT_AUDIT_REASON_PREFIX} ${interaction.user.tag} (${interaction.user.id})`;
 
   try {
     if (
@@ -833,10 +750,6 @@ async function handleChannelMoveRevertInteraction(
       `[CHANNEL MOVE REVERT] ${channel.id} reverted by ${interaction.user.id}.`,
     );
   } catch (error) {
-    clearChannelUpdateSuppression(
-      channel.id,
-    );
-
     console.error(
       '[CHANNEL MOVE REVERT ERROR]',
       error,
@@ -909,14 +822,6 @@ async function sendChannelMoveLog(
     return;
   }
 
-  if (
-    consumeChannelUpdateSuppression(
-      newChannel.id,
-    )
-  ) {
-    return;
-  }
-
   const guild =
     newChannel.guild ||
     oldChannel.guild;
@@ -944,6 +849,22 @@ async function sendChannelMoveLog(
       newPosition,
       eventTimestamp,
     );
+
+  const isBotGeneratedRevert =
+    auditEntry?.executor?.id ===
+      guild.members.me?.id &&
+    String(
+      auditEntry?.reason ||
+      '',
+    ).startsWith(
+      REVERT_AUDIT_REASON_PREFIX,
+    );
+
+  if (
+    isBotGeneratedRevert
+  ) {
+    return;
+  }
 
   if (
     movementType ===
