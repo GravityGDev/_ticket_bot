@@ -520,7 +520,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       flags: MessageFlags.Ephemeral,
     };
 
-    if (interaction.replied || interaction.deferred) {
+    if (interaction.deferred && !interaction.replied) {
+      await interaction.editReply({ content: response.content }).catch(() => {});
+    } else if (interaction.replied) {
       await interaction.followUp(response).catch(() => {});
     } else if (interaction.isRepliable()) {
       await interaction.reply(response).catch(() => {});
