@@ -11,6 +11,7 @@ const {
   MessageFlags,
   MessageType,
   ModalBuilder,
+  OverwriteType,
   PermissionFlagsBits,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
@@ -1259,7 +1260,7 @@ async function setTicketStaffTyping(
   await channel.permissionOverwrites.edit(
     member || id,
     overwrite,
-    reason,
+    { type: OverwriteType.Member, reason },
   );
 
   if (
@@ -1304,7 +1305,7 @@ async function setTicketStaffTyping(
   await channel.permissionOverwrites.edit(
     member,
     overwrite,
-    `${reason} - rebuilt assistant access`,
+    { type: OverwriteType.Member, reason: `${reason} - rebuilt assistant access` },
   );
 
   effective =

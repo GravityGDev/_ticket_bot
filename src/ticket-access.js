@@ -30,24 +30,39 @@ function parseTicketMuteExpiry(value, now = new Date()) {
   return expiry;
 }
 
+// Share the existing settings collection so Atlas does not need another
+// collection. Namespaced IDs keep mutes separate from presence and Assist.
 async function muteCollection() {
-  return (await getMongoDb()).collection('ticket_creation_mutes');
+  return (await getMongoDb()).collection('bot_settings');
+}
+
+function muteDocumentId(guildId, userId) {
+  return `ticket_mute:${guildId}:${userId}`;
 }
 
 async function setTicketMute(guildId, userId, expiresAt, actorId, reason) {
   await (await muteCollection()).updateOne(
-    { _id: `${guildId}:${userId}` },
+    { _id: muteDocumentId(guildId, userId) },
     { $set: { guildId: String(guildId), userId: String(userId), expiresAt, actorId: String(actorId), reason: String(reason || ''), updatedAt: new Date() } },
     { upsert: true },
   );
 }
 
 async function removeTicketMute(guildId, userId) {
-  return (await muteCollection()).deleteOne({ _id: `${guildId}:${userId}` });
+  // Remove legacy records first so they cannot reappear via the read fallback.
+  // Reading/deleting a missing collection does not create it.
+  const db = await getMongoDb();
+  const legacy = await db.collection('ticket_creation_mutes').deleteOne({ _id: `${guildId}:${userId}` });
+  const current = await db.collection('bot_settings').deleteOne({ _id: muteDocumentId(guildId, userId) });
+  return { deletedCount: legacy.deletedCount || current.deletedCount ? 1 : 0 };
 }
 
 async function getTicketMute(guildId, userId, now = new Date()) {
-  const record = await (await muteCollection()).findOne({ _id: `${guildId}:${userId}` });
+  const db = await getMongoDb();
+  const current = await db.collection('bot_settings').findOne({ _id: muteDocumentId(guildId, userId) });
+  // Keep mutes created before the storage change effective. A current record,
+  // including an expired one, always takes precedence over a legacy record.
+  const record = current || await db.collection('ticket_creation_mutes').findOne({ _id: `${guildId}:${userId}` });
   if (!record || (record.expiresAt && new Date(record.expiresAt) <= now)) return null;
   return record;
 }
