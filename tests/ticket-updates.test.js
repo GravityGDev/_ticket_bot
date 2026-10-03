@@ -56,6 +56,7 @@ function departureFixture({ present = false, conversation = true, archiveFails =
   const calls = [];
   let fetches = 0;
   const context = {
+    deleteTicketChannel: (channel, method, user) => channel.delete(`SNAY_TICKET_DELETE:${method}:${user.id}`),
     Map, Date, String, Number, console: { log() {} },
     getLiveTicketData: async () => ({ creatorId: 'creator', number: 1, typeKey: 'general_inquiry' }),
     updateTicketTopic: async () => calls.push('close'),

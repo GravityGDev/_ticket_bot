@@ -1,13 +1,16 @@
 const {
   ActionRowBuilder,
   AttachmentBuilder,
-  AuditLogEvent,
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
 } = require('discord.js');
 const { getMongoDb } = require('./database');
 const { getTicketState } = require('./ticket-store');
+const { gzipSync } = require('node:zlib');
+const { resolveTicketDeleter } = require('./ticket-deletion-audit');
+const { signAndStoreTranscript, TRANSCRIPT_INTEGRITY_SLOT } = require('./transcript-integrity');
+const TRANSCRIPT_LOG_CHANNEL_ID = '1538580589542777055';
 
 // This is a USER ID, not a guild channel ID.
 // Manual-deletion transcripts are sent directly to this user's DMs.
@@ -18,19 +21,24 @@ const ARCHIVE_COLLECTION = 'report_staff_archives';
 const MESSAGE_COLLECTION = 'report_staff_messages';
 
 const pendingChannelWrites = new Map();
+const pendingDeletionJobs = new Map();
+const trackedChannelIds = new Set();
+
+function ticketTopicData(channel) {
+  if (!channel?.guild || typeof channel.topic !== 'string') return null;
+  const number = channel.topic.match(/Ticket #(\d+)/i);
+  const creator = channel.topic.match(/Created by <@!?(\d+)>/i);
+  const type = channel.topic.match(/(?:^|\|)\s*Type=([a-z_]+)/i);
+  if (!number || !creator) return null;
+  return { number: Number(number[1]), creatorId: creator[1], typeKey: type?.[1] || 'bug_report' };
+}
+
+function isTicketChannel(channel) {
+  return Boolean(ticketTopicData(channel));
+}
 
 function isReportStaffChannel(channel) {
-  if (!channel || !channel.guild) return false;
-
-  // A category can contain non-ticket channels. Only the immutable ticket
-  // topic marker proves this is a genuine Report Staff ticket. The topic is
-  // also retained on ChannelDelete events and survives staff channel renames.
-  return Boolean(
-    typeof channel.topic === 'string' &&
-      /(?:^|\|)\s*Type=report_staff(?:\s*\||$)/i.test(
-        channel.topic,
-      ),
-  );
+  return ticketTopicData(channel)?.typeKey === 'report_staff';
 }
 
 function queueChannelWrite(channelId, task) {
@@ -126,6 +134,7 @@ function serializeMessage(message) {
         ? message.author.displayAvatarURL({ size: 128 })
         : null,
     memberDisplayName: message.member?.displayName || null,
+    memberDisplayHexColor: message.member?.displayHexColor || null,
     content: message.content || '',
     createdTimestamp:
       Number(message.createdTimestamp) || Date.now(),
@@ -144,7 +153,7 @@ async function resolveReportStaffState(channelId) {
     return null;
   });
 
-  return state?.typeKey === 'report_staff' ? state : null;
+  return state || null;
 }
 
 async function upsertArchiveMetadata(channel, state) {
@@ -158,7 +167,13 @@ async function upsertArchiveMetadata(channel, state) {
       $set: {
         guildId: String(channel.guild.id),
         channelId: String(channel.id),
-        channelName: channel.name || `report-staff-${state?.number ?? 'unknown'}`,
+        channelName: channel.name || `ticket-${state?.number ?? 'unknown'}`,
+        ticketType: state?.typeKey || ticketTopicData(channel)?.typeKey,
+        closedById: state?.closedById || null,
+        closedAt: state?.closedAt || null,
+        claimHistory: state?.claimHistory || [],
+        assistHistory: state?.assistHistory || [],
+        handoverHistory: state?.handoverHistory || [],
         ticketNumber: state?.number ?? null,
         creatorId: state?.creatorId || null,
         reportedStaffId: state?.reportedStaffId || null,
@@ -174,21 +189,22 @@ async function upsertArchiveMetadata(channel, state) {
 }
 
 async function ensureReportStaffArchive(channel) {
-  if (!isReportStaffChannel(channel)) return false;
+  if (!isTicketChannel(channel)) return false;
+  trackedChannelIds.add(String(channel.id));
 
-  const state = await resolveReportStaffState(channel.id);
+  const state = await resolveReportStaffState(channel.id) || ticketTopicData(channel);
 
   // ChannelCreate can fire before ticket-system has written the ticket state.
-  // The topic itself still proves this is a Report Staff ticket, so create the
+  // The topic itself still proves this is a ticket, so create the
   // archive metadata even if state arrives a fraction later.
   await upsertArchiveMetadata(channel, state);
   return true;
 }
 
 async function recordMessage(message) {
-  if (!message?.guild || !isReportStaffChannel(message.channel)) return;
+  if (!message?.guild || !isTicketChannel(message.channel)) return;
 
-  const state = await resolveReportStaffState(message.channelId);
+  const state = await resolveReportStaffState(message.channelId) || ticketTopicData(message.channel);
   const snapshot = serializeMessage(message);
   const now = new Date();
 
@@ -219,7 +235,7 @@ async function recordMessageUpdate(oldMessage, newMessage) {
     ? await newMessage.fetch().catch(() => newMessage)
     : newMessage;
 
-  if (!message?.guild || !isReportStaffChannel(message.channel)) return;
+  if (!message?.guild || !isTicketChannel(message.channel)) return;
 
   const collection = await messageCollection();
   const id = `${message.channelId}:${message.id}`;
@@ -244,6 +260,7 @@ async function recordMessageUpdate(oldMessage, newMessage) {
     typeof existing.content === 'string' &&
     existing.content !== snapshot.content
   ) {
+    delete update.$setOnInsert.revisions; // MongoDB cannot $push and $setOnInsert the same path.
     update.$push = {
       revisions: {
         content: existing.content,
@@ -254,7 +271,7 @@ async function recordMessageUpdate(oldMessage, newMessage) {
     };
   }
 
-  const state = await resolveReportStaffState(message.channelId);
+  const state = await resolveReportStaffState(message.channelId) || ticketTopicData(message.channel);
   await upsertArchiveMetadata(message.channel, state);
   await collection.updateOne({ _id: id }, update, { upsert: true });
 }
@@ -265,11 +282,13 @@ async function markMessageDeleted(message) {
 
   if (!channelId || !messageId) return;
 
+  if (!isTicketChannel(message.channel) && !trackedChannelIds.has(String(channelId))) return;
+
   const archive = await (await archiveCollection()).findOne({
     _id: String(channelId),
   });
 
-  if (!archive && !isReportStaffChannel(message.channel)) return;
+  if (!archive && !isTicketChannel(message.channel)) return;
 
   const now = new Date();
   const collection = await messageCollection();
@@ -420,6 +439,7 @@ function renderRevisions(revisions = []) {
 }
 
 function buildPersistentTranscriptHtml(meta, messages, deletedBy) {
+  const messageById = new Map(messages.map(message => [message.messageId, message]));
   const rows = messages
     .map((message) => {
       const displayName =
@@ -431,18 +451,25 @@ function buildPersistentTranscriptHtml(meta, messages, deletedBy) {
         message.authorAvatarURL ||
         'https://cdn.discordapp.com/embed/avatars/0.png';
 
+      const repliedTo = messageById.get(message.referenceMessageId);
+      const reply = message.referenceMessageId
+        ? `<div class="muted">↪ Reply to ${escapeHtml(repliedTo?.memberDisplayName || repliedTo?.authorUsername || 'unavailable message')}: ${escapeHtml((repliedTo?.content || '').slice(0, 200))}</div>`
+        : '';
+      const authorColor = /^#[a-f0-9]{6}$/i.test(message.memberDisplayHexColor || '') && message.memberDisplayHexColor !== '#000000'
+        ? message.memberDisplayHexColor : '#f2f3f5';
       return `
         <article class="message ${message.deletedAt ? 'deleted-message' : ''}">
           <img class="avatar" src="${escapeHtml(avatar)}" alt="">
           <div class="message-main">
             <div class="message-header">
-              <span class="author">${escapeHtml(displayName)}</span>
+              <span class="author" style="color:${authorColor}">${escapeHtml(displayName)}</span>
               <span class="username">@${escapeHtml(message.authorUsername || 'unknown')}</span>
               ${message.authorBot ? '<span class="bot">BOT</span>' : ''}
               <span class="timestamp">${escapeHtml(formatDate(message.createdTimestamp))}</span>
               ${message.editedTimestamp ? '<span class="muted">(edited)</span>' : ''}
               ${message.deletedAt ? '<span class="deleted-badge">DELETED AFTER LOGGING</span>' : ''}
             </div>
+            ${reply}
             ${
               message.content
                 ? `<div class="content">${escapeHtml(message.content).replaceAll('\n', '<br>')}</div>`
@@ -450,6 +477,7 @@ function buildPersistentTranscriptHtml(meta, messages, deletedBy) {
             }
             ${renderAttachments(message.attachments)}
             ${renderEmbeds(message.embeds)}
+            ${(message.stickers || []).map(sticker => sticker.url ? `<div class="attachment"><img src="${escapeHtml(sticker.url)}" alt="${escapeHtml(sticker.name)}"></div>` : '').join('')}
             ${renderRevisions(message.revisions)}
           </div>
         </article>
@@ -462,7 +490,7 @@ function buildPersistentTranscriptHtml(meta, messages, deletedBy) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Report Staff Ticket #${escapeHtml(meta.ticketNumber ?? 'Unknown')}</title>
+<title>Ticket #${escapeHtml(meta.ticketNumber ?? 'Unknown')}</title>
 <style>
   :root{color-scheme:dark}
   *{box-sizing:border-box}
@@ -499,13 +527,20 @@ function buildPersistentTranscriptHtml(meta, messages, deletedBy) {
 </head>
 <body>
 <header class="top">
-  <h1>🛡️ Persistent Report Staff Transcript</h1>
+  <h1>📑 Ticket Transcript</h1>
   <div class="meta">
     <div><strong>Ticket:</strong> #${escapeHtml(meta.ticketNumber ?? 'Unknown')} • ${escapeHtml(meta.channelName || meta.channelId)}</div>
     <div><strong>Ticket owner:</strong> ${escapeHtml(meta.creatorId || 'Unknown')}</div>
     <div><strong>Reported staff:</strong> ${escapeHtml(meta.reportedStaffId || 'Not selected')}</div>
     <div><strong>Channel ID:</strong> ${escapeHtml(meta.channelId)}</div>
     <div><strong>Deleted by:</strong> ${escapeHtml(deletedBy?.label || 'Unknown')}</div>
+    <div><strong>Deletion method:</strong> ${escapeHtml(deletedBy?.method || 'Unknown')}</div>
+    <div><strong>Deleted at:</strong> ${escapeHtml(formatDate(deletedBy?.deletedAt))}</div>
+    <div><strong>Closed by:</strong> ${escapeHtml(meta.closedById || 'Unknown')} • ${escapeHtml(meta.closedAt ? formatDate(meta.closedAt) : 'Not recorded')}</div>
+    <div><strong>Ticket type:</strong> ${escapeHtml(meta.ticketType || 'Unknown')}</div>
+    <div><strong>Ownership history:</strong> ${escapeHtml(JSON.stringify(meta.claimHistory || []))}</div>
+    <div><strong>Assist history:</strong> ${escapeHtml(JSON.stringify(meta.assistHistory || []))}</div>
+    <div><strong>Handover history:</strong> ${escapeHtml(JSON.stringify(meta.handoverHistory || []))}</div>
     <div><strong>Messages preserved:</strong> ${messages.length}</div>
     <div><strong>Transcript generated:</strong> ${escapeHtml(formatDate(Date.now()))}</div>
   </div>
@@ -513,47 +548,66 @@ function buildPersistentTranscriptHtml(meta, messages, deletedBy) {
 <main class="wrap">
   ${rows || '<div class="empty">No messages were recorded for this ticket.</div>'}
 </main>
+${TRANSCRIPT_INTEGRITY_SLOT}
 </body>
 </html>`;
 }
 
-async function resolveChannelDeleter(channel) {
-  try {
-    // Audit-log entries can take a moment to become visible after deletion.
-    await new Promise((resolve) => setTimeout(resolve, 900));
 
-    const logs = await channel.guild.fetchAuditLogs({
-      type: AuditLogEvent.ChannelDelete,
-      limit: 6,
-    });
-
-    const entry = logs.entries.find(
-      (candidate) =>
-        candidate.target?.id === channel.id &&
-        Date.now() - candidate.createdTimestamp < 15000,
-    );
-
-    if (!entry?.executor) {
-      return {
-        id: null,
-        label: 'Unknown (audit log entry not available)',
-      };
-    }
-
-    return {
-      id: entry.executor.id,
-      label: `${entry.executor.username} (${entry.executor.id})`,
-    };
-  } catch (error) {
-    console.error('[REPORT STAFF DELETE AUDIT LOG ERROR]', error);
-    return {
-      id: null,
-      label: 'Unknown (bot could not read audit logs)',
-    };
-  }
+async function signedPersistentTranscript(meta, messages, deletedBy) {
+  return signAndStoreTranscript({
+    canonicalHtml: buildPersistentTranscriptHtml(meta, messages, deletedBy),
+    metadata: {
+      guildId: meta.guildId, channelId: meta.channelId, channelName: meta.channelName,
+      ticketNumber: meta.ticketNumber, ticketType: meta.ticketType, creatorId: meta.creatorId,
+      closedById: meta.closedById || null, closedAt: meta.closedAt || null,
+      deletedById: deletedBy.id, deletionMethod: deletedBy.method,
+      deletionExecutorId: deletedBy.executorId, deletedAt: deletedBy.deletedAt,
+      deletionAuditEntryId: deletedBy.auditEntryId, messageCount: messages.length,
+      source: 'persistent_ticket_archive',
+    },
+  });
 }
 
-async function sendPersistentDeleteTranscript(channel, meta, messages) {
+function transcriptFile(html, filename) {
+  const buffer = Buffer.from(html, 'utf8');
+  // Stay under the smallest common Discord attachment limit.
+  const compressed = buffer.length > 7 * 1024 * 1024;
+  return new AttachmentBuilder(compressed ? gzipSync(buffer) : buffer, {
+    name: compressed ? `${filename}.gz` : filename,
+  });
+}
+
+async function sendNormalDeleteTranscript(channel, meta, messages, deletedBy) {
+  const logChannel = channel.guild.channels.cache.get(TRANSCRIPT_LOG_CHANNEL_ID) ||
+    await channel.guild.channels.fetch(TRANSCRIPT_LOG_CHANNEL_ID);
+  if (!logChannel?.isTextBased?.() || typeof logChannel.send !== 'function') {
+    throw new Error('Ticket transcript log channel is unavailable.');
+  }
+  const artifact = await signedPersistentTranscript(meta, messages, deletedBy);
+  const filename = `ticket-${meta.ticketNumber || channel.id}-${artifact.integrity.transcriptId}.html`;
+  const embed = new EmbedBuilder().setColor(0xed4245).setTitle('Ticket Deleted — Final Transcript')
+    .setDescription(`#${meta.ticketNumber || channel.id} • ${meta.channelName || channel.name}`)
+    .addFields(
+      { name: 'Ticket Owner', value: meta.creatorId ? `<@${meta.creatorId}> (${meta.creatorId})` : 'Unknown' },
+      { name: 'Deleted By', value: deletedBy.id ? `<@${deletedBy.id}> (${deletedBy.id})` : deletedBy.label },
+      { name: 'Deletion Method', value: deletedBy.method, inline: true },
+      { name: 'Deleted At', value: deletedBy.deletedAt, inline: true },
+      { name: 'Messages Preserved', value: String(messages.length), inline: true },
+      { name: 'Integrity ID', value: artifact.integrity.transcriptId },
+    ).setFooter({ text: 'Recovered from the persistent ticket archive • Times in UTC' }).setTimestamp();
+  const logMessage = await logChannel.send({ files: [transcriptFile(artifact.html, filename)], embeds: [embed], allowedMentions: { parse: [] } });
+  const attachment = logMessage.attachments.first();
+  if (attachment?.url) {
+    await logMessage.edit({ components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('Direct Link').setStyle(ButtonStyle.Link).setURL(attachment.url),
+    )] }).catch(error => console.warn('[TICKET TRANSCRIPT LINK EDIT WARNING]', error.message));
+  }
+  return { logMessage, creatorMessage: null, creatorDmError: null, deletedBy, filename };
+}
+
+async function sendPersistentDeleteTranscript(channel, meta, messages, deletedBy) {
+  if (meta.ticketType !== 'report_staff') return sendNormalDeleteTranscript(channel, meta, messages, deletedBy);
   const securityRecipient = await channel.client.users
     .fetch(REPORT_STAFF_SECURITY_USER_ID)
     .catch(() => null);
@@ -564,8 +618,7 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
     );
   }
 
-  const deletedBy = await resolveChannelDeleter(channel);
-  const html = buildPersistentTranscriptHtml(meta, messages, deletedBy);
+  const html = (await signedPersistentTranscript(meta, messages, deletedBy)).html;
   const filename = `report-staff-${meta.ticketNumber || channel.id}-persistent-transcript.html`;
 
   const securityEmbed = new EmbedBuilder()
@@ -599,6 +652,8 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
           ? `<@${deletedBy.id}> (${deletedBy.id})`
           : deletedBy.label,
       },
+      { name: 'Deletion Method', value: deletedBy.method },
+      { name: 'Deleted At', value: deletedBy.deletedAt },
       {
         name: 'Messages Preserved',
         value: String(messages.length),
@@ -621,9 +676,7 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
   async function sendTranscriptDm(recipient, embed) {
     const dmMessage = await recipient.send({
       files: [
-        new AttachmentBuilder(Buffer.from(html, 'utf8'), {
-          name: filename,
-        }),
+        transcriptFile(html, filename),
       ],
       embeds: [embed],
       allowedMentions: { parse: [] },
@@ -642,7 +695,7 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
               .setURL(attachment.url),
           ),
         ],
-      });
+      }).catch(error => console.warn('[TICKET TRANSCRIPT LINK EDIT WARNING]', error.message));
     }
 
     return dmMessage;
@@ -693,6 +746,8 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
               : deletedBy.label,
             inline: true,
           },
+          { name: 'Deletion Method', value: deletedBy.method },
+          { name: 'Deleted At', value: deletedBy.deletedAt },
         )
         .setFooter({
           text: 'Keep this transcript as a backup of your staff report.',
@@ -774,7 +829,7 @@ async function sendPersistentDeleteTranscript(channel, meta, messages) {
 }
 
 async function trackReportStaffChannelCreate(channel) {
-  if (!isReportStaffChannel(channel)) return;
+  if (!isTicketChannel(channel)) return;
 
   return queueChannelWrite(channel.id, async () => {
     // Ticket state is written just after the Discord channel is created.
@@ -786,7 +841,7 @@ async function trackReportStaffChannelCreate(channel) {
       const state = await resolveReportStaffState(channel.id);
       if (state) {
         console.log(
-          `[REPORT STAFF TRACKER] Registered ${channel.name} (${channel.id}) ` +
+          `[TICKET ARCHIVE TRACKER] Registered ${channel.name} (${channel.id}) ` +
             `on attempt ${attempt}.`,
         );
         return;
@@ -798,14 +853,14 @@ async function trackReportStaffChannelCreate(channel) {
     // Even if Mongo ticket-state lookup is delayed, the archive metadata has
     // already been created using the category/topic detection.
     console.log(
-      `[REPORT STAFF TRACKER] Registered ${channel.name} (${channel.id}) ` +
+      `[TICKET ARCHIVE TRACKER] Registered ${channel.name} (${channel.id}) ` +
         'without ticket state; message tracking is still active.',
     );
   });
 }
 
 function trackReportStaffMessageCreate(message) {
-  if (!message?.guild || !isReportStaffChannel(message.channel)) {
+  if (!message?.guild || !isTicketChannel(message.channel)) {
     return Promise.resolve();
   }
 
@@ -815,7 +870,7 @@ function trackReportStaffMessageCreate(message) {
 function trackReportStaffMessageUpdate(oldMessage, newMessage) {
   const channel = newMessage?.channel || oldMessage?.channel;
 
-  if (!channel?.guild || !isReportStaffChannel(channel)) {
+  if (!channel?.guild || !isTicketChannel(channel)) {
     return Promise.resolve();
   }
 
@@ -876,7 +931,7 @@ async function fetchAllChannelMessagesForBackfill(channel) {
 }
 
 async function backfillReportStaffChannel(channel) {
-  if (!isReportStaffChannel(channel)) return;
+  if (!isTicketChannel(channel)) return;
 
   await queueChannelWrite(channel.id, async () => {
     await ensureReportStaffArchive(channel);
@@ -888,7 +943,7 @@ async function backfillReportStaffChannel(channel) {
     }
 
     console.log(
-      `[REPORT STAFF BACKFILL] ${channel.name} (${channel.id}): ` +
+      `[TICKET ARCHIVE BACKFILL] ${channel.name} (${channel.id}): ` +
         `${messages.length} message(s) copied to MongoDB.`,
     );
   });
@@ -901,7 +956,7 @@ async function backfillOpenReportStaffTickets(client) {
     const channels = [...guild.channels.cache.values()].filter(
       (channel) =>
         channel.isTextBased?.() &&
-        isReportStaffChannel(channel),
+        isTicketChannel(channel),
     );
 
     for (const channel of channels) {
@@ -918,21 +973,19 @@ async function backfillOpenReportStaffTickets(client) {
   }
 
   console.log(
-    `[REPORT STAFF BACKFILL] Finished. ${channelsFound} open Report Staff ticket(s) scanned.`,
+    `[TICKET ARCHIVE BACKFILL] Finished. ${channelsFound} open ticket(s) scanned.`,
   );
 }
 
-async function handleReportStaffChannelDelete(channel) {
-  if (!channel?.guild) return;
+async function archiveDeletedTicket(channel) {
+  if (!channel?.guild || !isTicketChannel(channel)) return;
+  const observedAt = Date.now();
+  const deletion = resolveTicketDeleter(channel, observedAt);
 
   console.log(
-    `[REPORT STAFF DELETE EVENT] channel=${channel.id} name=${channel.name} ` +
+    `[TICKET DELETE EVENT] channel=${channel.id} name=${channel.name} ` +
       `parent=${channel.parentId || 'none'} reportStaff=${isReportStaffChannel(channel)}`,
   );
-
-  if (!isReportStaffChannel(channel)) {
-    return;
-  }
 
   // Finish any message writes that were already queued before the channel
   // deletion event arrived.
@@ -947,9 +1000,9 @@ async function handleReportStaffChannelDelete(channel) {
   let meta = await archives.findOne({ _id: String(channel.id) });
 
   // If the archive metadata somehow has not been created yet but the deleted
-  // channel topic proves it was Report Staff, recover metadata from ticket state.
+  // channel topic proves it was a ticket, recover metadata from ticket state.
   if (!meta) {
-    const state = await resolveReportStaffState(channel.id);
+    const state = await resolveReportStaffState(channel.id) || ticketTopicData(channel);
 
     meta = {
       _id: String(channel.id),
@@ -957,13 +1010,29 @@ async function handleReportStaffChannelDelete(channel) {
       channelId: String(channel.id),
       channelName: channel.name,
       ticketNumber: state?.number ?? null,
+      ticketType: state?.typeKey || ticketTopicData(channel)?.typeKey,
       creatorId: state?.creatorId || null,
       reportedStaffId: state?.reportedStaffId || null,
       staffSelectionStatus: state?.staffSelectionStatus || null,
     };
   }
 
-  if (!meta) return;
+  if (!meta || meta.deleteTranscriptSentAt) return;
+  const deletedBy = await deletion;
+  const finalState = await resolveReportStaffState(channel.id);
+  if (finalState) {
+    meta = { ...meta, closedById: finalState.closedById, closedAt: finalState.closedAt, claimHistory: finalState.claimHistory, assistHistory: finalState.assistHistory, handoverHistory: finalState.handoverHistory };
+  }
+  meta = { ...meta, ticketType: meta.ticketType || ticketTopicData(channel)?.typeKey };
+  // Persist the actor and complete metadata even when uploading fails.
+  await archives.updateOne({ _id: String(channel.id) }, { $set: {
+    guildId: meta.guildId, channelId: meta.channelId, channelName: meta.channelName,
+    ticketNumber: meta.ticketNumber, ticketType: meta.ticketType, creatorId: meta.creatorId,
+    closedById: meta.closedById || null, closedAt: meta.closedAt || null,
+    claimHistory: meta.claimHistory || [], assistHistory: meta.assistHistory || [], handoverHistory: meta.handoverHistory || [],
+    deletedById: deletedBy.id, deletedByLabel: deletedBy.label, deletionMethod: deletedBy.method,
+    deletionExecutorId: deletedBy.executorId, deletionAuditEntryId: deletedBy.auditEntryId, deletedAt: new Date(deletedBy.deletedAt),
+  } }, { upsert: true });
 
   const messages = await (await messageCollection())
     .find({ channelId: String(channel.id) })
@@ -975,6 +1044,7 @@ async function handleReportStaffChannelDelete(channel) {
       channel,
       meta,
       messages,
+      deletedBy,
     );
 
     await archives.updateOne(
@@ -982,7 +1052,7 @@ async function handleReportStaffChannelDelete(channel) {
       {
         $set: {
           channelName: channel.name || meta.channelName,
-          deletedAt: new Date(),
+          deletedAt: new Date(deletedBy.deletedAt),
           deleteTranscriptSentAt: new Date(),
           deleteTranscriptMessageId: result.logMessage.id,
           creatorBackupTranscriptMessageId: result.creatorMessage?.id || null,
@@ -1012,7 +1082,7 @@ async function handleReportStaffChannelDelete(channel) {
       {
         $set: {
           channelName: channel.name || meta.channelName,
-          deletedAt: new Date(),
+          deletedAt: new Date(deletedBy.deletedAt),
           deleteTranscriptSendError: String(error?.message || error),
         },
       },
@@ -1023,6 +1093,15 @@ async function handleReportStaffChannelDelete(channel) {
   }
 }
 
+function handleReportStaffChannelDelete(channel) {
+  if (!channel?.guild || !isTicketChannel(channel)) return Promise.resolve();
+  const key = String(channel.id);
+  if (pendingDeletionJobs.has(key)) return pendingDeletionJobs.get(key);
+  const job = archiveDeletedTicket(channel).finally(() => pendingDeletionJobs.delete(key));
+  pendingDeletionJobs.set(key, job);
+  return job;
+}
+
 module.exports = {
   backfillOpenReportStaffTickets,
   trackReportStaffChannelCreate,
@@ -1031,4 +1110,6 @@ module.exports = {
   trackReportStaffMessageDelete,
   trackReportStaffMessageDeleteBulk,
   handleReportStaffChannelDelete,
+  isTicketChannel,
+  backfillTicketBeforeDelete: backfillReportStaffChannel,
 };

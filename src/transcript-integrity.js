@@ -6,7 +6,9 @@ const {
 } = require('node:crypto');
 const { getMongoDb } = require('./database');
 
-const COLLECTION_NAME = 'transcript_integrity';
+const COLLECTION_NAME = 'bot_settings';
+const LEGACY_COLLECTION_NAME = 'transcript_integrity';
+const integrityDocumentId = id => `transcript_integrity:${id}`;
 
 const TRANSCRIPT_INTEGRITY_SLOT =
   '<!-- SNAY_TRANSCRIPT_INTEGRITY_SLOT -->';
@@ -25,7 +27,7 @@ function getSigningSecret() {
   if (secret.length < 32) {
     throw new Error(
       'TRANSCRIPT_SIGNING_SECRET is missing or too short. ' +
-        'Set a private signing secret of at least 32 characters in Render Environment.',
+        'Set a private signing secret of at least 32 characters in your bot hosting environment (Dokploy).',
     );
   }
 
@@ -308,7 +310,7 @@ async function storeTranscriptIntegrity(
     await collection()
   ).insertOne({
     _id:
-      record.transcriptId,
+      integrityDocumentId(record.transcriptId),
     transcriptId:
       record.transcriptId,
     sha256:
@@ -399,17 +401,10 @@ async function signAndStoreTranscript({
   };
 }
 
-async function getTranscriptIntegrityRecord(
-  transcriptId,
-) {
-  return (
-    await collection()
-  ).findOne({
-    _id:
-      String(
-        transcriptId,
-      ),
-  });
+async function getTranscriptIntegrityRecord(transcriptId) {
+  const db = await getMongoDb();
+  return await db.collection(COLLECTION_NAME).findOne({ _id: integrityDocumentId(transcriptId) }) ||
+    await db.collection(LEGACY_COLLECTION_NAME).findOne({ _id: String(transcriptId) });
 }
 
 async function recordVerificationAttempt(
@@ -417,15 +412,10 @@ async function recordVerificationAttempt(
   valid,
   details = {},
 ) {
-  await (
-    await collection()
-  ).updateOne(
-    {
-      _id:
-        String(
-          transcriptId,
-        ),
-    },
+  const db = await getMongoDb();
+  const current = await db.collection(COLLECTION_NAME).findOne({ _id: integrityDocumentId(transcriptId) });
+  await db.collection(current ? COLLECTION_NAME : LEGACY_COLLECTION_NAME).updateOne(
+    { _id: current ? integrityDocumentId(transcriptId) : String(transcriptId) },
     {
       $inc: {
         verificationCount:

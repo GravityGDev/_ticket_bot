@@ -225,9 +225,9 @@ if (fs.existsSync(eventsPath)) {
   }
 }
 
-// Persistent Report Staff transcript tracking.
+// Persistent transcript tracking for all genuine ticket channels.
 //
-// These listeners continuously mirror Report Staff ticket messages to MongoDB.
+// These listeners continuously mirror ticket messages to MongoDB.
 // ChannelDelete then rebuilds the transcript from MongoDB, so even a manual
 // Discord channel deletion cannot erase the ticket history.
 client.on(Events.ChannelCreate, (channel) => {
@@ -316,12 +316,12 @@ client.on(Events.MessageReactionAdd, (reaction, user) => {
 
 client.on(Events.ChannelDelete, (channel) => {
   handleReportStaffChannelDelete(channel).catch((error) => {
-    console.error('[REPORT STAFF CHANNEL DELETE ARCHIVE ERROR]', error);
+    console.error('[TICKET CHANNEL DELETE ARCHIVE ERROR]', error);
   });
 });
 
 client.once(Events.ClientReady, (readyClient) => {
-  // Backfill any Report Staff tickets that already existed when this update
+  // Backfill existing tickets when this update
   // was deployed, so their earlier visible history is copied into MongoDB too.
   backfillOpenReportStaffTickets(readyClient).catch((error) => {
     console.error('[REPORT STAFF BACKFILL ERROR]', error);

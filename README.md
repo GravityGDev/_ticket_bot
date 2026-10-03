@@ -531,7 +531,17 @@ If transcript logging fails, deletion is aborted to protect ticket history.
 
 # Ticket Transcripts
 
-Ticket transcripts are generated as HTML files.
+Ticket transcripts are generated as signed HTML files.
+
+All genuine ticket channels are continuously archived in the existing `report_staff_archives` and `report_staff_messages` collections, including normal tickets. Existing tickets are backfilled at startup. This preserves messages and edit history for manual deletion recovery without creating more MongoDB collections.
+
+Final deletion transcripts show the deleting user's name and ID, deletion method (Delete button, manual channel deletion, or automation), and deletion time. Button deletion records the person who clicked Delete after Discord confirms deletion, rather than attributing it to the bot. Manual deletion requires the bot's **View Audit Log** permission; unavailable audit information is shown as **Unknown**.
+
+Button deletion creates a safety archive before removing the channel, followed by a final deletion transcript with confirmed deletion details. Normal final transcripts go to the ticket log channel. Report Staff final transcripts retain their security-recipient and creator DM backups. A failed safety archive cancels button deletion; failed final delivery retains the messages and deletion metadata in MongoDB.
+
+Set `TRANSCRIPT_SIGNING_SECRET` to a private value of at least 32 characters in Dokploy. Keep the same secret to verify older transcripts. New integrity records use namespaced documents in the existing `bot_settings` collection; old integrity records remain readable by `/verify-transcript`.
+
+Messages already deleted before they were tracked cannot be recovered. Let startup backfill finish before manually deleting existing tickets.
 
 Transcript contents include:
 

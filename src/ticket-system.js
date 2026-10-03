@@ -44,6 +44,7 @@ const {
 } = require('./transcript-integrity');
 
 const { ticketCreationDenial } = require('./ticket-access');
+const { deleteTicketChannel } = require('./ticket-deletion-audit');
 
 const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
@@ -6359,6 +6360,8 @@ async function buildTranscriptAuditData(
     );
   }
 
+  if (data?.deletionRequestedById) ids.add(String(data.deletionRequestedById));
+
   if (data?.claimedById) {
     ids.add(
       String(
@@ -6439,6 +6442,8 @@ async function buildTranscriptAuditData(
     transcriptCreatedById:
       transcriptCreatedByUser?.id ||
       null,
+    deletionRequestedById: data.deletionRequestedById || null,
+    deletionMethod: data.deletionMethod || null,
     labels,
   };
 }
@@ -6623,6 +6628,7 @@ function renderTranscriptAuditHtml(
       <div class="audit-item"><span>Current / Final Owner</span><b>${escapeHtml(currentClaimer)}</b></div>
       <div class="audit-item"><span>Current Assistants</span><b>${escapeHtml(currentAssistants)}</b></div>
       <div class="audit-item"><span>Transcript Created By</span><b>${escapeHtml(transcriptCreatedBy)}</b></div>
+      ${audit.deletionRequestedById ? `<div class="audit-item"><span>Deletion Requested By</span><b>${escapeHtml(label(audit.deletionRequestedById))}</b><div class="audit-date">${escapeHtml(audit.deletionMethod || 'Unknown')} • Archived before deletion</div></div>` : ''}
       <div class="audit-item">
         <span>Ticket Closed By</span>
         <b>${escapeHtml(closedBy)}</b>
@@ -7045,6 +7051,8 @@ async function buildTranscriptArtifact(
         closedAt ||
         data.closedAt ||
         null,
+      deletionRequestedById: data.deletionRequestedById || null,
+      deletionMethod: data.deletionMethod || null,
       messageCount: messages.length,
     },
   });
@@ -7446,6 +7454,7 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
   let artifact;
 
   try {
+    await require('./report-staff-tracker').backfillTicketBeforeDelete(channel);
     artifact = await buildTranscriptArtifact(
       channel,
       data,
@@ -7598,8 +7607,8 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
         value: participantText,
       },
       {
-        name: 'Transcript Created By',
-        value: `<@${deletedByUser.id}>`,
+        name: data.deletionRequestedById ? 'Deletion Requested By' : 'Transcript Created By',
+        value: `<@${data.deletionRequestedById || deletedByUser.id}>`,
       },
       {
         name: 'Ticket Closed By',
@@ -7625,7 +7634,7 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
       },
     )
     .setFooter({
-      text: `Final transcript • ${artifact.messages.length} messages`,
+      text: `Pre-deletion safety archive • ${artifact.messages.length} messages`,
     })
     .setTimestamp();
 
@@ -7680,7 +7689,7 @@ async function sendTranscriptToLog(channel, data, deletedByUser) {
       embed,
     ).setFooter({
       text:
-        `Final transcript • ${artifact.messages.length} messages • GZIP compressed`,
+        `Pre-deletion safety archive • ${artifact.messages.length} messages • GZIP compressed`,
     });
 
   if (
@@ -8217,6 +8226,8 @@ async function deleteTicket(interaction) {
     ...data,
     closedById,
     closedAt,
+    deletionRequestedById: interaction.user.id,
+    deletionMethod: 'Delete button',
   };
 
   await interaction.deferUpdate();
@@ -8298,7 +8309,7 @@ async function deleteTicket(interaction) {
   }
 
   try {
-    await interaction.channel.delete(`Closed ticket deleted by ${interaction.user.tag}`);
+    await deleteTicketChannel(interaction.channel, 'button', interaction.user);
     await deleteTicketState(channelId).catch((error) => {
       console.error('[TICKET STATE DELETE ERROR]', error);
     });
@@ -11915,7 +11926,7 @@ async function closeDepartedCreatorTicket(channel, knownData = null) {
     await sendTranscriptToLog(channel, closedData, botUser);
     // Recheck after archiving; a rejoin must not destroy a ticket unexpectedly.
     if (!await creatorHasLeftGuild(channel.guild, data.creatorId)) return true;
-    await channel.delete('Automatically deleted: ticket creator left; transcript archived');
+    await deleteTicketChannel(channel, 'automatic', botUser);
     liveTicketStateCache.delete(channel.id);
     ticketRenameStates.delete(channel.id);
     await deleteTicketState(channel.id);
