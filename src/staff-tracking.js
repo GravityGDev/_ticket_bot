@@ -751,12 +751,11 @@ function detailNavRow(periodKey, filterKey, memberId, rows) {
   );
 }
 
-function canAdjustStaffPointsMember(member) {
-  return Boolean(
-    member?.permissions.has(
-      PermissionFlagsBits.Administrator,
-    ),
-  );
+async function canAdjustStaffPointsMember(member) {
+  return Boolean(member && (
+    member.permissions.has(PermissionFlagsBits.Administrator) ||
+    await canManageStaffSettings(member.guild.id, member.id)
+  ));
 }
 
 function buildPointAdjustmentRow(
@@ -796,11 +795,11 @@ function buildPointAdjustmentModal(
       .setCustomId('points_value')
       .setLabel(
         ticketMode
-          ? 'Ticket points (number or AUTO)'
-          : 'Message points (number or AUTO)',
+          ? 'Ticket points (total, -amount or AUTO)'
+          : 'Message points (total, -amount or AUTO)',
       )
       .setPlaceholder(
-        'Example: 50 or 0.5  •  AUTO = automatic',
+        '50 = set total; -10 = remove; AUTO = reset',
       )
       .setStyle(TextInputStyle.Short)
       .setMinLength(1)
@@ -1117,7 +1116,7 @@ async function buildDetailPayload(
         .fetch(String(viewerId))
         .catch(() => null));
 
-    if (canAdjustStaffPointsMember(viewer)) {
+    if (await canAdjustStaffPointsMember(viewer)) {
       components.push(
         buildPointAdjustmentRow(
           periodKey,
@@ -1243,13 +1242,13 @@ async function handleStaffTrackingInteraction(interaction) {
     interaction.isButton()
   ) {
     if (
-      !interaction.memberPermissions?.has(
-        PermissionFlagsBits.Administrator,
-      )
+      !(await canAdjustStaffPointsMember(
+        await interaction.guild.members.fetch(interaction.user.id).catch(() => null),
+      ))
     ) {
       await interaction.reply({
         content:
-          'Only Administrators can manually set staff points.',
+          'Only Administrators or staff-stat settings editors can adjust staff points.',
         flags:
           MessageFlags.Ephemeral,
       }).catch(() => {});
@@ -1282,13 +1281,13 @@ async function handleStaffTrackingInteraction(interaction) {
     interaction.isModalSubmit()
   ) {
     if (
-      !interaction.memberPermissions?.has(
-        PermissionFlagsBits.Administrator,
-      )
+      !(await canAdjustStaffPointsMember(
+        await interaction.guild.members.fetch(interaction.user.id).catch(() => null),
+      ))
     ) {
       await interaction.reply({
         content:
-          'Only Administrators can manually set staff points.',
+          'Only Administrators or staff-stat settings editors can adjust staff points.',
         flags:
           MessageFlags.Ephemeral,
       }).catch(() => {});
@@ -1317,12 +1316,25 @@ async function handleStaffTrackingInteraction(interaction) {
           .trim();
 
       let value = null;
+      let removedAmount = null;
 
       if (
         rawValue.toLowerCase() !== 'auto'
       ) {
-        value =
-          Number(rawValue);
+        value = Number(rawValue);
+        if (/^-/.test(rawValue) && Number.isFinite(value) && value < 0 && value >= -10000000) {
+          const [snapshot, settings, overrides] = await Promise.all([
+            getStaffSnapshot(interaction.guild.id, periodKey),
+            getStaffTrackingSettings(interaction.guild.id),
+            getStaffPointOverridesForPeriod(interaction.guild.id, periodKey),
+          ]);
+          const override = overrides.get(memberId);
+          const current = pointType === 'ticket'
+            ? (override?.ticketPoints ?? ((snapshot.claimCounts.get(memberId) || 0) * settings.ticketClaimPoints))
+            : (override?.messagePoints ?? ((snapshot.messageCounts.get(memberId) || 0) * settings.trackedMessagePoints));
+          removedAmount = Math.min(current, -value);
+          value = Math.max(0, current + value);
+        }
 
         if (
           !Number.isFinite(value) ||
@@ -1331,7 +1343,7 @@ async function handleStaffTrackingInteraction(interaction) {
         ) {
           await interaction.followUp({
             content:
-              'Points must be a number from **0** to **10,000,000**, or `AUTO`. Decimals such as `0.5` are allowed.',
+              'Enter a total from **0** to **10,000,000**, a negative amount to remove points (e.g. `-10`), or `AUTO`. Decimals such as `-0.5` are allowed.',
             flags:
               MessageFlags.Ephemeral,
           });
@@ -1364,7 +1376,9 @@ async function handleStaffTrackingInteraction(interaction) {
 
       await interaction.followUp({
         content:
-          value === null
+          removedAmount !== null
+            ? `✅ Removed **${removedAmount.toLocaleString()}** ${pointType} points from <@${memberId}>. New total: **${value.toLocaleString()}**.`
+            : value === null
             ? `✅ ${pointType === 'ticket' ? 'Ticket' : 'Message'} points returned to **automatic scoring** for <@${memberId}> (${PERIODS[periodKey].label}).`
             : `✅ Set ${pointType === 'ticket' ? 'ticket' : 'message'} points to **${value.toLocaleString()}** for <@${memberId}> (${PERIODS[periodKey].label}).`,
         flags:
@@ -1503,3 +1517,4 @@ module.exports = {
   sendStaffTrackingPanel,
   handleStaffTrackingInteraction,
 };
+

@@ -19,6 +19,8 @@ const {
   roleLevelNumber,
 } = require('./staff-role-hierarchy');
 
+const { canManageStaffSettings } = require('./staff-settings-store');
+
 const COLLECTION_NAME =
   'staff_command_permissions';
 
@@ -74,6 +76,8 @@ const DEFAULT_MINIMUM_ROLE = Object.freeze({
   // Previous "admin" command group starts at the Lead Developer tier.
   'chat:staff-stats': SENIOR_STAFF_ROLE_INDEX,
   'chat:ticket-panel': SENIOR_STAFF_ROLE_INDEX,
+  'chat:ticket-mute': SENIOR_STAFF_ROLE_INDEX,
+  'chat:ticket-unmute': SENIOR_STAFF_ROLE_INDEX,
   'chat:verify-transcript': SENIOR_STAFF_ROLE_INDEX,
   'chat:warn': SENIOR_STAFF_ROLE_INDEX,
   'chat:warnings': SENIOR_STAFF_ROLE_INDEX,
@@ -630,6 +634,9 @@ async function authorizeApplicationCommand(
     canMemberUseCommandSync(
       member,
       commandKey,
+    ) || (
+      commandKey === 'chat:staff-stats' &&
+      await canManageStaffSettings(interaction.guild.id, interaction.user.id)
     )
   ) {
     interaction.__snayPermissionAuthorized =
@@ -1420,3 +1427,4 @@ module.exports = {
   sendPermissionPanel,
   handleStaffPermissionInteraction,
 };
+

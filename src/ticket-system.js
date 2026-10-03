@@ -42,6 +42,8 @@ const {
   signAndStoreTranscript,
 } = require('./transcript-integrity');
 
+const { ticketCreationDenial } = require('./ticket-access');
+
 const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
 const ROLE_PAGE_SIZE = 25;
@@ -3467,6 +3469,12 @@ async function createTicket(interaction, typeKey) {
             interaction.user.id,
           )
           .catch(() => null));
+
+  const creationDenial = await ticketCreationDenial(guild, creatorMember);
+  if (creationDenial) {
+    await interaction.editReply({ content: creationDenial, components: [], allowedMentions: { parse: [] } });
+    return;
+  }
 
   const creatorWasStaff =
     isTicketStaffMember(
@@ -8178,11 +8186,12 @@ async function deleteTicket(interaction) {
 
   if (
     data.typeKey !== 'report_staff' &&
+    !isBotDeveloper(interaction.user) &&
     !member?.roles?.cache?.has(NORMAL_TICKET_DELETE_ROLE_ID)
   ) {
     await interaction.reply({
       content:
-        `Only <@&${NORMAL_TICKET_DELETE_ROLE_ID}> can delete normal tickets.`,
+        `Only the bot developer or <@&${NORMAL_TICKET_DELETE_ROLE_ID}> can delete normal tickets.`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: {
         parse: [],
@@ -11849,6 +11858,96 @@ async function handleUnmuteDecision(interaction, decision) {
   }).catch(() => {});
 }
 
+
+const departedTicketJobs = new Map();
+
+async function creatorHasLeftGuild(guild, creatorId) {
+  try {
+    // Do not rely on cache: a member may have left while the bot was offline.
+    await guild.members.fetch({ user: String(creatorId), force: true });
+    return false;
+  } catch (error) {
+    if (Number(error?.code) === 10007) return true;
+    // Missing permissions, network failures and rate limits are not proof of departure.
+    throw error;
+  }
+}
+
+async function closeDepartedCreatorTicket(channel, knownData = null) {
+  if (departedTicketJobs.has(channel.id)) return departedTicketJobs.get(channel.id);
+  const job = (async () => {
+    const data = knownData || await getLiveTicketData(channel);
+    if (!data?.creatorId || !await creatorHasLeftGuild(channel.guild, data.creatorId)) return false;
+    const botUser = channel.client.user;
+    const closedData = {
+      ...data,
+      closedById: data.closedById || botUser.id,
+      closedAt: data.closedAt || new Date().toISOString(),
+    };
+    if (!data.closedAt) {
+      if (channel.permissionOverwrites?.cache?.has(data.creatorId)) {
+        await channel.permissionOverwrites.edit(data.creatorId, {
+          ViewChannel: false, SendMessages: false,
+        }, 'Ticket creator left the server');
+      }
+      await updateTicketTopic(channel, data, {
+        closedById: closedData.closedById,
+        closedAt: closedData.closedAt,
+      }, 'Ticket creator left the server');
+      await channel.send({
+        content: '🔒 This ticket was automatically closed because its creator left the server.',
+        ...buildClosedTicketMessage(botUser.id),
+        allowedMentions: { parse: [] },
+      });
+      // Queue the cosmetic rename so rate limits cannot delay archiving.
+      requestTicketChannelRename(
+        channel,
+        buildTicketChannelName(CLOSED_TICKET_NAME_PREFIX, data.number || 0,
+          getTicketChannelLabel(channel, data) || TICKET_TYPES[data.typeKey]?.slug || 'ticket'),
+        'Ticket creator left the server',
+      );
+    }
+    const messages = await fetchAllChannelMessages(channel);
+    const hasConversation = messages.some(message => !message.author?.bot && !message.system);
+    // Empty tickets stay closed. A later human message triggers this check again.
+    if (!hasConversation) return true;
+    await sendTranscriptToLog(channel, closedData, botUser);
+    // Recheck after archiving; a rejoin must not destroy a ticket unexpectedly.
+    if (!await creatorHasLeftGuild(channel.guild, data.creatorId)) return true;
+    await channel.delete('Automatically deleted: ticket creator left; transcript archived');
+    liveTicketStateCache.delete(channel.id);
+    ticketRenameStates.delete(channel.id);
+    await deleteTicketState(channel.id);
+    console.log(`[TICKET CREATOR DEPARTURE] Archived and deleted ${channel.id}; creator=${data.creatorId}.`);
+    return true;
+  })();
+  departedTicketJobs.set(channel.id, job);
+  try {
+    return await job;
+  } finally {
+    departedTicketJobs.delete(channel.id);
+  }
+}
+
+async function closeDepartedCreatorTickets(guild, creatorId = null) {
+  const states = await getTicketStatesForGuild(guild.id);
+  const stateById = new Map(states.map(state => [state.channelId, state]));
+  await guild.channels.fetch();
+  const channels = [...guild.channels.cache.values()].filter(channel => {
+    const data = stateById.get(channel.id) || getTicketData(channel);
+    return data?.creatorId && (!creatorId || String(data.creatorId) === String(creatorId));
+  });
+  for (const channel of channels) {
+    try {
+      await closeDepartedCreatorTicket(channel);
+    } catch (error) {
+      // Keep the channel if transcript archiving or membership verification fails.
+      console.error(`[TICKET DEPARTURE CLEANUP ERROR] ${channel.id}`, error);
+    }
+  }
+}
+
+
 async function handleTicketMessageCreate(
   message,
 ) {
@@ -11894,13 +11993,17 @@ async function handleTicketMessageCreate(
       message.channel,
     );
 
-  if (
-    !data ||
-    data.typeKey ===
-      'report_staff'
-  ) {
-    return false;
+  if (!data) return false;
+
+  if (!message.guild.members.cache.has(String(data.creatorId))) {
+    try {
+      if (await closeDepartedCreatorTicket(message.channel, data)) return true;
+    } catch (error) {
+      console.error('[TICKET MESSAGE DEPARTURE CHECK ERROR]', error);
+    }
   }
+
+  if (data.typeKey === 'report_staff') return false;
 
   // The ticket creator is a customer in their own ticket even if they also
   // happen to hold a staff role.
@@ -12402,6 +12505,7 @@ async function handleTicketInteraction(interaction) {
 }
 
 module.exports = {
+  closeDepartedCreatorTickets,
   buildPanelMessage,
   getGuildConfig,
   handleTicketInteraction,
@@ -12409,3 +12513,4 @@ module.exports = {
   restoreTicketRuntimeState,
   sendTicketPanelCommand,
 };
+
