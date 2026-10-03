@@ -590,10 +590,19 @@ async function resetMinimumRole(
 async function authorizeApplicationCommand(
   interaction,
 ) {
+  // Acknowledge mute commands before member fetches or MongoDB permission reads.
+  const isTicketMuteCommand = ['ticket-mute', 'ticket-unmute'].includes(interaction.commandName);
+  if (isTicketMuteCommand && !interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  }
+  const respond = (response) => interaction.deferred
+    ? interaction.editReply(response)
+    : interaction.reply(response);
+
   if (
     !interaction.inGuild?.()
   ) {
-    await interaction.reply({
+    await respond({
       content:
         'Use this command inside the server.',
       flags:
@@ -611,7 +620,7 @@ async function authorizeApplicationCommand(
       .catch(() => null);
 
   if (!member) {
-    await interaction.reply({
+    await respond({
       content:
         'I could not resolve your staff role.',
       flags:
@@ -669,7 +678,7 @@ async function authorizeApplicationCommand(
             `or a higher staff role`
           );
 
-  await interaction.reply({
+  await respond({
     content:
       `You do not have access to **${commandDisplayName(commandKey)}**.\n` +
       `**Required:** ${requirement}`,
