@@ -32,6 +32,7 @@ const {
   recordStaffActivityMessage,
 } = require('./staff-tracking-store');
 const { handleStaffTrackingInteraction } = require('./staff-tracking');
+const { handleHangmanInteraction } = require('./hangman-game');
 const {
   handleWarningInteraction,
   refreshWarningCountdowns,
@@ -508,6 +509,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (await handleStaffTrackingInteraction(interaction)) {
+      return;
+    }
+
+    if (await handleHangmanInteraction(interaction)) {
       return;
     }
 
