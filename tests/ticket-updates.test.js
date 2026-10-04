@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const pointsApi = require('../src/staff-activity-points');
 
 let muteRecord = null;
 const muteCollection = {
@@ -143,7 +144,7 @@ test('point deductions use existing overrides or automatic totals and clamp to z
   const start = source.indexOf('      let value = null;', source.indexOf("action === 'pointmodal'"));
   const end = source.indexOf('      await setStaffPointOverride(', start);
   const body = source.slice(start, end);
-  const calculate = new Function('rawValue', 'pointType', 'override', 'interaction', `
+  const calculate = new Function('rawValue', 'pointType', 'override', 'interaction', 'calculateStaffActivityPoints', `
     return (async () => {
       const periodKey = 'weekly', memberId = 'staff';
       const getStaffSnapshot = async () => ({ claimCounts: new Map([['staff', 3]]), messageCounts: new Map([['staff', 20]]) });
@@ -154,8 +155,8 @@ test('point deductions use existing overrides or automatic totals and clamp to z
     })();
   `);
   const interaction = { guild: { id: 'guild' }, followUp: async () => {} };
-  assert.deepEqual(await calculate('-0.5', 'ticket', null, interaction), { value: 1, removedAmount: 0.5 });
-  assert.deepEqual(await calculate('-10', 'message', { messagePoints: 50 }, interaction), { value: 40, removedAmount: 10 });
-  assert.deepEqual(await calculate('-999', 'ticket', null, interaction), { value: 0, removedAmount: 1.5 });
-  assert.deepEqual(await calculate('AUTO', 'ticket', null, interaction), { value: null, removedAmount: null });
+  assert.deepEqual(await calculate('-0.5', 'ticket', null, interaction, pointsApi.calculateStaffActivityPoints), { value: 1, removedAmount: 0.5 });
+  assert.deepEqual(await calculate('-10', 'message', { messagePoints: 50 }, interaction, pointsApi.calculateStaffActivityPoints), { value: 40, removedAmount: 10 });
+  assert.deepEqual(await calculate('-999', 'ticket', null, interaction, pointsApi.calculateStaffActivityPoints), { value: 0, removedAmount: 1.5 });
+  assert.deepEqual(await calculate('AUTO', 'ticket', null, interaction, pointsApi.calculateStaffActivityPoints), { value: null, removedAmount: null });
 });
