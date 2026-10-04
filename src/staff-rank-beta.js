@@ -201,22 +201,27 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
   const messages = snapshot.messageCounts.get(member.id) || 0;
   const rank = !isRankHidden && rankIndex >= 0 ? rankIndex + 1 : null;
 
-  const score = rankedRow?.activityScore ?? (
-    tickets * pointSettings.ticketClaimPoints +
-    messages * pointSettings.trackedMessagePoints
+  const memberOverride = pointOverrides?.get(member.id) || null;
+  const memberActivity = calculateStaffActivityPoints(
+    tickets,
+    messages,
+    pointSettings,
+    memberOverride,
+    periodKey,
   );
 
-  const displayedTicketValue = rankedRow?.ticketPointsManual
-    ? rankedRow.ticketPoints
-    : tickets;
-  const displayedMessageValue = rankedRow?.messagePointsManual
-    ? rankedRow.messagePoints
-    : messages;
+  const score = rankedRow?.activityScore ?? memberActivity.activityScore;
 
-  const ticketStatLine1 = rankedRow?.ticketPointsManual ? 'TICKET' : 'TICKETS';
-  const ticketStatLine2 = rankedRow?.ticketPointsManual ? 'POINTS' : 'CLAIMED';
-  const messageStatLine1 = rankedRow?.messagePointsManual ? 'MESSAGE' : 'TRACKED';
-  const messageStatLine2 = rankedRow?.messagePointsManual ? 'POINTS' : 'MESSAGES';
+  // These tiles are counts only; point overrides stay in scoring/XP.
+  const displayedTicketValue =
+    rankedRow?.ticketClaims ?? memberActivity.ticketClaims;
+  const displayedMessageValue =
+    rankedRow?.trackedMessages ?? memberActivity.trackedMessages;
+
+  const ticketStatLine1 = 'TICKETS';
+  const ticketStatLine2 = 'CLAIMED';
+  const messageStatLine1 = 'TRACKED';
+  const messageStatLine2 = 'MESSAGES';
 
   const xp = getXpState(score);
   const progressPercent = Math.round(xp.progress * 100);
