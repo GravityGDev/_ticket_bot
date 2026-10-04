@@ -467,9 +467,6 @@ async function renderRankCard(guild, member, periodKey) {
 
   const ticketPointLabel = `${pointSettings.ticketClaimPoints} pts / claim`;
   const messagePointLabel = `${pointSettings.trackedMessagePoints} pts / message`;
-  const manualOverrideLabel = rankedRow?.ticketPointsManual || rankedRow?.messagePointsManual
-    ? ' • Manual totals' : '';
-
   const starMarkup =
     starLevel === 2
       ? `
@@ -958,7 +955,7 @@ async function renderRankCard(guild, member, periodKey) {
     <text x="738" y="868"
           font-family="DejaVu Sans, sans-serif"
           font-size="25"
-          fill="#aeb9c9">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}${escapeXml(manualOverrideLabel)}</text>
+          fill="#aeb9c9">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}</text>
 
     <!-- footer -->
     <line x1="84" y1="958"
