@@ -104,7 +104,7 @@ test('rank card always shows claim/message counts while activity score uses poin
   assert.match(svg, />TRACKED<\/text>/);
   assert.match(svg, />MESSAGES<\/text>/);
   assert.match(svg, />113<\/text>/);
-  assert.match(svg, /Manual totals/);
+  assert.ok(!svg.includes('Manual totals'));
   assert.equal(snapshot.claimCounts.get('123'), 3);
   assert.equal(snapshot.messageCounts.get('123'), 4);
   const png = await sharp(Buffer.from(svg)).png().toBuffer();
