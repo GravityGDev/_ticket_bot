@@ -94,13 +94,15 @@ test('manual totals keep gaining automatic ticket and message points after the e
   assert.equal(grown.messagePointsAdjustment, 8.5);
 });
 
-test('rank card renders manual categories and values rather than raw counts', async () => {
-  const { svg, snapshot } = await rankFixture({ ticketPoints: 100.5, messagePoints: 12.5 });
-  assert.match(svg, />TICKET<\/text>/);
-  assert.match(svg, />MESSAGE<\/text>/);
-  assert.match(svg, />POINTS<\/text>/);
-  assert.match(svg, />100.5<\/text>/);
-  assert.match(svg, />12.5<\/text>/);
+test('rank card always shows claim/message counts while activity score uses points', async () => {
+  const { svg, snapshot } = await rankFixture({
+    ticketPoints: 100.5,
+    messagePoints: 12.5,
+  });
+  assert.match(svg, />TICKETS<\/text>/);
+  assert.match(svg, />CLAIMED<\/text>/);
+  assert.match(svg, />TRACKED<\/text>/);
+  assert.match(svg, />MESSAGES<\/text>/);
   assert.match(svg, />113<\/text>/);
   assert.match(svg, /Manual totals/);
   assert.equal(snapshot.claimCounts.get('123'), 3);
@@ -110,18 +112,69 @@ test('rank card renders manual categories and values rather than raw counts', as
   if (process.env.POINT_DISPLAY_QA_PATH) fs.writeFileSync(process.env.POINT_DISPLAY_QA_PATH, png);
 });
 
-test('zero manual points and one-category overrides display correctly; AUTO restores counts', async () => {
+test('point overrides never change the rank-card count labels', async () => {
   const zero = await rankFixture({ ticketPoints: 0, messagePoints: null });
-  assert.match(zero.svg, />TICKET<\/text>/);
+  assert.match(zero.svg, />TICKETS<\/text>/);
+  assert.match(zero.svg, />CLAIMED<\/text>/);
   assert.match(zero.svg, />TRACKED<\/text>/);
+  assert.match(zero.svg, />MESSAGES<\/text>/);
+
   const message = await rankFixture({ ticketPoints: null, messagePoints: 20 });
   assert.match(message.svg, />TICKETS<\/text>/);
-  assert.match(message.svg, />MESSAGE<\/text>/);
-  assert.match(message.svg, />20<\/text>/);
+  assert.match(message.svg, />CLAIMED<\/text>/);
+  assert.match(message.svg, />TRACKED<\/text>/);
+  assert.match(message.svg, />MESSAGES<\/text>/);
+
   const auto = await rankFixture(null);
   assert.match(auto.svg, />CLAIMED<\/text>/);
   assert.match(auto.svg, />MESSAGES<\/text>/);
   assert.ok(!auto.svg.includes('Manual totals'));
+});
+
+test('manual display counts are independent from ticket/message points and keep growing', async () => {
+  const override = {
+    ticketClaims: 10,
+    trackedMessages: 40,
+    ticketClaimsBaselines: { lifetime: 3 },
+    trackedMessagesBaselines: { lifetime: 4 },
+    ticketPoints: 32,
+    messagePoints: 2065.5,
+    ticketPointsBaselines: { lifetime: 1.5 },
+    messagePointsBaselines: { lifetime: 4 },
+  };
+
+  const current = pointsApi.calculateStaffActivityPoints(
+    3,
+    4,
+    settings,
+    override,
+    'lifetime',
+  );
+  assert.equal(current.ticketClaims, 10);
+  assert.equal(current.trackedMessages, 40);
+  assert.equal(current.ticketPoints, 32);
+  assert.equal(current.messagePoints, 2065.5);
+  assert.equal(current.activityScore, 2097.5);
+
+  const grown = pointsApi.calculateStaffActivityPoints(
+    5,
+    7,
+    settings,
+    override,
+    'lifetime',
+  );
+  assert.equal(grown.ticketClaims, 12);
+  assert.equal(grown.trackedMessages, 43);
+  assert.equal(grown.ticketPoints, 33);
+  assert.equal(grown.messagePoints, 2068.5);
+  assert.equal(grown.activityScore, 2101.5);
+
+  const card = await rankFixture(override);
+  assert.match(card.svg, />TICKETS<\/text>/);
+  assert.match(card.svg, />CLAIMED<\/text>/);
+  assert.match(card.svg, />TRACKED<\/text>/);
+  assert.match(card.svg, />MESSAGES<\/text>/);
+  assert.match(card.svg, />2097.5<\/text>/);
 });
 
 test('leaderboard includes manual-only staff and shows matching point breakdowns', () => {
