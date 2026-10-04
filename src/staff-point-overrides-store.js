@@ -1,6 +1,15 @@
 const {
   getMongoDb,
 } = require('./database');
+const {
+  getStaffSnapshot,
+} = require('./staff-tracking-store');
+const {
+  getStaffTrackingSettings,
+} = require('./staff-settings-store');
+const {
+  POINT_PERIODS,
+} = require('./staff-activity-points');
 
 const COLLECTION =
   'staff_point_overrides';
@@ -16,6 +25,158 @@ const VALID_PERIODS =
     'lifetime',
     GLOBAL_PERIOD,
   ]);
+
+function hasCompleteBaselines(
+  value,
+) {
+  return (
+    value &&
+    POINT_PERIODS.every(
+      (periodKey) =>
+        Number.isFinite(
+          value[periodKey],
+        ),
+    )
+  );
+}
+
+async function buildAutomaticBaselines(
+  guildId,
+  userId,
+  pointType,
+) {
+  const [
+    settings,
+    snapshots,
+  ] = await Promise.all([
+    getStaffTrackingSettings(
+      guildId,
+    ),
+    Promise.all(
+      POINT_PERIODS.map(
+        (periodKey) =>
+          getStaffSnapshot(
+            guildId,
+            periodKey,
+          ),
+      ),
+    ),
+  ]);
+
+  const rate =
+    pointType === 'ticket'
+      ? Number(
+          settings.ticketClaimPoints,
+        ) || 0
+      : Number(
+          settings.trackedMessagePoints,
+        ) || 0;
+
+  return Object.fromEntries(
+    POINT_PERIODS.map(
+      (
+        periodKey,
+        index,
+      ) => {
+        const snapshot =
+          snapshots[index];
+
+        const count =
+          pointType === 'ticket'
+            ? (
+                snapshot.claimCounts.get(
+                  String(
+                    userId,
+                  ),
+                ) || 0
+              )
+            : (
+                snapshot.messageCounts.get(
+                  String(
+                    userId,
+                  ),
+                ) || 0
+              );
+
+        return [
+          periodKey,
+          count * rate,
+        ];
+      },
+    ),
+  );
+}
+
+async function ensureAutomaticBaselines(
+  coll,
+  document,
+) {
+  if (!document) {
+    return null;
+  }
+
+  const updates = {};
+
+  if (
+    Number.isFinite(
+      document.ticketPoints,
+    ) &&
+    !hasCompleteBaselines(
+      document.ticketPointsBaselines,
+    )
+  ) {
+    updates.ticketPointsBaselines =
+      await buildAutomaticBaselines(
+        document.guildId,
+        document.userId,
+        'ticket',
+      );
+  }
+
+  if (
+    Number.isFinite(
+      document.messagePoints,
+    ) &&
+    !hasCompleteBaselines(
+      document.messagePointsBaselines,
+    )
+  ) {
+    updates.messagePointsBaselines =
+      await buildAutomaticBaselines(
+        document.guildId,
+        document.userId,
+        'message',
+      );
+  }
+
+  if (!Object.keys(updates).length) {
+    return document;
+  }
+
+  updates.baselineVersion = 1;
+  updates.baselineMigratedAt =
+    new Date().toISOString();
+
+  await coll.updateOne(
+    {
+      _id:
+        document._id,
+    },
+    {
+      $set:
+        updates,
+    },
+  );
+
+  console.log(
+    `[STAFF POINT OVERRIDE MIGRATION] ${document.userId}: anchored legacy manual totals so future activity can keep adding points.`,
+  );
+
+  return {
+    ...document,
+    ...updates,
+  };
+}
 
 function cleanPeriod(
   value,
@@ -106,6 +267,40 @@ function normalize(
       finiteOrNull(
         document.messagePoints,
       ),
+    ticketPointsBaselines:
+      document.ticketPointsBaselines &&
+      typeof document.ticketPointsBaselines ===
+        'object'
+        ? Object.fromEntries(
+            POINT_PERIODS.map(
+              (periodKey) => [
+                periodKey,
+                finiteOrNull(
+                  document.ticketPointsBaselines[
+                    periodKey
+                  ],
+                ),
+              ],
+            ),
+          )
+        : null,
+    messagePointsBaselines:
+      document.messagePointsBaselines &&
+      typeof document.messagePointsBaselines ===
+        'object'
+        ? Object.fromEntries(
+            POINT_PERIODS.map(
+              (periodKey) => [
+                periodKey,
+                finiteOrNull(
+                  document.messagePointsBaselines[
+                    periodKey
+                  ],
+                ),
+              ],
+            ),
+          )
+        : null,
     ticketPointsUpdatedAt:
       document.ticketPointsUpdatedAt ||
       (
@@ -437,16 +632,40 @@ async function getStaffPointOverride(
 
   if (global) {
     return normalize(
-      global,
+      await ensureAutomaticBaselines(
+        coll,
+        global,
+      ),
     );
   }
 
   try {
-    return await promoteLegacyOverride(
-      coll,
-      guildId,
-      userId,
-      periodKey,
+    const promoted =
+      await promoteLegacyOverride(
+        coll,
+        guildId,
+        userId,
+        periodKey,
+      );
+
+    if (!promoted) {
+      return null;
+    }
+
+    const promotedDocument =
+      await coll.findOne({
+        _id:
+          globalDocumentId(
+            guildId,
+            userId,
+          ),
+      });
+
+    return normalize(
+      await ensureAutomaticBaselines(
+        coll,
+        promotedDocument,
+      ),
     );
   } catch (error) {
     console.error(
@@ -508,9 +727,25 @@ async function getStaffPointOverridesForPeriod(
           userId,
         )
     ) {
+      let anchored =
+        document;
+
+      try {
+        anchored =
+          await ensureAutomaticBaselines(
+            coll,
+            document,
+          );
+      } catch (error) {
+        console.error(
+          `[STAFF POINT BASELINE MIGRATION ERROR] ${userId}`,
+          error,
+        );
+      }
+
       const value =
         normalize(
-          document,
+          anchored,
         );
 
       if (value) {
@@ -558,9 +793,26 @@ async function getStaffPointOverridesForPeriod(
     }
 
     if (migrated) {
+      const promotedDocument =
+        await coll.findOne({
+          _id:
+            globalDocumentId(
+              guildKey,
+              userId,
+            ),
+        });
+
+      const anchored =
+        await ensureAutomaticBaselines(
+          coll,
+          promotedDocument,
+        );
+
       map.set(
         userId,
-        migrated,
+        normalize(
+          anchored,
+        ),
       );
     }
   }
@@ -656,6 +908,21 @@ async function setStaffPointOverride(
       ),
   };
 
+  const baselineField =
+    pointType ===
+      'ticket'
+      ? 'ticketPointsBaselines'
+      : 'messagePointsBaselines';
+
+  const baselines =
+    value === null
+      ? null
+      : await buildAutomaticBaselines(
+          guildId,
+          userId,
+          pointType,
+        );
+
   if (
     value ===
       null
@@ -674,6 +941,8 @@ async function setStaffPointOverride(
           [updatedByField]:
             '',
           [updatedAtField]:
+            '',
+          [baselineField]:
             '',
         },
       },
@@ -712,6 +981,10 @@ async function setStaffPointOverride(
             ),
           [updatedAtField]:
             now,
+          [baselineField]:
+            baselines,
+          baselineVersion:
+            1,
         },
       },
       {
