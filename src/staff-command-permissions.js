@@ -49,6 +49,7 @@ const ADMINISTRATOR_ONLY_COMMANDS = new Set([
 
 const DEVELOPER_ONLY_COMMANDS = new Set([
   'chat:rank-beta',
+  'chat:hangman',
 ]);
 
 const HIERARCHY_SCHEMA_VERSION = 2;
@@ -89,6 +90,7 @@ const DEFAULT_MINIMUM_ROLE = Object.freeze({
   'chat:ping': 0,
   'chat:rank': 0,
   'chat:rank-beta': null,
+  'chat:hangman': null,
   'chat:team': 0,
   'chat:search': 0,
   'message:Search Associated Media': 0,
