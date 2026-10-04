@@ -801,6 +801,9 @@ function editableCommands(
           'chat:permissions' &&
         !ADMINISTRATOR_ONLY_COMMANDS.has(
           entry.commandKey,
+        ) &&
+        !DEVELOPER_ONLY_COMMANDS.has(
+          entry.commandKey,
         ),
     )
     .sort((a, b) =>
