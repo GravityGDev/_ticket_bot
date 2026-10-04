@@ -62,6 +62,38 @@ test('ticket/message manual totals are independent and agree with total score', 
   assert.equal(automatic.ticketPointsManual, false);
 });
 
+test('manual totals keep gaining automatic ticket and message points after the edit', () => {
+  const override = {
+    ticketPoints: 100.5,
+    messagePoints: 12.5,
+    ticketPointsBaselines: { lifetime: 1.5 },
+    messagePointsBaselines: { lifetime: 4 },
+  };
+
+  const unchanged = pointsApi.calculateStaffActivityPoints(
+    3,
+    4,
+    settings,
+    override,
+    'lifetime',
+  );
+  assert.equal(unchanged.ticketPoints, 100.5);
+  assert.equal(unchanged.messagePoints, 12.5);
+
+  const grown = pointsApi.calculateStaffActivityPoints(
+    5,
+    7,
+    settings,
+    override,
+    'lifetime',
+  );
+  assert.equal(grown.ticketPoints, 101.5);
+  assert.equal(grown.messagePoints, 15.5);
+  assert.equal(grown.activityScore, 117);
+  assert.equal(grown.ticketPointsAdjustment, 99);
+  assert.equal(grown.messagePointsAdjustment, 8.5);
+});
+
 test('rank card renders manual categories and values rather than raw counts', async () => {
   const { svg, snapshot } = await rankFixture({ ticketPoints: 100.5, messagePoints: 12.5 });
   assert.match(svg, />TICKET<\/text>/);
