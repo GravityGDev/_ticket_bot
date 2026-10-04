@@ -1,3 +1,4 @@
+const { calculateStaffActivityPoints } = require('./staff-activity-points');
 const {
   ActionRowBuilder,
   ButtonBuilder,
@@ -179,42 +180,11 @@ function withActivityPoints(
   pointSettings,
   pointOverride = null,
 ) {
-  const calculatedTicketPoints =
-    row.claims *
-    pointSettings.ticketClaimPoints;
-
-  const calculatedMessagePoints =
-    row.messages *
-    pointSettings.trackedMessagePoints;
-
-  const ticketPointsManual =
-    Number.isFinite(
-      pointOverride?.ticketPoints,
-    );
-
-  const messagePointsManual =
-    Number.isFinite(
-      pointOverride?.messagePoints,
-    );
-
-  const ticketPoints =
-    ticketPointsManual
-      ? pointOverride.ticketPoints
-      : calculatedTicketPoints;
-
-  const messagePoints =
-    messagePointsManual
-      ? pointOverride.messagePoints
-      : calculatedMessagePoints;
-
+  const points = calculateStaffActivityPoints(row.claims, row.messages, pointSettings, pointOverride);
   return {
     ...row,
-    calculatedTicketPoints,
-    calculatedMessagePoints,
-    ticketPoints,
-    messagePoints,
-    ticketPointsManual,
-    messagePointsManual,
+    ...points,
+    active: row.active || points.ticketPoints > 0 || points.messagePoints > 0,
     ticketPointsUpdatedBy:
       pointOverride
         ?.ticketPointsUpdatedBy ||
@@ -231,9 +201,6 @@ function withActivityPoints(
       pointOverride
         ?.messagePointsUpdatedAt ||
       null,
-    activityScore:
-      ticketPoints +
-      messagePoints,
   };
 }
 
@@ -516,7 +483,7 @@ function buildStaffSelectRow(periodKey, filterKey, page, visibleRows) {
               0,
               100,
             ),
-            description: `${row.activityScore.toLocaleString()} pts • ${row.claims} claimed • ${row.messages} messages${
+            description: `${row.activityScore.toLocaleString()} pts • ${row.ticketPoints.toLocaleString()} ticket pts • ${row.messagePoints.toLocaleString()} message pts${
               badges ? ` • ${badges}` : ''
             }`.slice(0, 100),
             value: row.member.id,
@@ -540,7 +507,7 @@ function buildLeaderboardEmbed({
   const filter = FILTERS[filterKey];
   const bestActive = getBestActiveStaff(allRows, pointSettings);
 
-  const rankingText = pageInfo.rows.length
+  const rankingLines = pageInfo.rows.length
     ? pageInfo.rows
         .map((row, index) => {
           const rank = pageInfo.start + index + 1;
@@ -551,23 +518,28 @@ function buildLeaderboardEmbed({
             .filter(Boolean)
             .join('');
 
-          // Keep each staff member to one compact line. This prevents the 10th
-          // entry being cut by Discord's 1024-character embed-field limit and
-          // avoids showing the same points twice.
+          // Show point categories rather than substituting raw activity counts.
           return (
             `**${rank}.** <@${row.member.id}>${badges ? ` ${badges}` : ''} — ` +
             `**${row.activityScore.toLocaleString()} pts** • ` +
-            `${row.claims} ticket${row.claims === 1 ? '' : 's'} • ` +
-            `${row.messages} msg${row.messages === 1 ? '' : 's'}`
+            `${row.ticketPoints.toLocaleString()} ticket pts • ` +
+            `${row.messagePoints.toLocaleString()} message pts`
           );
         })
-        .join('\n')
-    : '*No staff match this filter for the selected period.*';
+    : ['*No staff match this filter for the selected period.*'];
+
+  // Split on complete rows so Discord's field limit never cuts off a user.
+  const rankingChunks = [''];
+  for (const line of rankingLines) {
+    const last = rankingChunks.length - 1;
+    if (rankingChunks[last].length + line.length + 1 > 1024) rankingChunks.push(line);
+    else rankingChunks[last] += `${rankingChunks[last] ? '\n' : ''}${line}`;
+  }
 
   const bestActiveText = bestActive
     ? `${bestActive.hasStar ? `${getStarBadge(bestActive.starLevel)} ` : ''}<@${bestActive.member.id}> — ` +
       `**${bestActive.activityScore.toLocaleString()} activity points** • ` +
-      `${bestActive.claims} claimed • ${bestActive.messages} messages`
+      `${bestActive.ticketPoints.toLocaleString()} ticket pts • ${bestActive.messagePoints.toLocaleString()} message pts`
     : 'No active staff in this period.';
 
   const trackedCategories = trackingRules.trackedCategoryIds.map((id) => {
@@ -604,10 +576,10 @@ function buildLeaderboardEmbed({
           `**${pointSettings.trackedMessagePoints}** point${pointSettings.trackedMessagePoints === 1 ? '' : 's'} per tracked message\n` +
           '**Leaderboard order:** Total activity points',
       },
-      {
-        name: `🏆 Leaderboard by Points • Page ${pageInfo.page + 1}/${pageInfo.pageCount}`,
-        value: rankingText.slice(0, 1024),
-      },
+      ...rankingChunks.map((value, index) => ({
+        name: index === 0 ? `🏆 Leaderboard by Points • Page ${pageInfo.page + 1}/${pageInfo.pageCount}` : 'Leaderboard continued',
+        value,
+      })),
       {
         name: '💬 Activity Categories',
         value: trackedCategories.slice(0, 1024),

@@ -1714,3 +1714,8 @@ Discord bot powered by:
 In `/permissions`, select **Delete normal tickets (button)** or **Delete Report Staff tickets (button)**, then choose the minimum staff role or **Developer only**. The selected role and higher hierarchy roles receive access. Settings persist across restarts. **Reset** restores the previous defaults: the designated normal-ticket deletion role, or Discord Administrator for Report Staff. The bot developer retains access, and the reported person cannot delete their own Report Staff ticket.
 
 These settings control bot Delete buttons. Discord's Manage Channels permission still controls manual channel deletion.
+
+
+### Manual points in rank cards and leaderboards
+
+Manual ticket and message point totals are displayed in their matching point categories on `/rank`, including zero and decimal values. Categories using automatic scoring retain their activity counts on the rank card. Leaderboard rows show total points plus separate ticket-point and message-point totals. Recorded claims and messages remain the actual activity counts in staff details. `AUTO` restores automatic scoring. Staff with only manual points are included as active staff, and long leaderboard pages preserve whole rows across multiple embed fields.

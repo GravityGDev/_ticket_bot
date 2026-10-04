@@ -5,6 +5,7 @@ const {
 configureRankFonts();
 
 const sharp = require('sharp');
+const { calculateStaffActivityPoints } = require('./staff-activity-points');
 const {
   AttachmentBuilder,
   MessageFlags,
@@ -188,38 +189,8 @@ async function getRankRows(
             member.id,
           ) || null;
 
-        const calculatedTicketPoints =
-          tickets *
-          pointSettings.ticketClaimPoints;
-
-        const calculatedMessagePoints =
-          messages *
-          pointSettings.trackedMessagePoints;
-
-        const ticketPoints =
-          Number.isFinite(
-            pointOverride?.ticketPoints,
-          )
-            ? pointOverride.ticketPoints
-            : calculatedTicketPoints;
-
-        const messagePoints =
-          Number.isFinite(
-            pointOverride?.messagePoints,
-          )
-            ? pointOverride.messagePoints
-            : calculatedMessagePoints;
-
-        return {
-          member,
-          tickets,
-          messages,
-          ticketPoints,
-          messagePoints,
-          activityScore:
-            ticketPoints +
-            messagePoints,
-        };
+        const points = calculateStaffActivityPoints(tickets, messages, pointSettings, pointOverride);
+        return { member, tickets, messages, ...points };
       },
     )
     .sort(
@@ -380,6 +351,10 @@ async function renderRankCard(guild, member, periodKey) {
       ? rankedRow.messagePoints
       : messages;
 
+  const scoreValueFontSize = Math.min(68, Math.floor(210 / (score.toLocaleString().length * 0.65)));
+  const ticketValueFontSize = Math.min(68, Math.floor(210 / (displayedTicketValue.toLocaleString().length * 0.65)));
+  const messageValueFontSize = Math.min(68, Math.floor(210 / (displayedMessageValue.toLocaleString().length * 0.65)));
+
   const ticketStatLine1 =
     rankedRow?.ticketPointsManual
       ? 'TICKET'
@@ -480,25 +455,10 @@ async function renderRankCard(guild, member, periodKey) {
       normalizedDisplayName,
     );
 
-  const ticketPointLabel =
-    `${pointSettings.ticketClaimPoints} point${
-      pointSettings.ticketClaimPoints === 1
-        ? ''
-        : 's'
-    } per ticket claim`;
-
-  const messagePointLabel =
-    `${pointSettings.trackedMessagePoints} point${
-      pointSettings.trackedMessagePoints === 1
-        ? ''
-        : 's'
-    } per tracked message`;
-
-  const manualOverrideLabel =
-    rankedRow?.ticketPointsManual ||
-    rankedRow?.messagePointsManual
-      ? ' • MANUAL POINT OVERRIDE ACTIVE'
-      : '';
+  const ticketPointLabel = `${pointSettings.ticketClaimPoints} pts / claim`;
+  const messagePointLabel = `${pointSettings.trackedMessagePoints} pts / message`;
+  const manualOverrideLabel = rankedRow?.ticketPointsManual || rankedRow?.messagePointsManual
+    ? ' • Manual totals' : '';
 
   const starMarkup =
     starLevel === 2
@@ -836,7 +796,7 @@ async function renderRankCard(guild, member, periodKey) {
     <text x="738" y="724"
           text-anchor="middle"
           font-family="DejaVu Sans, sans-serif"
-          font-size="68"
+          font-size="${ticketValueFontSize}"
           font-weight="800"
           fill="#ffffff">${displayedTicketValue.toLocaleString()}</text>
 
@@ -890,7 +850,7 @@ async function renderRankCard(guild, member, periodKey) {
     <text x="1022" y="724"
           text-anchor="middle"
           font-family="DejaVu Sans, sans-serif"
-          font-size="68"
+          font-size="${messageValueFontSize}"
           font-weight="800"
           fill="#ffffff">${displayedMessageValue.toLocaleString()}</text>
 
@@ -942,7 +902,7 @@ async function renderRankCard(guild, member, periodKey) {
     <text x="1307" y="724"
           text-anchor="middle"
           font-family="DejaVu Sans, sans-serif"
-          font-size="68"
+          font-size="${scoreValueFontSize}"
           font-weight="800"
           fill="#ffffff">${score.toLocaleString()}</text>
 
