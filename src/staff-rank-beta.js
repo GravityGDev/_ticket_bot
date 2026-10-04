@@ -259,10 +259,6 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
 
   const ticketPointLabel = `${pointSettings.ticketClaimPoints} pts / claim`;
   const messagePointLabel = `${pointSettings.trackedMessagePoints} pts / message`;
-  const manualOverrideLabel = rankedRow?.ticketPointsManual || rankedRow?.messagePointsManual
-    ? ' • Manual totals'
-    : '';
-
   const starIcon = starLevel > 0
     ? `<polygon points="142,536 154,564 185,566 161,585 169,616 142,598 115,616 123,585 99,566 130,564"
         fill="#ffd15a" filter="url(#goldGlow)"/>`
@@ -436,7 +432,7 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
     <line x1="874" y1="774" x2="874" y2="787" stroke="#885fff" stroke-width="4"/><line x1="874" y1="837" x2="874" y2="850" stroke="#885fff" stroke-width="4"/>
     <line x1="836" y1="812" x2="849" y2="812" stroke="#885fff" stroke-width="4"/><line x1="899" y1="812" x2="912" y2="812" stroke="#885fff" stroke-width="4"/>
     <text x="950" y="801" font-family="DejaVu Sans, sans-serif" font-size="28" font-weight="800" fill="#ffffff">SCORING MODEL</text>
-    <text x="950" y="840" font-family="DejaVu Sans, sans-serif" font-size="23" fill="#aebbd0">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}${escapeXml(manualOverrideLabel)}</text>
+    <text x="950" y="840" font-family="DejaVu Sans, sans-serif" font-size="23" fill="#aebbd0">${escapeXml(ticketPointLabel)} • ${escapeXml(messagePointLabel)}</text>
 
     <line x1="266" y1="947" x2="658" y2="947" stroke="url(#accent)" stroke-opacity=".75"/>
     <line x1="878" y1="947" x2="1270" y2="947" stroke="url(#accent)" stroke-opacity=".75"/>
