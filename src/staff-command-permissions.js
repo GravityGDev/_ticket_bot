@@ -84,6 +84,7 @@ const DEFAULT_MINIMUM_ROLE = Object.freeze({
   'chat:help': 0,
   'chat:ping': 0,
   'chat:rank': 0,
+  'chat:rank-beta': null,
   'chat:team': 0,
   'chat:search': 0,
   'message:Search Associated Media': 0,
