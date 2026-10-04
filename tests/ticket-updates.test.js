@@ -141,12 +141,19 @@ test('staff point adjustment access includes editors and rejects other users', a
 
 test('point deductions use existing overrides or automatic totals and clamp to zero', async () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/staff-tracking.js'), 'utf8');
-  const start = source.indexOf('      let value = null;', source.indexOf("action === 'pointmodal'"));
+  const start = source.indexOf('      const metricConfig =', source.indexOf("action === 'pointmodal'"));
   const end = source.indexOf('      await setStaffPointOverride(', start);
   const body = source.slice(start, end);
   const calculate = new Function('rawValue', 'pointType', 'override', 'interaction', 'calculateStaffActivityPoints', `
     return (async () => {
       const periodKey = 'weekly', memberId = 'staff';
+      const STAFF_METRIC_EDIT_CONFIG = {
+        ticket: { currentKey: 'ticketPoints', integer: false },
+        message: { currentKey: 'messagePoints', integer: false },
+        ticketClaims: { currentKey: 'ticketClaims', integer: true },
+        trackedMessages: { currentKey: 'trackedMessages', integer: true },
+      };
+      const MessageFlags = { Ephemeral: 64 };
       const getStaffSnapshot = async () => ({ claimCounts: new Map([['staff', 3]]), messageCounts: new Map([['staff', 20]]) });
       const getStaffTrackingSettings = async () => ({ ticketClaimPoints: 0.5, trackedMessagePoints: 1 });
       const getStaffPointOverridesForPeriod = async () => new Map([['staff', override]]);
@@ -159,4 +166,18 @@ test('point deductions use existing overrides or automatic totals and clamp to z
   assert.deepEqual(await calculate('-10', 'message', { messagePoints: 50 }, interaction, pointsApi.calculateStaffActivityPoints), { value: 40, removedAmount: 10 });
   assert.deepEqual(await calculate('-999', 'ticket', null, interaction, pointsApi.calculateStaffActivityPoints), { value: 0, removedAmount: 1.5 });
   assert.deepEqual(await calculate('AUTO', 'ticket', null, interaction, pointsApi.calculateStaffActivityPoints), { value: null, removedAmount: null });
+  assert.deepEqual(
+    await calculate('-2', 'ticketClaims', {
+      ticketClaims: 10,
+      ticketClaimsBaselines: { weekly: 3 },
+    }, interaction, pointsApi.calculateStaffActivityPoints),
+    { value: 8, removedAmount: 2 },
+  );
+  assert.deepEqual(
+    await calculate('-5', 'trackedMessages', {
+      trackedMessages: 25,
+      trackedMessagesBaselines: { weekly: 20 },
+    }, interaction, pointsApi.calculateStaffActivityPoints),
+    { value: 20, removedAmount: 5 },
+  );
 });
