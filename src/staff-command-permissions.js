@@ -47,6 +47,10 @@ const ADMINISTRATOR_ONLY_COMMANDS = new Set([
   'chat:warn',
 ]);
 
+const DEVELOPER_ONLY_COMMANDS = new Set([
+  'chat:rank-beta',
+]);
+
 const HIERARCHY_SCHEMA_VERSION = 2;
 
 // This was the deployed order before the new roles were positioned. Saved
@@ -430,6 +434,16 @@ function canMemberUseCommandSync(
   if (!member) return false;
 
   if (
+    DEVELOPER_ONLY_COMMANDS.has(
+      commandKey,
+    )
+  ) {
+    return isBotDeveloper(
+      member,
+    );
+  }
+
+  if (
     ADMINISTRATOR_ONLY_COMMANDS.has(
       commandKey,
     )
@@ -693,13 +707,17 @@ async function authorizeApplicationCommand(
     );
 
   const requirement =
-    ADMINISTRATOR_ONLY_COMMANDS.has(
+    DEVELOPER_ONLY_COMMANDS.has(
       commandKey,
     )
-      ? 'Discord **Administrator** permission'
-      : minimum === null
-        ? 'Developer only'
-        : (
+      ? 'Developer only'
+      : ADMINISTRATOR_ONLY_COMMANDS.has(
+          commandKey,
+        )
+        ? 'Discord **Administrator** permission'
+        : minimum === null
+          ? 'Developer only'
+          : (
             `<@&${STAFF_ROLE_IDS[minimum]}> ` +
             `or a higher staff role`
           );
