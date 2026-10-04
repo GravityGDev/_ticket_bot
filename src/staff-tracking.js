@@ -51,6 +51,41 @@ const STAR_MANAGEMENT_ROLE_IDS = Object.freeze(
 
 const PAGE_SIZE = 10;
 
+const STAFF_METRIC_EDIT_CONFIG = Object.freeze({
+  ticketClaims: Object.freeze({
+    title: 'Ticket Claims',
+    label: 'ticket claims',
+    currentKey: 'ticketClaims',
+    integer: true,
+    automaticLabel: 'automatic ticket claim tracking',
+    setContinuation: 'Future eligible ticket claims will continue increasing this total automatically.',
+  }),
+  trackedMessages: Object.freeze({
+    title: 'Tracked Messages',
+    label: 'tracked messages',
+    currentKey: 'trackedMessages',
+    integer: true,
+    automaticLabel: 'automatic tracked-message counting',
+    setContinuation: 'Future tracked staff messages will continue increasing this total automatically.',
+  }),
+  ticket: Object.freeze({
+    title: 'Ticket Points',
+    label: 'ticket points',
+    currentKey: 'ticketPoints',
+    integer: false,
+    automaticLabel: 'automatic ticket scoring',
+    setContinuation: 'Future eligible ticket claims will continue adding ticket points automatically.',
+  }),
+  message: Object.freeze({
+    title: 'Message Points',
+    label: 'message points',
+    currentKey: 'messagePoints',
+    integer: false,
+    automaticLabel: 'automatic message scoring',
+    setContinuation: 'Future tracked staff messages will continue adding message points automatically.',
+  }),
+});
+
 const PERIODS = Object.freeze({
   weekly: {
     label: 'Weekly',
@@ -748,17 +783,31 @@ function buildPointAdjustmentRow(
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(
+        `staffstats:setpoints:ticketClaims:${periodKey}:${filterKey}:${memberId}`,
+      )
+      .setLabel('Ticket Claims')
+      .setEmoji('🎫')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(
+        `staffstats:setpoints:trackedMessages:${periodKey}:${filterKey}:${memberId}`,
+      )
+      .setLabel('Tracked Messages')
+      .setEmoji('💬')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(
         `staffstats:setpoints:ticket:${periodKey}:${filterKey}:${memberId}`,
       )
-      .setLabel('Set Ticket Points')
-      .setEmoji('🎫')
+      .setLabel('Ticket Points')
+      .setEmoji('🎯')
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(
         `staffstats:setpoints:message:${periodKey}:${filterKey}:${memberId}`,
       )
-      .setLabel('Set Message Points')
-      .setEmoji('💬')
+      .setLabel('Message Points')
+      .setEmoji('📈')
       .setStyle(ButtonStyle.Secondary),
   );
 }
@@ -769,19 +818,29 @@ function buildPointAdjustmentModal(
   filterKey,
   memberId,
 ) {
-  const ticketMode =
-    pointType === 'ticket';
+  const config =
+    STAFF_METRIC_EDIT_CONFIG[
+      pointType
+    ];
+
+  if (!config) {
+    throw new Error(
+      'Invalid staff metric editor type.',
+    );
+  }
 
   const input =
     new TextInputBuilder()
       .setCustomId('points_value')
       .setLabel(
-        ticketMode
-          ? 'Ticket points (current total, -amount or AUTO)'
-          : 'Message points (current total, -amount or AUTO)',
+        config.integer
+          ? `${config.title} (total, -amount or AUTO)`
+          : `${config.title} (total, -amount or AUTO)`,
       )
       .setPlaceholder(
-        '50 = set total; -10 = remove; AUTO = reset',
+        config.integer
+          ? '109 = set total; -10 = remove; AUTO = reset'
+          : '50.5 = set total; -10 = remove; AUTO = reset',
       )
       .setStyle(TextInputStyle.Short)
       .setMinLength(1)
@@ -793,9 +852,7 @@ function buildPointAdjustmentModal(
       `staffstats:pointmodal:${pointType}:${periodKey}:${filterKey}:${memberId}`,
     )
     .setTitle(
-      ticketMode
-        ? 'Set Ticket Points'
-        : 'Set Message Points',
+      `Set ${config.title}`,
     )
     .addComponents(
       new ActionRowBuilder().addComponents(input),
@@ -927,12 +984,14 @@ function buildDetailEmbed({
       },
       {
         name: 'Tickets Claimed',
-        value: String(detail.claimTotal),
+        value:
+          `${row.ticketClaims.toLocaleString()}${row.ticketClaimsManual ? ' *(manual total)*' : ''}`,
         inline: true,
       },
       {
         name: 'Tracked Messages',
-        value: String(detail.messageTotal),
+        value:
+          `${row.trackedMessages.toLocaleString()}${row.trackedMessagesManual ? ' *(manual total)*' : ''}`,
         inline: true,
       },
       {
@@ -1231,7 +1290,7 @@ async function handleStaffTrackingInteraction(interaction) {
     ) {
       await interaction.reply({
         content:
-          'Only Administrators or staff-stat settings editors can adjust staff points.',
+          'Only Administrators or staff-stat settings editors can adjust staff stats.',
         flags:
           MessageFlags.Ephemeral,
       }).catch(() => {});
@@ -1270,7 +1329,7 @@ async function handleStaffTrackingInteraction(interaction) {
     ) {
       await interaction.reply({
         content:
-          'Only Administrators or staff-stat settings editors can adjust staff points.',
+          'Only Administrators or staff-stat settings editors can adjust staff stats.',
         flags:
           MessageFlags.Ephemeral,
       }).catch(() => {});
@@ -1298,6 +1357,21 @@ async function handleStaffTrackingInteraction(interaction) {
           .getTextInputValue('points_value')
           .trim();
 
+      const metricConfig =
+        STAFF_METRIC_EDIT_CONFIG[
+          pointType
+        ];
+
+      if (!metricConfig) {
+        await interaction.followUp({
+          content:
+            'That staff stat editor is no longer valid.',
+          flags:
+            MessageFlags.Ephemeral,
+        });
+        return true;
+      }
+
       let value = null;
       let removedAmount = null;
 
@@ -1305,35 +1379,112 @@ async function handleStaffTrackingInteraction(interaction) {
         rawValue.toLowerCase() !== 'auto'
       ) {
         value = Number(rawValue);
-        if (/^-/.test(rawValue) && Number.isFinite(value) && value < 0 && value >= -10000000) {
-          const [snapshot, settings, overrides] = await Promise.all([
-            getStaffSnapshot(interaction.guild.id, periodKey),
-            getStaffTrackingSettings(interaction.guild.id),
-            getStaffPointOverridesForPeriod(interaction.guild.id, periodKey),
-          ]);
-          const override = overrides.get(memberId) || null;
-          const livePoints = calculateStaffActivityPoints(
-            snapshot.claimCounts.get(memberId) || 0,
-            snapshot.messageCounts.get(memberId) || 0,
-            settings,
-            override,
-            periodKey,
+
+        const validNumber =
+          Number.isFinite(
+            value,
+          ) &&
+          value >=
+            -10000000 &&
+          value <=
+            10000000 &&
+          (
+            !metricConfig.integer ||
+            Number.isInteger(
+              value,
+            )
           );
-          const current = pointType === 'ticket'
-            ? livePoints.ticketPoints
-            : livePoints.messagePoints;
-          removedAmount = Math.min(current, -value);
-          value = Math.max(0, current + value);
+
+        if (!validNumber) {
+          await interaction.followUp({
+            content:
+              metricConfig.integer
+                ? 'Enter a whole-number total from **0** to **10,000,000**, a negative whole number to remove (for example `-10`), or `AUTO`.'
+                : 'Enter a total from **0** to **10,000,000**, a negative amount to remove points (for example `-10`), or `AUTO`. Decimals such as `-0.5` are allowed.',
+            flags:
+              MessageFlags.Ephemeral,
+          });
+          return true;
         }
 
         if (
-          !Number.isFinite(value) ||
-          value < 0 ||
-          value > 10000000
+          value <
+            0
+        ) {
+          const [
+            snapshot,
+            settings,
+            overrides,
+          ] =
+            await Promise.all([
+              getStaffSnapshot(
+                interaction.guild.id,
+                periodKey,
+              ),
+              getStaffTrackingSettings(
+                interaction.guild.id,
+              ),
+              getStaffPointOverridesForPeriod(
+                interaction.guild.id,
+                periodKey,
+              ),
+            ]);
+
+          const override =
+            overrides.get(
+              memberId,
+            ) ||
+            null;
+
+          const livePoints =
+            calculateStaffActivityPoints(
+              snapshot.claimCounts.get(
+                memberId,
+              ) || 0,
+              snapshot.messageCounts.get(
+                memberId,
+              ) || 0,
+              settings,
+              override,
+              periodKey,
+            );
+
+          const current =
+            Number(
+              livePoints[
+                metricConfig.currentKey
+              ],
+            ) || 0;
+
+          removedAmount =
+            Math.min(
+              current,
+              -value,
+            );
+
+          value =
+            Math.max(
+              0,
+              current +
+                value,
+            );
+        }
+
+        if (
+          value <
+            0 ||
+          value >
+            10000000 ||
+          (
+            metricConfig.integer &&
+            !Number.isInteger(
+              value,
+            )
+          )
         ) {
           await interaction.followUp({
             content:
-              'Enter a total from **0** to **10,000,000**, a negative amount to remove points (e.g. `-10`), or `AUTO`. Decimals such as `-0.5` are allowed.',
+              'That value is outside the allowed range.',
             flags:
               MessageFlags.Ephemeral,
           });
@@ -1367,16 +1518,16 @@ async function handleStaffTrackingInteraction(interaction) {
       await interaction.followUp({
         content:
           removedAmount !== null
-            ? `✅ Removed **${removedAmount.toLocaleString()}** ${pointType} points from <@${memberId}>. New total: **${value.toLocaleString()}**.`
+            ? `✅ Removed **${removedAmount.toLocaleString()}** ${metricConfig.label} from <@${memberId}>. New total: **${value.toLocaleString()}**.`
             : value === null
-            ? `✅ ${pointType === 'ticket' ? 'Ticket' : 'Message'} points returned to **automatic scoring** for <@${memberId}> (${PERIODS[periodKey].label}).`
-            : `✅ Set ${pointType === 'ticket' ? 'ticket' : 'message'} points to **${value.toLocaleString()}** for <@${memberId}> (${PERIODS[periodKey].label}). Future tracked activity will continue adding points automatically.`,
+              ? `✅ ${metricConfig.title} returned to **${metricConfig.automaticLabel}** for <@${memberId}> (${PERIODS[periodKey].label}).`
+              : `✅ Set ${metricConfig.label} to **${value.toLocaleString()}** for <@${memberId}> (${PERIODS[periodKey].label}). ${metricConfig.setContinuation}`,
         flags:
           MessageFlags.Ephemeral,
         allowedMentions: {
           parse: [],
         },
-      });
+      });;
     } catch (error) {
       console.error(
         '[STAFF POINT OVERRIDE ERROR]',
