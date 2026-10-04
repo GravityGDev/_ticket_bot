@@ -179,8 +179,15 @@ function withActivityPoints(
   row,
   pointSettings,
   pointOverride = null,
+  periodKey = 'lifetime',
 ) {
-  const points = calculateStaffActivityPoints(row.claims, row.messages, pointSettings, pointOverride);
+  const points = calculateStaffActivityPoints(
+    row.claims,
+    row.messages,
+    pointSettings,
+    pointOverride,
+    periodKey,
+  );
   return {
     ...row,
     ...points,
@@ -208,6 +215,7 @@ function sortLeaderboard(
   rows,
   pointSettings,
   pointOverrides = null,
+  periodKey = 'lifetime',
 ) {
   return rows
     .map((row) =>
@@ -219,6 +227,7 @@ function sortLeaderboard(
             pointOverrides?.get(
               row.member.id,
             ) || null,
+            periodKey,
           ),
     )
     .sort((a, b) => {
@@ -626,6 +635,7 @@ async function buildLeaderboardPayload(guild, state = {}) {
     ),
     pointSettings,
     pointOverrides,
+    periodKey,
   );
 
   const filteredRows = sortLeaderboard(
@@ -767,8 +777,8 @@ function buildPointAdjustmentModal(
       .setCustomId('points_value')
       .setLabel(
         ticketMode
-          ? 'Ticket points (total, -amount or AUTO)'
-          : 'Message points (total, -amount or AUTO)',
+          ? 'Ticket points (current total, -amount or AUTO)'
+          : 'Message points (current total, -amount or AUTO)',
       )
       .setPlaceholder(
         '50 = set total; -10 = remove; AUTO = reset',
@@ -1021,6 +1031,7 @@ async function buildDetailPayload(
     ),
     pointSettings,
     pointOverrides,
+    periodKey,
   );
 
   const filteredRows = sortLeaderboard(
@@ -1300,10 +1311,17 @@ async function handleStaffTrackingInteraction(interaction) {
             getStaffTrackingSettings(interaction.guild.id),
             getStaffPointOverridesForPeriod(interaction.guild.id, periodKey),
           ]);
-          const override = overrides.get(memberId);
+          const override = overrides.get(memberId) || null;
+          const livePoints = calculateStaffActivityPoints(
+            snapshot.claimCounts.get(memberId) || 0,
+            snapshot.messageCounts.get(memberId) || 0,
+            settings,
+            override,
+            periodKey,
+          );
           const current = pointType === 'ticket'
-            ? (override?.ticketPoints ?? ((snapshot.claimCounts.get(memberId) || 0) * settings.ticketClaimPoints))
-            : (override?.messagePoints ?? ((snapshot.messageCounts.get(memberId) || 0) * settings.trackedMessagePoints));
+            ? livePoints.ticketPoints
+            : livePoints.messagePoints;
           removedAmount = Math.min(current, -value);
           value = Math.max(0, current + value);
         }
@@ -1352,7 +1370,7 @@ async function handleStaffTrackingInteraction(interaction) {
             ? `✅ Removed **${removedAmount.toLocaleString()}** ${pointType} points from <@${memberId}>. New total: **${value.toLocaleString()}**.`
             : value === null
             ? `✅ ${pointType === 'ticket' ? 'Ticket' : 'Message'} points returned to **automatic scoring** for <@${memberId}> (${PERIODS[periodKey].label}).`
-            : `✅ Set ${pointType === 'ticket' ? 'ticket' : 'message'} points to **${value.toLocaleString()}** for <@${memberId}> (${PERIODS[periodKey].label}).`,
+            : `✅ Set ${pointType === 'ticket' ? 'ticket' : 'message'} points to **${value.toLocaleString()}** for <@${memberId}> (${PERIODS[periodKey].label}). Future tracked activity will continue adding points automatically.`,
         flags:
           MessageFlags.Ephemeral,
         allowedMentions: {
