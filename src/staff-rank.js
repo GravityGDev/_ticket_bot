@@ -339,49 +339,51 @@ async function renderRankCard(guild, member, periodKey) {
         ]
       : null;
 
+  const memberOverride =
+    pointOverrides?.get(
+      member.id,
+    ) ||
+    null;
+
+  const memberActivity =
+    calculateStaffActivityPoints(
+      tickets,
+      messages,
+      pointSettings,
+      memberOverride,
+      periodKey,
+    );
+
   const score =
     rankedRow
       ?.activityScore ??
-    (
-      tickets *
-        pointSettings.ticketClaimPoints +
-      messages *
-        pointSettings.trackedMessagePoints
-    );
+    memberActivity.activityScore;
 
+  // The two stat tiles are always activity COUNTS. Ticket/message points are
+  // separate scoring values used by Activity Score, XP and leaderboard rank.
   const displayedTicketValue =
-    rankedRow?.ticketPointsManual
-      ? rankedRow.ticketPoints
-      : tickets;
+    rankedRow?.ticketClaims ??
+    memberActivity.ticketClaims;
 
   const displayedMessageValue =
-    rankedRow?.messagePointsManual
-      ? rankedRow.messagePoints
-      : messages;
+    rankedRow?.trackedMessages ??
+    memberActivity.trackedMessages;
 
   const scoreValueFontSize = Math.min(68, Math.floor(210 / (score.toLocaleString().length * 0.65)));
   const ticketValueFontSize = Math.min(68, Math.floor(210 / (displayedTicketValue.toLocaleString().length * 0.65)));
   const messageValueFontSize = Math.min(68, Math.floor(210 / (displayedMessageValue.toLocaleString().length * 0.65)));
 
   const ticketStatLine1 =
-    rankedRow?.ticketPointsManual
-      ? 'TICKET'
-      : 'TICKETS';
+    'TICKETS';
 
   const ticketStatLine2 =
-    rankedRow?.ticketPointsManual
-      ? 'POINTS'
-      : 'CLAIMED';
+    'CLAIMED';
 
   const messageStatLine1 =
-    rankedRow?.messagePointsManual
-      ? 'MESSAGE'
-      : 'TRACKED';
+    'TRACKED';
 
   const messageStatLine2 =
-    rankedRow?.messagePointsManual
-      ? 'POINTS'
-      : 'MESSAGES';
+    'MESSAGES';
 
   const xp =
     getXpState(
