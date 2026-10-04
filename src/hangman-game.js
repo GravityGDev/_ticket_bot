@@ -407,6 +407,14 @@ async function handleSetup(interaction) {
 }
 
 async function openGuess(interaction, kind, id) {
+  if (!isOpenDevTicket(interaction.channel)) {
+    await interaction.reply({
+      content: 'Hangman guessing is paused while this Dev ticket is closed.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
   const game = await getMatchingGame(interaction, id);
 
   if (!game || game.status !== 'active') {
@@ -458,6 +466,13 @@ async function submitGuess(interaction, kind, id) {
   await interaction.deferReply({
     flags: MessageFlags.Ephemeral,
   });
+
+  if (!isOpenDevTicket(interaction.channel)) {
+    await interaction.editReply({
+      content: 'Hangman guessing is paused while this Dev ticket is closed.',
+    });
+    return true;
+  }
 
   return withLock(interaction.channelId, async () => {
     const game = await getMatchingGame(interaction, id);
