@@ -26,6 +26,53 @@ const VALID_PERIODS =
     GLOBAL_PERIOD,
   ]);
 
+const OVERRIDE_TYPES = Object.freeze({
+  ticket: Object.freeze({
+    valueField: 'ticketPoints',
+    baselineField: 'ticketPointsBaselines',
+    updatedByField: 'ticketPointsUpdatedBy',
+    updatedAtField: 'ticketPointsUpdatedAt',
+    metric: 'tickets',
+    rateSetting: 'ticketClaimPoints',
+    integer: false,
+  }),
+  message: Object.freeze({
+    valueField: 'messagePoints',
+    baselineField: 'messagePointsBaselines',
+    updatedByField: 'messagePointsUpdatedBy',
+    updatedAtField: 'messagePointsUpdatedAt',
+    metric: 'messages',
+    rateSetting: 'trackedMessagePoints',
+    integer: false,
+  }),
+  ticketClaims: Object.freeze({
+    valueField: 'ticketClaims',
+    baselineField: 'ticketClaimsBaselines',
+    updatedByField: 'ticketClaimsUpdatedBy',
+    updatedAtField: 'ticketClaimsUpdatedAt',
+    metric: 'tickets',
+    rateSetting: null,
+    integer: true,
+  }),
+  trackedMessages: Object.freeze({
+    valueField: 'trackedMessages',
+    baselineField: 'trackedMessagesBaselines',
+    updatedByField: 'trackedMessagesUpdatedBy',
+    updatedAtField: 'trackedMessagesUpdatedAt',
+    metric: 'messages',
+    rateSetting: null,
+    integer: true,
+  }),
+});
+
+function getOverrideConfig(
+  pointType,
+) {
+  return OVERRIDE_TYPES[
+    pointType
+  ] || null;
+}
+
 function hasCompleteBaselines(
   value,
 ) {
@@ -46,15 +93,23 @@ async function buildAutomaticBaselines(
   pointType,
   at = new Date(),
 ) {
-  const settings =
-    await getStaffTrackingSettings(
-      guildId,
+  const config =
+    getOverrideConfig(
+      pointType,
     );
 
-  const metric =
-    pointType === 'ticket'
-      ? 'tickets'
-      : 'messages';
+  if (!config) {
+    throw new Error(
+      'Invalid staff metric override type.',
+    );
+  }
+
+  const settings =
+    config.rateSetting
+      ? await getStaffTrackingSettings(
+          guildId,
+        )
+      : null;
 
   const counts =
     await Promise.all(
@@ -63,7 +118,7 @@ async function buildAutomaticBaselines(
           getStaffMetricCountAt(
             guildId,
             userId,
-            metric,
+            config.metric,
             periodKey,
             at,
           ),
@@ -71,13 +126,13 @@ async function buildAutomaticBaselines(
     );
 
   const rate =
-    pointType === 'ticket'
+    config.rateSetting
       ? Number(
-          settings.ticketClaimPoints,
+          settings?.[
+            config.rateSetting
+          ],
         ) || 0
-      : Number(
-          settings.trackedMessagePoints,
-        ) || 0;
+      : 1;
 
   return Object.fromEntries(
     POINT_PERIODS.map(
@@ -135,6 +190,44 @@ async function ensureAutomaticBaselines(
         document.userId,
         'message',
         document.messagePointsUpdatedAt ||
+          document.updatedAt ||
+          new Date(),
+      );
+  }
+
+  if (
+    Number.isFinite(
+      document.ticketClaims,
+    ) &&
+    !hasCompleteBaselines(
+      document.ticketClaimsBaselines,
+    )
+  ) {
+    updates.ticketClaimsBaselines =
+      await buildAutomaticBaselines(
+        document.guildId,
+        document.userId,
+        'ticketClaims',
+        document.ticketClaimsUpdatedAt ||
+          document.updatedAt ||
+          new Date(),
+      );
+  }
+
+  if (
+    Number.isFinite(
+      document.trackedMessages,
+    ) &&
+    !hasCompleteBaselines(
+      document.trackedMessagesBaselines,
+    )
+  ) {
+    updates.trackedMessagesBaselines =
+      await buildAutomaticBaselines(
+        document.guildId,
+        document.userId,
+        'trackedMessages',
+        document.trackedMessagesUpdatedAt ||
           document.updatedAt ||
           new Date(),
       );
@@ -258,6 +351,14 @@ function normalize(
       finiteOrNull(
         document.messagePoints,
       ),
+    ticketClaims:
+      finiteOrNull(
+        document.ticketClaims,
+      ),
+    trackedMessages:
+      finiteOrNull(
+        document.trackedMessages,
+      ),
     ticketPointsBaselines:
       document.ticketPointsBaselines &&
       typeof document.ticketPointsBaselines ===
@@ -285,6 +386,40 @@ function normalize(
                 periodKey,
                 finiteOrNull(
                   document.messagePointsBaselines[
+                    periodKey
+                  ],
+                ),
+              ],
+            ),
+          )
+        : null,
+    ticketClaimsBaselines:
+      document.ticketClaimsBaselines &&
+      typeof document.ticketClaimsBaselines ===
+        'object'
+        ? Object.fromEntries(
+            POINT_PERIODS.map(
+              (periodKey) => [
+                periodKey,
+                finiteOrNull(
+                  document.ticketClaimsBaselines[
+                    periodKey
+                  ],
+                ),
+              ],
+            ),
+          )
+        : null,
+    trackedMessagesBaselines:
+      document.trackedMessagesBaselines &&
+      typeof document.trackedMessagesBaselines ===
+        'object'
+        ? Object.fromEntries(
+            POINT_PERIODS.map(
+              (periodKey) => [
+                periodKey,
+                finiteOrNull(
+                  document.trackedMessagesBaselines[
                     periodKey
                   ],
                 ),
@@ -335,6 +470,56 @@ function normalize(
         : (
             Number.isFinite(
               document.messagePoints,
+            ) &&
+            document.updatedBy
+              ? String(
+                  document.updatedBy,
+                )
+              : null
+          ),
+    ticketClaimsUpdatedAt:
+      document.ticketClaimsUpdatedAt ||
+      (
+        Number.isFinite(
+          document.ticketClaims,
+        )
+          ? document.updatedAt ||
+            null
+          : null
+      ),
+    ticketClaimsUpdatedBy:
+      document.ticketClaimsUpdatedBy
+        ? String(
+            document.ticketClaimsUpdatedBy,
+          )
+        : (
+            Number.isFinite(
+              document.ticketClaims,
+            ) &&
+            document.updatedBy
+              ? String(
+                  document.updatedBy,
+                )
+              : null
+          ),
+    trackedMessagesUpdatedAt:
+      document.trackedMessagesUpdatedAt ||
+      (
+        Number.isFinite(
+          document.trackedMessages,
+        )
+          ? document.updatedAt ||
+            null
+          : null
+      ),
+    trackedMessagesUpdatedBy:
+      document.trackedMessagesUpdatedBy
+        ? String(
+            document.trackedMessagesUpdatedBy,
+          )
+        : (
+            Number.isFinite(
+              document.trackedMessages,
             ) &&
             document.updatedBy
               ? String(
@@ -819,16 +1004,14 @@ async function setStaffPointOverride(
   value,
   updatedBy,
 ) {
-  if (
-    ![
-      'ticket',
-      'message',
-    ].includes(
+  const config =
+    getOverrideConfig(
       pointType,
-    )
-  ) {
+    );
+
+  if (!config) {
     throw new Error(
-      'Invalid staff point override type.',
+      'Invalid staff metric override type.',
     );
   }
 
@@ -842,11 +1025,19 @@ async function setStaffPointOverride(
       value <
         0 ||
       value >
-        10000000
+        10000000 ||
+      (
+        config.integer &&
+        !Number.isInteger(
+          value,
+        )
+      )
     )
   ) {
     throw new Error(
-      'Invalid staff point override value.',
+      config.integer
+        ? 'Invalid staff count override value.'
+        : 'Invalid staff point override value.',
     );
   }
 
@@ -859,23 +1050,14 @@ async function setStaffPointOverride(
       userId,
     );
 
-  const field =
-    pointType ===
-      'ticket'
-      ? 'ticketPoints'
-      : 'messagePoints';
-
-  const updatedByField =
-    pointType ===
-      'ticket'
-      ? 'ticketPointsUpdatedBy'
-      : 'messagePointsUpdatedBy';
-
-  const updatedAtField =
-    pointType ===
-      'ticket'
-      ? 'ticketPointsUpdatedAt'
-      : 'messagePointsUpdatedAt';
+  const {
+    valueField:
+      field,
+    updatedByField,
+    updatedAtField,
+    baselineField,
+  } =
+    config;
 
   const now =
     new Date().toISOString();
@@ -898,12 +1080,6 @@ async function setStaffPointOverride(
         updatedBy,
       ),
   };
-
-  const baselineField =
-    pointType ===
-      'ticket'
-      ? 'ticketPointsBaselines'
-      : 'messagePointsBaselines';
 
   const baselines =
     value === null
@@ -955,6 +1131,14 @@ async function setStaffPointOverride(
         $exists:
           false,
       },
+      ticketClaims: {
+        $exists:
+          false,
+      },
+      trackedMessages: {
+        $exists:
+          false,
+      },
     });
   } else {
     await coll.updateOne(
@@ -987,7 +1171,7 @@ async function setStaffPointOverride(
   }
 
   console.log(
-    `[STAFF POINT OVERRIDE] ${userId}: ${pointType}=` +
+    `[STAFF METRIC OVERRIDE] ${userId}: ${pointType}=` +
       `${value === null ? 'AUTO' : value} (global) by ${updatedBy}.`,
   );
 
