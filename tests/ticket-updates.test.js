@@ -159,17 +159,3 @@ test('point deductions use existing overrides or automatic totals and clamp to z
   assert.deepEqual(await calculate('-999', 'ticket', null, interaction), { value: 0, removedAmount: 1.5 });
   assert.deepEqual(await calculate('AUTO', 'ticket', null, interaction), { value: null, removedAmount: null });
 });
-
-test('normal ticket delete accepts the developer or designated role', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../src/ticket-system.js'), 'utf8');
-  const body = source.slice(source.indexOf('async function deleteTicket('), source.indexOf('async function claimTicket('));
-  const condition = body.match(/if \(\s*(data\.typeKey !== 'report_staff'[\s\S]*?)\s*\) \{\s*await interaction\.reply/)[1];
-  const denied = new Function('data', 'interaction', 'member', 'isBotDeveloper', 'NORMAL_TICKET_DELETE_ROLE_ID', `return (${condition});`);
-  const developer = user => user.id === '1150135578378125383';
-  const check = (id, role, typeKey = 'general_inquiry') => denied({ typeKey }, { user: { id } }, { roles: { cache: { has: () => role } } }, developer, '950141448307740672');
-  assert.equal(check('1150135578378125383', false), false);
-  assert.equal(check('admin', true), false);
-  assert.equal(check('other', false), true);
-  // Report Staff deletion continues through its earlier dedicated checks.
-  assert.equal(check('other', false, 'report_staff'), false);
-});

@@ -1707,3 +1707,10 @@ Discord bot powered by:
 - discord.js
 - MongoDB
 - Sharp
+
+
+### Delete button permissions
+
+In `/permissions`, select **Delete normal tickets (button)** or **Delete Report Staff tickets (button)**, then choose the minimum staff role or **Developer only**. The selected role and higher hierarchy roles receive access. Settings persist across restarts. **Reset** restores the previous defaults: the designated normal-ticket deletion role, or Discord Administrator for Report Staff. The bot developer retains access, and the reported person cannot delete their own Report Staff ticket.
+
+These settings control bot Delete buttons. Discord's Manage Channels permission still controls manual channel deletion.

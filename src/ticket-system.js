@@ -45,6 +45,7 @@ const {
 
 const { ticketCreationDenial } = require('./ticket-access');
 const { deleteTicketChannel } = require('./ticket-deletion-audit');
+const { canMemberUseCommand, ticketDeletePermissionKey } = require('./staff-command-permissions');
 
 const TICKET_NAME_PREFIX = 'ticket-';
 const CLOSED_TICKET_NAME_PREFIX = 'closed-';
@@ -52,7 +53,6 @@ const ROLE_PAGE_SIZE = 25;
 const DELETE_COUNTDOWN_SECONDS = 5;
 const REPORT_STAFF_CATEGORY_ID = '1194859845426364497';
 const TICKET_ALERT_ROLE_ID = '950864708066476062';
-const NORMAL_TICKET_DELETE_ROLE_ID = '950141448307740672';
 const TICKET_ACTION_BYPASS_ROLE_IDS = Object.freeze([
   '1546436573724283020',
 ]);
@@ -8157,13 +8157,14 @@ function delay(ms) {
 }
 
 async function deleteTicket(interaction) {
+  await interaction.deferUpdate();
   const baseData = getTicketData(interaction.channel);
   const data =
     (await getLiveTicketData(interaction.channel).catch(() => null)) ||
     baseData;
 
   if (!data || !messageHasButton(interaction.message, 'ticket_delete')) {
-    await interaction.reply({
+    await interaction.followUp({
       content: 'These closed-ticket controls are no longer active.',
       flags: MessageFlags.Ephemeral,
     });
@@ -8176,36 +8177,31 @@ async function deleteTicket(interaction) {
     data.typeKey === 'report_staff' &&
     data.reportedStaffId === interaction.user.id
   ) {
-    await interaction.reply({
+    await interaction.followUp({
       content: 'You cannot delete a **Report Staff** ticket that is reporting you.',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  if (
-    data.typeKey === 'report_staff' &&
-    !member?.permissions.has(PermissionFlagsBits.Administrator)
-  ) {
-    await interaction.reply({
-      content: 'Only a server **Administrator** can delete a Report Staff ticket.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
+  let permitted = isBotDeveloper(interaction.user);
+  if (!permitted) {
+    try {
+      permitted = await canMemberUseCommand(member, ticketDeletePermissionKey(data.typeKey));
+    } catch (error) {
+      console.error('[TICKET DELETE PERMISSION ERROR]', error);
+      await interaction.followUp({
+        content: 'I could not check ticket deletion permissions. Please try again.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
   }
-
-  if (
-    data.typeKey !== 'report_staff' &&
-    !isBotDeveloper(interaction.user) &&
-    !member?.roles?.cache?.has(NORMAL_TICKET_DELETE_ROLE_ID)
-  ) {
-    await interaction.reply({
-      content:
-        `Only the bot developer or <@&${NORMAL_TICKET_DELETE_ROLE_ID}> can delete normal tickets.`,
+  if (!permitted) {
+    await interaction.followUp({
+      content: 'You do not have permission to delete this ticket. The bot developer can configure Delete button access in `/permissions`.',
       flags: MessageFlags.Ephemeral,
-      allowedMentions: {
-        parse: [],
-      },
+      allowedMentions: { parse: [] },
     });
     return;
   }
@@ -8229,8 +8225,6 @@ async function deleteTicket(interaction) {
     deletionRequestedById: interaction.user.id,
     deletionMethod: 'Delete button',
   };
-
-  await interaction.deferUpdate();
 
   const countdownEmbed = new EmbedBuilder()
     .setColor(0xed4245)

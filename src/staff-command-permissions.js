@@ -25,6 +25,21 @@ const COLLECTION_NAME =
   'staff_command_permissions';
 
 const COMMANDS_PER_PAGE = 20;
+const TICKET_DELETE_ROLE_ID = '950141448307740672';
+const TICKET_DELETE_ACTIONS = Object.freeze({
+  'button:ticket-delete': {
+    name: 'Delete normal tickets (button)',
+    description: 'Control who can use the Delete button on normal tickets.',
+  },
+  'button:report-staff-ticket-delete': {
+    name: 'Delete Report Staff tickets (button)',
+    description: 'Control Report Staff deletion. The reported user can never delete their own report.',
+  },
+});
+
+function ticketDeletePermissionKey(typeKey) {
+  return typeKey === 'report_staff' ? 'button:report-staff-ticket-delete' : 'button:ticket-delete';
+}
 
 // These commands are security-sensitive and cannot be delegated through the
 // configurable staff hierarchy.
@@ -86,6 +101,8 @@ const DEFAULT_MINIMUM_ROLE = Object.freeze({
 
   // The editor itself can never be delegated.
   'chat:permissions': null,
+  'button:ticket-delete': STAFF_ROLE_IDS.indexOf(TICKET_DELETE_ROLE_ID),
+  'button:report-staff-ticket-delete': STAFF_ROLE_IDS.indexOf(TICKET_DELETE_ROLE_ID),
 });
 
 // Unknown future commands default to the Lead Developer tier until the
@@ -148,6 +165,7 @@ function commandKeyFromInteraction(
 function commandDisplayName(
   commandKey,
 ) {
+  if (TICKET_DELETE_ACTIONS[commandKey]) return TICKET_DELETE_ACTIONS[commandKey].name;
   const [type, ...parts] =
     String(commandKey).split(':');
 
@@ -169,6 +187,7 @@ function commandDescriptionFromClient(
   client,
   commandKey,
 ) {
+  if (TICKET_DELETE_ACTIONS[commandKey]) return TICKET_DELETE_ACTIONS[commandKey].description;
   for (const command of client.commands.values()) {
     const json =
       command?.data?.toJSON?.();
@@ -425,6 +444,12 @@ function canMemberUseCommandSync(
     )
   ) {
     return true;
+  }
+
+  if (TICKET_DELETE_ACTIONS[commandKey] && !ensureGuildCache(member.guild.id).has(commandKey)) {
+    return commandKey === 'button:report-staff-ticket-delete'
+      ? Boolean(member.permissions?.has(PermissionFlagsBits.Administrator))
+      : Boolean(member.roles?.cache?.has(TICKET_DELETE_ROLE_ID));
   }
 
   const minimum =
@@ -732,7 +757,7 @@ function decodeCommandKey(
 function editableCommands(
   client,
 ) {
-  return [
+  const commands = [
     ...client.commands.values(),
   ]
     .map((command) =>
@@ -746,6 +771,9 @@ function editableCommands(
           json,
         ),
     }))
+    .concat(Object.entries(TICKET_DELETE_ACTIONS).map(([commandKey, action]) => ({
+      commandKey, json: { name: action.name, description: action.description },
+    })))
     .filter(
       (entry) =>
         entry.commandKey !==
@@ -763,6 +791,7 @@ function editableCommands(
         ),
       ),
     );
+  return commands;
 }
 
 async function roleName(
@@ -809,6 +838,11 @@ async function permissionSummary(
   guild,
   commandKey,
 ) {
+  if (TICKET_DELETE_ACTIONS[commandKey] && !ensureGuildCache(guild.id).has(commandKey)) {
+    return commandKey === 'button:report-staff-ticket-delete'
+      ? '**Default:** Discord **Administrator** permission or the bot developer. Select a minimum role to override this.'
+      : `**Default:** <@&${TICKET_DELETE_ROLE_ID}> or the bot developer. Select a minimum role to override this.`;
+  }
   const minimum =
     getMinimumRoleSync(
       guild.id,
@@ -925,7 +959,7 @@ async function buildPermissionPanel(
   const description = [
     notice || null,
     '**Inheritance rule**',
-    'Granting a command to any level automatically grants it to every staff level above it.',
+    'Granting a command or ticket action to any level automatically grants it to every staff level above it.',
     '',
     '**Hierarchy — lowest → highest**',
     await hierarchyText(
@@ -944,7 +978,7 @@ async function buildPermissionPanel(
         0x5865f2,
       )
       .setTitle(
-        '🔐 Staff Command Permissions',
+        '🔐 Staff Permissions',
       )
       .setDescription(
         description,
@@ -982,7 +1016,7 @@ async function buildPermissionPanel(
           ),
         )
         .setPlaceholder(
-          'Select a command to edit',
+          'Select a command or ticket action',
         )
         .setMinValues(1)
         .setMaxValues(1)
@@ -1421,6 +1455,8 @@ async function handleStaffPermissionInteraction(
 
 module.exports = {
   DEFAULT_MINIMUM_ROLE,
+  TICKET_DELETE_ACTIONS,
+  ticketDeletePermissionKey,
   commandKeyFromJson,
   commandKeyFromInteraction,
   commandDisplayName,
