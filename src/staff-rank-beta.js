@@ -121,7 +121,7 @@ async function fetchAvatarPng(member) {
   }
 }
 
-async function getRankRows(guild, snapshot, pointSettings, pointOverrides, hiddenStaffUserIds = []) {
+async function getRankRows(guild, snapshot, pointSettings, pointOverrides, hiddenStaffUserIds = [], periodKey = 'lifetime') {
   try {
     await guild.members.fetch();
   } catch (error) {
@@ -141,6 +141,7 @@ async function getRankRows(guild, snapshot, pointSettings, pointOverrides, hidde
         messages,
         pointSettings,
         pointOverride,
+        periodKey,
       );
 
       return { member, tickets, messages, ...points };
@@ -191,6 +192,7 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
     pointSettings,
     pointOverrides,
     pointSettings.hiddenStaffUserIds,
+    periodKey,
   );
 
   const rankIndex = rows.findIndex((row) => row.member.id === member.id);
