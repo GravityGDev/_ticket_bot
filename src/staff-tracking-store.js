@@ -1,5 +1,5 @@
-const { PermissionFlagsBits } = require('discord.js');
 const { getMongoDb } = require('./database');
+const { isStaffMember } = require('./staff-role-hierarchy');
 const {
   DEFAULT_TRACKED_CATEGORY_IDS,
   getStaffTrackingSettings,
@@ -61,7 +61,7 @@ async function initializeStaffTracking() {
   return indexesPromise;
 }
 
-function getPeriodStart(periodKey) {
+function getPeriodStart(periodKey, referenceTime = Date.now()) {
   if (periodKey === 'lifetime') return null;
 
   const days = {
@@ -70,7 +70,17 @@ function getPeriodStart(periodKey) {
     quarterly: 90,
   }[periodKey] || 7;
 
-  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const referenceMs =
+    referenceTime instanceof Date
+      ? referenceTime.getTime()
+      : new Date(referenceTime).getTime();
+
+  const safeReferenceMs =
+    Number.isFinite(referenceMs)
+      ? referenceMs
+      : Date.now();
+
+  return new Date(safeReferenceMs - days * 24 * 60 * 60 * 1000);
 }
 
 async function recordTicketClaim({
@@ -147,8 +157,10 @@ async function recordStaffActivityMessage(message) {
 
   if (!member) return false;
 
-  // The user specified that staff are identified by View Audit Log.
-  if (!member.permissions.has(PermissionFlagsBits.ViewAuditLog)) {
+  // Keep message scoring aligned with the bot's configured staff hierarchy.
+  // Requiring Discord View Audit Log here caused valid staff roles to stop
+  // earning message points when that native permission was not present.
+  if (!isStaffMember(member)) {
     return false;
   }
 
@@ -343,6 +355,66 @@ async function getStaffDetail(guildId, staffId, periodKey) {
   };
 }
 
+async function getStaffMetricCountAt(
+  guildId,
+  staffId,
+  metric,
+  periodKey = 'lifetime',
+  at = new Date(),
+) {
+  await initializeStaffTracking();
+
+  if (!['tickets', 'messages'].includes(metric)) {
+    throw new Error('Invalid staff metric.');
+  }
+
+  const end =
+    at instanceof Date
+      ? at
+      : new Date(at);
+
+  const safeEnd =
+    Number.isNaN(end.getTime())
+      ? new Date()
+      : end;
+
+  const filter = {
+    guildId: String(guildId),
+    staffId: String(staffId),
+  };
+
+  const dateField =
+    metric === 'tickets'
+      ? 'claimedAt'
+      : 'createdAt';
+
+  const dateFilter = {
+    $lte: safeEnd,
+  };
+
+  const start =
+    getPeriodStart(
+      periodKey,
+      safeEnd,
+    );
+
+  if (start) {
+    dateFilter.$gte = start;
+  }
+
+  filter[dateField] =
+    dateFilter;
+
+  const coll =
+    metric === 'tickets'
+      ? await claimsCollection()
+      : await activityCollection();
+
+  return coll.countDocuments(
+    filter,
+  );
+}
+
 async function getStaffMetricCount(guildId, staffId, metric, periodKey = 'lifetime') {
   await initializeStaffTracking();
 
@@ -381,5 +453,6 @@ module.exports = {
   getStaffSnapshot,
   getStaffDetail,
   getStaffMetricCount,
+  getStaffMetricCountAt,
   getCurrentTrackingRules,
 };
