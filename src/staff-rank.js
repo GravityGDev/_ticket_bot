@@ -137,6 +137,7 @@ async function getRankRows(
   pointSettings,
   pointOverrides,
   hiddenStaffUserIds = [],
+  periodKey = 'lifetime',
 ) {
   try {
     await guild.members.fetch();
@@ -189,7 +190,13 @@ async function getRankRows(
             member.id,
           ) || null;
 
-        const points = calculateStaffActivityPoints(tickets, messages, pointSettings, pointOverride);
+        const points = calculateStaffActivityPoints(
+          tickets,
+          messages,
+          pointSettings,
+          pointOverride,
+          periodKey,
+        );
         return { member, tickets, messages, ...points };
       },
     )
@@ -280,6 +287,7 @@ async function renderRankCard(guild, member, periodKey) {
       pointSettings,
       pointOverrides,
       pointSettings.hiddenStaffUserIds,
+      periodKey,
     );
 
   const rankIndex = rows.findIndex(
