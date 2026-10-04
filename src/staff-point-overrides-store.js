@@ -2,7 +2,7 @@ const {
   getMongoDb,
 } = require('./database');
 const {
-  getStaffSnapshot,
+  getStaffMetricCountAt,
 } = require('./staff-tracking-store');
 const {
   getStaffTrackingSettings,
@@ -44,24 +44,31 @@ async function buildAutomaticBaselines(
   guildId,
   userId,
   pointType,
+  at = new Date(),
 ) {
-  const [
-    settings,
-    snapshots,
-  ] = await Promise.all([
-    getStaffTrackingSettings(
+  const settings =
+    await getStaffTrackingSettings(
       guildId,
-    ),
-    Promise.all(
+    );
+
+  const metric =
+    pointType === 'ticket'
+      ? 'tickets'
+      : 'messages';
+
+  const counts =
+    await Promise.all(
       POINT_PERIODS.map(
         (periodKey) =>
-          getStaffSnapshot(
+          getStaffMetricCountAt(
             guildId,
+            userId,
+            metric,
             periodKey,
+            at,
           ),
       ),
-    ),
-  ]);
+    );
 
   const rate =
     pointType === 'ticket'
@@ -77,32 +84,10 @@ async function buildAutomaticBaselines(
       (
         periodKey,
         index,
-      ) => {
-        const snapshot =
-          snapshots[index];
-
-        const count =
-          pointType === 'ticket'
-            ? (
-                snapshot.claimCounts.get(
-                  String(
-                    userId,
-                  ),
-                ) || 0
-              )
-            : (
-                snapshot.messageCounts.get(
-                  String(
-                    userId,
-                  ),
-                ) || 0
-              );
-
-        return [
-          periodKey,
-          count * rate,
-        ];
-      },
+      ) => [
+        periodKey,
+        counts[index] * rate,
+      ],
     ),
   );
 }
@@ -130,6 +115,9 @@ async function ensureAutomaticBaselines(
         document.guildId,
         document.userId,
         'ticket',
+        document.ticketPointsUpdatedAt ||
+          document.updatedAt ||
+          new Date(),
       );
   }
 
@@ -146,6 +134,9 @@ async function ensureAutomaticBaselines(
         document.guildId,
         document.userId,
         'message',
+        document.messagePointsUpdatedAt ||
+          document.updatedAt ||
+          new Date(),
       );
   }
 
@@ -921,6 +912,7 @@ async function setStaffPointOverride(
           guildId,
           userId,
           pointType,
+          now,
         );
 
   if (
