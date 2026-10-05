@@ -9,6 +9,7 @@ const { calculateStaffActivityPoints } = require('./staff-activity-points');
 const {
   AttachmentBuilder,
   MessageFlags,
+  PermissionFlagsBits,
 } = require('discord.js');
 const { getStaffSnapshot } = require('./staff-tracking-store');
 const { getStaffTrackingSettings } = require('./staff-settings-store');
@@ -16,6 +17,7 @@ const {
   getStaffPointOverridesForPeriod,
 } = require('./staff-point-overrides-store');
 const {
+  getHighestStaffRoleId,
   isBotDeveloper,
   isStaffMember,
 } = require('./staff-role-hierarchy');
@@ -168,6 +170,22 @@ function nameFontSize(value) {
   return 44;
 }
 
+function identityFontSize(name, suffix) {
+  const length = String(name || '').length + String(suffix || '').length;
+  if (length <= 15) return 76;
+  if (length <= 20) return 68;
+  if (length <= 25) return 60;
+  if (length <= 31) return 52;
+  return 44;
+}
+
+function validRoleColor(value, fallback = '#58a6ff') {
+  const color = String(value || '').trim();
+  return /^#[0-9a-f]{6}$/i.test(color) && color.toLowerCase() !== '#000000'
+    ? color
+    : fallback;
+}
+
 function numberFontSize(value, max = 62) {
   const length = String(value).length;
   if (length <= 4) return max;
@@ -240,18 +258,45 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
 
   const starLevel = getStarLevel(member);
   const warningCount = getWarningCount(member);
-  const starText = starLevel === 2
-    ? '2-STAR MANAGEMENT'
-    : starLevel === 1
-      ? '1-STAR MANAGEMENT'
-      : 'STAFF';
-  const warningText = warningCount > 0
-    ? `${warningCount} WARNING ROLE${warningCount === 1 ? '' : 'S'}`
-    : 'NO WARNING ROLES';
+  const developer = isBotDeveloper(member);
+  const permissionLabel = developer
+    ? 'Dev'
+    : member.permissions?.has(PermissionFlagsBits.Administrator)
+      ? 'Admin'
+      : 'Mod';
+
+  const statusParts = [];
+  if (!developer && starLevel > 0) statusParts.push('★'.repeat(starLevel));
+  if (!developer && warningCount > 0) statusParts.push('⚠'.repeat(warningCount));
+
+  const identitySuffix = developer
+    ? ' • Dev'
+    : `${statusParts.length ? ` • ${statusParts.join(' ')}` : ''} • ${permissionLabel}`;
+
+  const highestStaffRoleId = getHighestStaffRoleId(member);
+  const highestStaffRole = highestStaffRoleId
+    ? member.roles.cache.get(highestStaffRoleId)
+    : null;
+  const highestStaffRoleName = safeCardText(
+    highestStaffRole?.name || (developer ? 'Developer' : permissionLabel),
+    developer ? 'Developer' : permissionLabel,
+  ).slice(0, 30);
+  const highestStaffRoleColor = validRoleColor(
+    highestStaffRole?.hexColor,
+    developer ? '#8b7cff' : '#58a6ff',
+  );
+  const permissionDetail = developer
+    ? 'BOT DEVELOPER'
+    : permissionLabel === 'Admin'
+      ? 'ADMIN PERMS'
+      : 'MOD PERMS';
 
   const displayRank = isRankHidden ? 'RANK HIDDEN' : `RANK #${rank}`;
   const rankFontSize = isRankHidden ? 42 : 56;
-  const displayNameFontSize = nameFontSize(normalizedDisplayName);
+  const displayNameFontSize = identityFontSize(
+    normalizedDisplayName,
+    identitySuffix,
+  );
   const ticketValueFontSize = numberFontSize(displayedTicketValue.toLocaleString());
   const messageValueFontSize = numberFontSize(displayedMessageValue.toLocaleString());
   const scoreValueFontSize = numberFontSize(score.toLocaleString());
@@ -259,20 +304,6 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
 
   const ticketPointLabel = `${pointSettings.ticketClaimPoints} pts / claim`;
   const messagePointLabel = `${pointSettings.trackedMessagePoints} pts / message`;
-  const starIcon = starLevel > 0
-    ? `<polygon points="142,536 154,564 185,566 161,585 169,616 142,598 115,616 123,585 99,566 130,564"
-        fill="#ffd15a" filter="url(#goldGlow)"/>`
-    : `<circle cx="142" cy="558" r="26" fill="#20d9d4" opacity=".16"/>
-       <circle cx="142" cy="558" r="12" fill="#38ded8"/>`;
-
-  const warningIcon = warningCount > 0
-    ? `<path d="M142 628L177 689H107L142 628Z" fill="#ffad4d" filter="url(#warmGlow)"/>
-       <rect x="138" y="647" width="8" height="23" rx="4" fill="#101624"/>
-       <circle cx="142" cy="679" r="4" fill="#101624"/>`
-    : `<circle cx="142" cy="664" r="31" fill="#58df9e" opacity=".13"/>
-       <circle cx="142" cy="664" r="25" fill="none" stroke="#58df9e" stroke-width="5"/>
-       <path d="M129 664l9 9 18-21" fill="none" stroke="#58df9e" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>`;
-
   const svg = `
   <svg width="1536" height="1024" viewBox="0 0 1536 1024" xmlns="http://www.w3.org/2000/svg">
     <defs>
@@ -346,11 +377,21 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
     <image href="${avatarData}" x="103" y="85" width="238" height="238" preserveAspectRatio="xMidYMid slice" clip-path="url(#avatarClip)"/>
     <circle cx="328" cy="304" r="18" fill="url(#accent)" stroke="#bffcff" stroke-width="2" filter="url(#softGlow)"/>
 
-    <text x="410" y="145" font-family="DejaVu Sans, sans-serif" font-size="${displayNameFontSize}" font-weight="800" fill="#ffffff">${displayName}</text>
+    <text x="410" y="145" font-family="DejaVu Sans, sans-serif" font-size="${displayNameFontSize}" font-weight="800">
+      <tspan fill="#ffffff">${displayName}</tspan>
+      ${developer
+        ? '<tspan fill="#8b7cff"> • Dev</tspan>'
+        : `${statusParts.length ? `<tspan fill="#ffd15a"> • ${escapeXml(statusParts.join(' '))}</tspan>` : ''}<tspan fill="#7ebdff"> • ${escapeXml(permissionLabel)}</tspan>`}
+    </text>
     <text x="412" y="194" font-family="DejaVu Sans, sans-serif" font-size="32" fill="#9fb0c9">${username}</text>
 
-    <rect x="1190" y="82" width="248" height="72" rx="36" fill="#08111f" stroke="url(#accent)" stroke-width="2.5" filter="url(#softGlow)"/>
-    <text x="1314" y="128" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="27" font-weight="800" fill="#ffffff">${period}</text>
+    <text x="1438" y="116" text-anchor="end"
+          font-family="DejaVu Sans, sans-serif"
+          font-size="25" font-weight="800" letter-spacing="1.2"
+          fill="#ffffff">${period}</text>
+    <line x1="1248" y1="137" x2="1438" y2="137"
+          stroke="url(#accent)" stroke-width="3" stroke-linecap="round"
+          opacity=".72"/>
 
     <path d="M452 236L497 262L497 316L452 342L407 316L407 262Z" fill="#07162a" stroke="#24dfea" stroke-width="4" filter="url(#softGlow)"/>
     <path d="M452 248L486 268L486 310L452 330L418 310L418 268Z" fill="#0b1d34" stroke="#4b8cff" stroke-opacity=".55" stroke-width="2"/>
@@ -382,17 +423,32 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
     </g>
     <text x="1416" y="449" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="25" fill="#8ea4c4">${progressPercent}%</text>
 
-    <rect x="72" y="510" width="488" height="96" rx="22" fill="url(#panel)" stroke="url(#panelBorder)" stroke-width="1.5"/>
-    <circle cx="142" cy="558" r="46" fill="#111727" stroke="#e5bc54" stroke-opacity=".15"/>
-    ${starIcon}
-    <line x1="197" y1="531" x2="197" y2="585" stroke="#70829d" stroke-opacity=".55"/>
-    <text x="220" y="568" font-family="DejaVu Sans, sans-serif" font-size="26" font-weight="800" fill="#2cddd9">${escapeXml(starText)}</text>
+    <!-- Highest staff role replaces bulky star/warning panels -->
+    <rect x="72" y="510" width="488" height="202" rx="26"
+          fill="url(#panel)" stroke="url(#panelBorder)" stroke-width="1.5"/>
+    <circle cx="143" cy="611" r="57"
+            fill="#071426" stroke="${highestStaffRoleColor}" stroke-width="3"
+            filter="url(#softGlow)"/>
+    <path d="M143 572l34 15v26c0 24-14 41-34 51-20-10-34-27-34-51v-26z"
+          fill="none" stroke="${highestStaffRoleColor}" stroke-width="4"
+          stroke-linejoin="round"/>
+    <path d="M128 614l10 10 21-24"
+          fill="none" stroke="${highestStaffRoleColor}" stroke-width="5"
+          stroke-linecap="round" stroke-linejoin="round"/>
 
-    <rect x="72" y="616" width="488" height="96" rx="22" fill="url(#panel)" stroke="url(#panelBorder)" stroke-width="1.5"/>
-    <circle cx="142" cy="664" r="46" fill="#171321" stroke="#ffad4d" stroke-opacity=".16"/>
-    ${warningIcon}
-    <line x1="197" y1="637" x2="197" y2="691" stroke="#70829d" stroke-opacity=".55"/>
-    <text x="220" y="674" font-family="DejaVu Sans, sans-serif" font-size="26" font-weight="800" fill="${warningCount ? '#ffb45d' : '#64dda0'}">${escapeXml(warningText)}</text>
+    <text x="222" y="558" font-family="DejaVu Sans, sans-serif"
+          font-size="20" font-weight="800" letter-spacing="3"
+          fill="#8397b6">HIGHEST STAFF ROLE</text>
+    <text x="222" y="612" font-family="DejaVu Sans, sans-serif"
+          font-size="34" font-weight="800"
+          fill="${highestStaffRoleColor}">${escapeXml(highestStaffRoleName)}</text>
+    <text x="222" y="655" font-family="DejaVu Sans, sans-serif"
+          font-size="22" font-weight="800"
+          fill="#c6d2e6">${escapeXml(permissionDetail)}</text>
+
+    <line x1="222" y1="679" x2="520" y2="679"
+          stroke="${highestStaffRoleColor}" stroke-width="2.5"
+          stroke-linecap="round" opacity=".65"/>
 
     <rect x="578" y="510" width="275" height="202" rx="24" fill="url(#panel)" stroke="url(#panelBorder)" stroke-width="1.5"/>
     <circle cx="648" cy="570" r="39" fill="#07182b" stroke="#1fe0e5" stroke-width="2.5" filter="url(#softGlow)"/>
