@@ -539,14 +539,12 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
     <text x="222" y="558" font-family="DejaVu Sans, sans-serif"
           font-size="20" font-weight="800" letter-spacing="3"
           fill="#8397b6">HIGHEST STAFF ROLE</text>
-    <text x="222" y="612" font-family="DejaVu Sans, sans-serif"
-          font-size="34" font-weight="800"
-          fill="${highestStaffRoleColor}">${escapeXml(highestStaffRoleName)}</text>
-    <text x="222" y="655" font-family="DejaVu Sans, sans-serif"
+    ${roleNameMarkup}
+    <text x="222" y="${roleTextLayout.permissionY}" font-family="DejaVu Sans, sans-serif"
           font-size="22" font-weight="800"
           fill="#c6d2e6">${escapeXml(permissionDetail)}</text>
 
-    <line x1="222" y1="679" x2="520" y2="679"
+    <line x1="222" y1="690" x2="520" y2="690"
           stroke="${highestStaffRoleColor}" stroke-width="2.5"
           stroke-linecap="round" opacity=".65"/>
 
@@ -578,7 +576,8 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
     <rect x="72" y="733" width="711" height="158" rx="24" fill="url(#panel)" stroke="url(#panelBorder)" stroke-width="1.5"/>
     <text x="126" y="778" font-family="DejaVu Sans, sans-serif" font-size="22" letter-spacing="3" fill="#9eb1ce">PERFORMANCE XP</text>
     <text x="126" y="849" font-family="DejaVu Sans, sans-serif" font-size="${totalXpFontSize}" font-weight="800">
-      <tspan fill="#29dfe3">${xp.totalXp.toLocaleString()}</tspan><tspan fill="#ffffff"> TOTAL XP</tspan>
+      <tspan fill="#29dfe3">${escapeXml(totalXpDisplay)}</tspan>
+      <tspan dx="18" fill="#ffffff">TOTAL XP</tspan>
     </text>
 
     <rect x="800" y="733" width="664" height="158" rx="24" fill="url(#panel)" stroke="url(#panelBorder)" stroke-width="1.5"/>
