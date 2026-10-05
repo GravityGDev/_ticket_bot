@@ -351,6 +351,11 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
       ? 'Admin'
       : 'Mod';
 
+  const permissionLabelColor =
+    permissionLabel === 'Admin'
+      ? '#ff5c5c'
+      : '#7ebdff';
+
   const statusParts = [];
   if (!developer && starLevel > 0) statusParts.push('★'.repeat(starLevel));
   if (!developer && warningCount > 0) statusParts.push('⚠'.repeat(warningCount));
@@ -481,7 +486,7 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
         ? '<tspan fill="#ffffff"> • </tspan><tspan fill="#8b7cff">Dev</tspan>'
         : `${statusParts
             .map((status) => `<tspan fill="#ffffff"> • </tspan><tspan fill="#ffd15a">${escapeXml(status)}</tspan>`)
-            .join('')}<tspan fill="#ffffff"> • </tspan><tspan fill="#7ebdff">${escapeXml(permissionLabel)}</tspan>`}
+            .join('')}<tspan fill="#ffffff"> • </tspan><tspan fill="${permissionLabelColor}">${escapeXml(permissionLabel)}</tspan>`}
     </text>
     <text x="412" y="194" font-family="DejaVu Sans, sans-serif" font-size="32" fill="#9fb0c9">${username}</text>
 
