@@ -478,8 +478,10 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
     <text x="410" y="145" font-family="DejaVu Sans, sans-serif" font-size="${displayNameFontSize}" font-weight="800">
       <tspan fill="#ffffff">${displayName}</tspan>
       ${developer
-        ? '<tspan fill="#8b7cff"> • Dev</tspan>'
-        : `${statusParts.length ? `<tspan fill="#ffd15a"> • ${escapeXml(statusParts.join(' '))}</tspan>` : ''}<tspan fill="#7ebdff"> • ${escapeXml(permissionLabel)}</tspan>`}
+        ? '<tspan fill="#ffffff"> • </tspan><tspan fill="#8b7cff">Dev</tspan>'
+        : `${statusParts
+            .map((status) => `<tspan fill="#ffffff"> • </tspan><tspan fill="#ffd15a">${escapeXml(status)}</tspan>`)
+            .join('')}<tspan fill="#ffffff"> • </tspan><tspan fill="#7ebdff">${escapeXml(permissionLabel)}</tspan>`}
     </text>
     <text x="412" y="194" font-family="DejaVu Sans, sans-serif" font-size="32" fill="#9fb0c9">${username}</text>
 
