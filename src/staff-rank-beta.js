@@ -377,6 +377,18 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
       ? 'ADMIN PERMS'
       : 'MOD PERMS';
 
+  const roleTextLayout = buildRoleTextLayout(highestStaffRoleName);
+  const roleNameMarkup = roleTextLayout.lines
+    .map(
+      (line, index) =>
+        `<text x="222" y="${roleTextLayout.lineYs[index]}" font-family="DejaVu Sans, sans-serif" ` +
+        `font-size="${roleTextLayout.fontSize}" font-weight="800" fill="${highestStaffRoleColor}">` +
+        `${escapeXml(line)}</text>`,
+    )
+    .join('\n    ');
+
+  const totalXpDisplay = formatCompactXp(xp.totalXp);
+
   const displayRank = isRankHidden ? 'RANK HIDDEN' : `RANK #${rank}`;
   const rankFontSize = isRankHidden ? 42 : 56;
   const displayNameFontSize = identityFontSize(
@@ -386,7 +398,7 @@ async function renderRankBetaCard(guild, member, periodKey = 'lifetime') {
   const ticketValueFontSize = numberFontSize(displayedTicketValue.toLocaleString());
   const messageValueFontSize = numberFontSize(displayedMessageValue.toLocaleString());
   const scoreValueFontSize = numberFontSize(score.toLocaleString());
-  const totalXpFontSize = numberFontSize(xp.totalXp.toLocaleString(), 66);
+  const totalXpFontSize = numberFontSize(totalXpDisplay, 66);
 
   const ticketPointLabel = `${pointSettings.ticketClaimPoints} pts / claim`;
   const messagePointLabel = `${pointSettings.trackedMessagePoints} pts / message`;
