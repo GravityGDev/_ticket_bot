@@ -186,6 +186,92 @@ function validRoleColor(value, fallback = '#58a6ff') {
     : fallback;
 }
 
+function truncateDecimal(value, places = 2) {
+  const factor = 10 ** places;
+  return Math.trunc((Number(value) || 0) * factor) / factor;
+}
+
+function formatCompactXp(value) {
+  const number = Math.max(0, Number(value) || 0);
+
+  const units = [
+    { threshold: 1_000_000_000, divisor: 1_000_000_000, suffix: 'b' },
+    { threshold: 1_000_000, divisor: 1_000_000, suffix: 'm' },
+    { threshold: 1_000, divisor: 1_000, suffix: 'k' },
+  ];
+
+  const unit = units.find((entry) => number >= entry.threshold);
+
+  if (!unit) {
+    return Number.isInteger(number)
+      ? number.toLocaleString()
+      : truncateDecimal(number, 2).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
+  const compact = truncateDecimal(number / unit.divisor, 2);
+  const formatted = compact
+    .toFixed(2)
+    .replace(/\.00$/, '')
+    .replace(/(\.\d)0$/, '$1');
+
+  return `${formatted}${unit.suffix}`;
+}
+
+function estimateSvgTextWidth(value, fontSize) {
+  return [...String(value || '')].length * Number(fontSize) * 0.58;
+}
+
+function fitRoleFontSize(value, maxWidth, maxSize = 34, minSize = 19) {
+  for (let size = maxSize; size >= minSize; size -= 1) {
+    if (estimateSvgTextWidth(value, size) <= maxWidth) return size;
+  }
+  return minSize;
+}
+
+function buildRoleTextLayout(value, maxWidth = 308) {
+  const text = String(value || '').trim();
+
+  const singleSize = fitRoleFontSize(text, maxWidth, 34, 23);
+  if (estimateSvgTextWidth(text, singleSize) <= maxWidth) {
+    return {
+      lines: [text],
+      fontSize: singleSize,
+      lineYs: [618],
+      permissionY: 662,
+    };
+  }
+
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= 1) {
+    return {
+      lines: [text],
+      fontSize: fitRoleFontSize(text, maxWidth, 23, 18),
+      lineYs: [618],
+      permissionY: 662,
+    };
+  }
+
+  let best = null;
+  for (let split = 1; split < words.length; split += 1) {
+    const first = words.slice(0, split).join(' ');
+    const second = words.slice(split).join(' ');
+    const longest = Math.max(first.length, second.length);
+    if (!best || longest < best.longest) best = { first, second, longest };
+  }
+
+  const lineSize = Math.min(
+    fitRoleFontSize(best.first, maxWidth, 29, 19),
+    fitRoleFontSize(best.second, maxWidth, 29, 19),
+  );
+
+  return {
+    lines: [best.first, best.second],
+    fontSize: lineSize,
+    lineYs: [604, 638],
+    permissionY: 678,
+  };
+}
+
 function numberFontSize(value, max = 62) {
   const length = String(value).length;
   if (length <= 4) return max;
