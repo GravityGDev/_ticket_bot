@@ -26,6 +26,9 @@ const COLLECTION_NAME =
 
 const COMMANDS_PER_PAGE = 20;
 const TICKET_DELETE_ROLE_ID = '950141448307740672';
+const SEARCH_BLACKLIST_MANAGER_USER_IDS = new Set([
+  '872570534519529512',
+]);
 const TICKET_DELETE_ACTIONS = Object.freeze({
   'button:ticket-delete': {
     name: 'Delete normal tickets (button)',
@@ -458,6 +461,19 @@ function canMemberUseCommandSync(
   if (
     isBotDeveloper(
       member,
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    commandKey === 'chat:search' &&
+    SEARCH_BLACKLIST_MANAGER_USER_IDS.has(
+      String(
+        member.id ||
+        member.user?.id ||
+        '',
+      ),
     )
   ) {
     return true;
