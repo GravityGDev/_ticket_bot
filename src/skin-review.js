@@ -33,6 +33,9 @@ const FILTER_BADGES = 'badges';
 const FILTER_APPROVED = 'approved';
 const FILTER_REJECTED = 'rejected';
 const BLACKLIST_MANAGER_PAGE_SIZE = 15;
+const BLACKLIST_MANAGER_USER_IDS = new Set([
+  '872570534519529512',
+]);
 
 // Approved / Rejected are reaction-based filters. Discord Search gives us the
 // matching messages quickly but not their reactions, so cache the filtered
@@ -1108,11 +1111,21 @@ async function sendSkinAccessDenied(
   }
 }
 
-function isSkinAdministrator(member) {
+function isSkinBlacklistManager(member) {
   return Boolean(
-    member?.permissions?.has(
-      PermissionFlagsBits.Administrator,
-    ),
+    member &&
+    (
+      member.permissions?.has(
+        PermissionFlagsBits.Administrator,
+      ) ||
+      BLACKLIST_MANAGER_USER_IDS.has(
+        String(
+          member.id ||
+          member.user?.id ||
+          '',
+        ),
+      )
+    )
   );
 }
 
@@ -1202,7 +1215,7 @@ async function requireBlacklistAdministrator(
   member,
 ) {
   if (
-    isSkinAdministrator(
+    isSkinBlacklistManager(
       member,
     )
   ) {
@@ -1211,7 +1224,7 @@ async function requireBlacklistAdministrator(
 
   await sendSkinAccessDenied(
     interaction,
-    'Only server **Administrators** can Blacklist or UnBlacklist IDs.',
+    'Only server **Administrators** or authorised blacklist managers can Blacklist or UnBlacklist IDs.',
   );
 
   return false;
@@ -3130,7 +3143,7 @@ function buildStaffSearchHomePanel() {
         .setDescription(
           `Search media posted in <#${SKIN_REVIEW_CHANNEL_ID}> by skin, clan, or badge ID.\n\n` +
             'You can **Approve** and **Reject** matching media.\n' +
-            'Blacklist management is available to Administrators only.',
+            'Blacklist management is available to Administrators and authorised blacklist managers.',
         )
         .setFooter({
           text:
@@ -3169,7 +3182,7 @@ async function executeSkinSearch(interaction, client) {
   if (!member) return;
 
   const canManageBlacklist =
-    isSkinAdministrator(
+    isSkinBlacklistManager(
       member,
     );
 
@@ -3335,7 +3348,7 @@ async function executeSkinContextSearch(
     // Do not await the full startup/backfill job here.
     // Interactive searches go directly to Discord Search API.
     const canManageBlacklist =
-      isSkinAdministrator(
+      isSkinBlacklistManager(
         member,
       );
 
@@ -3888,7 +3901,7 @@ async function rerenderInteraction(
       page,
       selectedKey,
       activeFilter,
-      isSkinAdministrator(
+      isSkinBlacklistManager(
         member,
       ),
     );
@@ -3911,7 +3924,7 @@ async function handleSkinReviewInteraction(interaction, client) {
   if (!member) return true;
 
   const canManageBlacklist =
-    isSkinAdministrator(
+    isSkinBlacklistManager(
       member,
     );
 
