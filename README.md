@@ -1727,3 +1727,9 @@ Rank cards, staff panels, team lists, report selectors, and goal checks share on
 Lifetime staff detail queries have no date cutoff, matching lifetime rank and leaderboard snapshots. Weekly, monthly, and quarterly detail queries retain their rolling Date cutoffs.
 
 Ticket setup saves now reuse `bot_settings` under `ticket_config:<guildId>`; existing `server_configs` setups remain readable. A database read failure reports a temporary loading error instead of incorrectly declaring the system unconfigured. If no saved setup exists, `TICKET_CATEGORY_ID` in Dokploy can restore ticket creation after verifying the category in that guild; it never grants assignable roles. Run `/ticket-panel reconfigure:true` to restore role choices if the saved setup has been lost.
+
+### Missing historical staff points after deployment
+
+Database selection uses a non-empty `MONGODB_DB_NAME` first, then a database explicitly named in `MONGODB_URI`, then the existing `snay_ticket_bot` default. The bot checks the spelling of an existing matching database with a read-only, authorized name lookup; it never switches to a different unrelated database. Restricted MongoDB accounts that cannot run this lookup continue using the configured name.
+
+Dokploy application/runtime logs now show `[MONGODB] Connected. Database: ...` followed by `[STAFF DATA CHECK]` with the guild's stored claim/message/override counts and whether scoring settings exist. Build logs do not show these lines. If historical stats remain absent, verify the original Atlas cluster URI and database name; earlier working logs for this deployment used `Snay_ticket_bot`. This fix does not reconstruct deleted records or import data from another cluster. Never reset or overwrite staff totals to investigate missing data.
