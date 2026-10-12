@@ -3,7 +3,7 @@ const {
   PermissionFlagsBits,
   SlashCommandBuilder,
 } = require('discord.js');
-const { sendRankCard } = require('../staff-rank');
+const { sendRankBetaCard } = require('../staff-rank-beta');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -47,7 +47,7 @@ module.exports = {
       return;
     }
 
-    await sendRankCard(
+    await sendRankBetaCard(
       interaction,
       interaction.options.getString('period') || 'lifetime',
     );

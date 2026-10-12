@@ -112,7 +112,7 @@ async function fetchAvatarPng(member) {
       .png()
       .toBuffer();
   } catch (error) {
-    console.error('[RANK BETA AVATAR ERROR]', error);
+    console.error('[RANK AVATAR ERROR]', error);
 
     return sharp(Buffer.from(`
       <svg width="320" height="320" xmlns="http://www.w3.org/2000/svg">
@@ -610,23 +610,11 @@ async function sendRankBetaCard(interaction, periodKey = 'lifetime') {
     return;
   }
 
-  if (!isBotDeveloper(interaction.user)) {
+  if (!interaction.__snayPermissionAuthorized &&
+      !interaction.memberPermissions?.has(PermissionFlagsBits.ViewAuditLog)) {
     await interaction.reply({
-      content: 'This beta rank card is currently developer-only.',
+      content: 'This command is available to staff with **View Audit Log** permission.',
       flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  const selectedUser = interaction.options?.getUser('staff') || null;
-  const targetId = selectedUser?.id || interaction.user.id;
-  const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-
-  if (!member || member.user.bot || !isStaffMember(member)) {
-    await interaction.reply({
-      content: `This user isn't Snay.io staff.`,
-      flags: MessageFlags.Ephemeral,
-      allowedMentions: { parse: [] },
     });
     return;
   }
@@ -634,24 +622,39 @@ async function sendRankBetaCard(interaction, periodKey = 'lifetime') {
   await interaction.deferReply();
 
   try {
+    const selectedUser = interaction.options?.getUser('staff') || null;
+    const targetId = selectedUser?.id || interaction.user.id;
+    const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+
+    if (!member || member.user.bot || !isStaffMember(member)) {
+      await interaction.editReply({
+        content: `This user isn't Snay.io staff.`,
+        allowedMentions: { parse: [] },
+      });
+      setTimeout(() => {
+        interaction.deleteReply().catch(() => {});
+      }, 3000);
+      return;
+    }
+
     const card = await renderRankBetaCard(interaction.guild, member, periodKey);
 
     console.log(
-      `[RANK BETA] Generated card for ${member.user.tag} (${member.id}) ` +
+      `[RANK] Generated card for ${member.user.tag} (${member.id}) ` +
       `requested by ${interaction.user.tag} (${interaction.user.id}); period=${periodKey}.`,
     );
 
     await interaction.editReply({
       files: [
         new AttachmentBuilder(card, {
-          name: `staff-rank-beta-${member.id}-${periodKey}.png`,
+          name: `staff-rank-${member.id}-${periodKey}.png`,
         }),
       ],
     });
   } catch (error) {
-    console.error('[RANK BETA CARD ERROR]', error);
+    console.error('[RANK CARD ERROR]', error);
     await interaction.editReply({
-      content: 'I could not generate the beta staff rank card.',
+      content: 'I could not generate your staff rank card.',
     });
   }
 }
