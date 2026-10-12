@@ -1,3 +1,4 @@
+const { ensureGuildMembers } = require('./guild-member-cache');
 const {
   configureRankFonts,
 } = require('./rank-font-runtime');
@@ -139,14 +140,7 @@ async function getRankRows(
   hiddenStaffUserIds = [],
   periodKey = 'lifetime',
 ) {
-  try {
-    await guild.members.fetch();
-  } catch (error) {
-    console.error(
-      '[RANK CARD MEMBER FETCH ERROR]',
-      error,
-    );
-  }
+  await ensureGuildMembers(guild);
 
   const hidden =
     new Set(

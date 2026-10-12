@@ -1719,3 +1719,11 @@ These settings control bot Delete buttons. Discord's Manage Channels permission 
 ### Manual points in rank cards and leaderboards
 
 Manual ticket and message point totals are displayed in their matching point categories on `/rank`, including zero and decimal values. Categories using automatic scoring retain their activity counts on the rank card. Leaderboard rows show total points plus separate ticket-point and message-point totals. Recorded claims and messages remain the actual activity counts in staff details. `AUTO` restores automatic scoring. Staff with only manual points are included as active staff, and long leaderboard pages preserve whole rows across multiple embed fields.
+
+### Member refreshes and lifetime staff details
+
+Rank cards, staff panels, team lists, report selectors, and goal checks share one full guild-member fetch. Concurrent requests reuse the same fetch; successful refreshes are reused for five minutes while Discord member events update the live cache. Failed refreshes use cached members and pause new full fetches for at least one minute, or longer if Discord sends a longer `retry_after`. A concise warning is logged once per failed refresh. On startup, a failed initial fetch may leave the roster incomplete until the next successful refresh.
+
+Lifetime staff detail queries have no date cutoff, matching lifetime rank and leaderboard snapshots. Weekly, monthly, and quarterly detail queries retain their rolling Date cutoffs.
+
+Ticket setup saves now reuse `bot_settings` under `ticket_config:<guildId>`; existing `server_configs` setups remain readable. A database read failure reports a temporary loading error instead of incorrectly declaring the system unconfigured. If no saved setup exists, `TICKET_CATEGORY_ID` in Dokploy can restore ticket creation after verifying the category in that guild; it never grants assignable roles. Run `/ticket-panel reconfigure:true` to restore role choices if the saved setup has been lost.

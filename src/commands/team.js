@@ -1,3 +1,4 @@
+const { ensureGuildMembers } = require('../guild-member-cache');
 const {
   EmbedBuilder,
   MessageFlags,
@@ -69,7 +70,7 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      await interaction.guild.members.fetch();
+      await ensureGuildMembers(interaction.guild);
 
       const groups =
         STAFF_ROLE_IDS.map(

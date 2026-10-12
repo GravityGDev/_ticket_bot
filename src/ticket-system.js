@@ -1,3 +1,4 @@
+const { ensureGuildMembers } = require('./guild-member-cache');
 const { createHash } = require('node:crypto');
 const { gzipSync } = require('node:zlib');
 const {
@@ -668,11 +669,7 @@ function getTypeInstructions(typeKey) {
 async function getReportableStaffMembers(guild, creatorId) {
   // Fetch the complete member list so the selector is not limited to whoever
   // happens to be cached after a restart.
-  try {
-    await guild.members.fetch();
-  } catch (error) {
-    console.error('[REPORT STAFF MEMBER FETCH ERROR]', error);
-  }
+  await ensureGuildMembers(guild);
 
   return [...guild.members.cache.values()]
     .filter(
@@ -2412,19 +2409,19 @@ function buildTicketWelcome(ticketNumber, creator, typeKey, options = {}) {
 async function getGuildConfig(guild) {
   if (!guild) return null;
 
-  let config;
-  try {
-    config = await getServerConfig(guild.id);
-  } catch (error) {
-    console.error(`[CONFIG READ ERROR] Failed to read ${CONFIG_PATH}:`, error);
-    return null;
+  // Do not turn a database/network outage into "not configured". The caller
+  // must report the actual failure instead of asking staff to reset the setup.
+  let config = await getServerConfig(guild.id);
+  if (!config) {
+    const categoryId = String(process.env.TICKET_CATEGORY_ID || '').trim();
+    if (!/^\d+$/.test(categoryId)) return null;
+    const category = guild.channels.cache?.get(categoryId) ||
+      await guild.channels.fetch(categoryId);
+    if (!category || category.type !== ChannelType.GuildCategory) return null;
+    // Recover creation from the explicitly configured deployment category.
+    // Never infer assignable roles from permission overwrites or other tickets.
+    config = { categoryId, roleIds: [], updatedAt: null, updatedBy: null };
   }
-
-  if (!config) return null;
-
-  const category = await guild.channels.fetch(config.categoryId).catch(() => null);
-  if (!category || category.type !== ChannelType.GuildCategory) return null;
-
   return config;
 }
 
@@ -2642,7 +2639,7 @@ async function handleSetupRoles(interaction) {
   } catch (error) {
     console.error('[TICKET CONFIG SAVE ERROR]', error);
     await interaction.update({
-      content: `I could not save the ticket configuration to the local config file. Check that \`${CONFIG_PATH}\` is writable.`,
+      content: `I could not save the ticket configuration to MongoDB. Check the database connection and write permissions for \`${CONFIG_PATH}\`.`,
       components: [],
     });
     return;
@@ -3511,7 +3508,17 @@ async function createTicket(interaction, typeKey) {
   let configuredCategoryId = REPORT_STAFF_CATEGORY_ID;
 
   if (!isReportStaff) {
-    const config = await getGuildConfig(guild);
+    let config;
+    try {
+      config = await getGuildConfig(guild);
+    } catch (error) {
+      console.error('[TICKET CONFIG READ ERROR]', error);
+      await interaction.editReply({
+        content: 'I could not load the ticket configuration. Please try again shortly. Staff should check the MongoDB connection and the configured ticket category in Dokploy.',
+        components: [],
+      });
+      return;
+    }
     if (!config) {
       await interaction.editReply({
         content: 'The ticket system has not been configured yet. A staff member needs to run `/ticket-panel` first.',

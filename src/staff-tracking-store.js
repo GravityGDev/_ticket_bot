@@ -252,6 +252,7 @@ async function getStaffDetail(guildId, staffId, periodKey) {
   await initializeStaffTracking();
 
   const start = getPeriodStart(periodKey);
+  const timeFilter = start ? { $gte: start } : null;
   const guildKey = String(guildId);
   const staffKey = String(staffId);
 
@@ -269,12 +270,12 @@ async function getStaffDetail(guildId, staffId, periodKey) {
     claims.countDocuments({
       guildId: guildKey,
       staffId: staffKey,
-      claimedAt: { $gte: start },
+      ...(timeFilter ? { claimedAt: timeFilter } : {}),
     }),
     activity.countDocuments({
       guildId: guildKey,
       staffId: staffKey,
-      createdAt: { $gte: start },
+      ...(timeFilter ? { createdAt: timeFilter } : {}),
     }),
     claims
       .aggregate([
@@ -282,7 +283,7 @@ async function getStaffDetail(guildId, staffId, periodKey) {
           $match: {
             guildId: guildKey,
             staffId: staffKey,
-            claimedAt: { $gte: start },
+            ...(timeFilter ? { claimedAt: timeFilter } : {}),
           },
         },
         {
@@ -298,7 +299,7 @@ async function getStaffDetail(guildId, staffId, periodKey) {
       .find({
         guildId: guildKey,
         staffId: staffKey,
-        claimedAt: { $gte: start },
+        ...(timeFilter ? { claimedAt: timeFilter } : {}),
       })
       .sort({ claimedAt: -1 })
       .limit(6)
@@ -309,7 +310,7 @@ async function getStaffDetail(guildId, staffId, periodKey) {
           $match: {
             guildId: guildKey,
             staffId: staffKey,
-            createdAt: { $gte: start },
+            ...(timeFilter ? { createdAt: timeFilter } : {}),
           },
         },
         {
@@ -327,7 +328,7 @@ async function getStaffDetail(guildId, staffId, periodKey) {
           $match: {
             guildId: guildKey,
             staffId: staffKey,
-            createdAt: { $gte: start },
+            ...(timeFilter ? { createdAt: timeFilter } : {}),
           },
         },
         {

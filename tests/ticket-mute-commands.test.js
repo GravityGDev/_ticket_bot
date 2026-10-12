@@ -49,7 +49,7 @@ function authorization(i, { allowed = true, member = true } = {}) {
     canMemberUseCommandSync: () => allowed,
     getHighestStaffRoleIndex: () => 10,
     getMinimumRoleSync: () => 10,
-    ADMINISTRATOR_ONLY_COMMANDS: new Set(), STAFF_ROLE_IDS: ['staff'],
+    ADMINISTRATOR_ONLY_COMMANDS: new Set(), DEVELOPER_ONLY_COMMANDS: new Set(), STAFF_ROLE_IDS: ['staff'],
     commandDisplayName: key => key,
   };
   if (i.guild) i.guild.members = { fetch: async () => {

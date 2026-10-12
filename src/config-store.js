@@ -1,7 +1,9 @@
 const { MONGODB_DB_NAME, getMongoDb } = require('./database');
 
 const COLLECTION_NAME = 'server_configs';
-const CONFIG_PATH = `MongoDB:${MONGODB_DB_NAME}.${COLLECTION_NAME}`;
+const SHARED_COLLECTION = 'bot_settings';
+const CONFIG_PATH = `MongoDB:${MONGODB_DB_NAME}.${SHARED_COLLECTION}`;
+const configId = guildId => `ticket_config:${String(guildId)}`;
 
 function normalizeGuildConfig(value) {
   if (!value || typeof value !== 'object') return null;
@@ -24,16 +26,21 @@ async function collection() {
 }
 
 async function getServerConfig(guildId) {
-  const document = await (await collection()).findOne({ _id: String(guildId) });
-  return document ? normalizeGuildConfig(document) : null;
+  const db = await getMongoDb();
+  const shared = await db.collection(SHARED_COLLECTION).findOne({ _id: configId(guildId) });
+  if (shared) return normalizeGuildConfig(shared);
+  // Keep existing setups readable. Reading an absent collection does not create
+  // it, and all new writes reuse bot_settings at the Atlas collection limit.
+  const legacy = await db.collection(COLLECTION_NAME).findOne({ _id: String(guildId) });
+  return normalizeGuildConfig(legacy);
 }
 
 async function setServerConfig(guildId, config) {
   const normalized = normalizeGuildConfig(config);
   if (!normalized) throw new Error('Invalid ticket server configuration.');
 
-  await (await collection()).updateOne(
-    { _id: String(guildId) },
+  await (await getMongoDb()).collection(SHARED_COLLECTION).updateOne(
+    { _id: configId(guildId) },
     {
       $set: {
         categoryId: normalized.categoryId,
@@ -49,6 +56,7 @@ async function setServerConfig(guildId, config) {
 }
 
 async function deleteServerConfig(guildId) {
+  await (await getMongoDb()).collection(SHARED_COLLECTION).deleteOne({ _id: configId(guildId) });
   await (await collection()).deleteOne({ _id: String(guildId) });
 }
 

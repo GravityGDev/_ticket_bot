@@ -39,6 +39,7 @@ async function rankFixture(override) {
       if (name === './staff-tracking-store') return { getStaffSnapshot: async () => snapshot };
       if (name === './staff-settings-store') return { getStaffTrackingSettings: async () => settings };
       if (name === './staff-point-overrides-store') return { getStaffPointOverridesForPeriod: async () => new Map(override ? [[member.id, override]] : []) };
+      if (name === './guild-member-cache') return require('../src/guild-member-cache');
       if (name === './staff-role-hierarchy') return { isStaffMember: () => true };
       throw Error(name);
     },
@@ -174,7 +175,7 @@ test('manual display counts are independent from ticket/message points and keep 
   assert.match(card.svg, />CLAIMED<\/text>/);
   assert.match(card.svg, />TRACKED<\/text>/);
   assert.match(card.svg, />MESSAGES<\/text>/);
-  assert.match(card.svg, />2097.5<\/text>/);
+  assert.match(card.svg, />2,097\.5<\/text>/);
 });
 
 test('leaderboard includes manual-only staff and shows matching point breakdowns', () => {

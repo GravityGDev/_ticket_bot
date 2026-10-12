@@ -1,3 +1,4 @@
+const { ensureGuildMembers } = require('./guild-member-cache');
 const {
   ActionRowBuilder,
   ButtonBuilder,
@@ -819,11 +820,7 @@ async function evaluateStaffGoalsForMember(guild, staffId) {
 async function evaluateAllStaffGoals(guild) {
   if (!guild) return;
 
-  try {
-    await guild.members.fetch();
-  } catch (error) {
-    console.error('[STAFF GOAL FULL MEMBER FETCH ERROR]', error);
-  }
+  await ensureGuildMembers(guild);
 
   const staff = [...guild.members.cache.values()].filter(
     (member) =>

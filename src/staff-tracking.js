@@ -1,3 +1,4 @@
+const { ensureGuildMembers } = require('./guild-member-cache');
 const { calculateStaffActivityPoints } = require('./staff-activity-points');
 const {
   ActionRowBuilder,
@@ -154,11 +155,7 @@ function getRoleMentions(member, roleIds) {
 }
 
 async function getCurrentStaffMembers(guild) {
-  try {
-    await guild.members.fetch();
-  } catch (error) {
-    console.error('[STAFF PANEL MEMBER FETCH ERROR]', error);
-  }
+  await ensureGuildMembers(guild);
 
   return [...guild.members.cache.values()]
     .filter(

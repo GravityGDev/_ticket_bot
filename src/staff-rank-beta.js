@@ -1,3 +1,4 @@
+const { ensureGuildMembers } = require('./guild-member-cache');
 const {
   configureRankFonts,
 } = require('./rank-font-runtime');
@@ -124,11 +125,7 @@ async function fetchAvatarPng(member) {
 }
 
 async function getRankRows(guild, snapshot, pointSettings, pointOverrides, hiddenStaffUserIds = [], periodKey = 'lifetime') {
-  try {
-    await guild.members.fetch();
-  } catch (error) {
-    console.error('[RANK BETA MEMBER FETCH ERROR]', error);
-  }
+  await ensureGuildMembers(guild);
 
   const hidden = new Set((hiddenStaffUserIds || []).map(String));
 
