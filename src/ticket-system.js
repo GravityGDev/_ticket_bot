@@ -2149,86 +2149,47 @@ async function pinTicketControlMessage(
   }
 }
 
-async function findTicketControlMessage(
-  channel,
-  data,
-) {
-  if (
-    data?.controlMessageId
-  ) {
-    const stored =
-      await channel.messages
-        .fetch(
-          data.controlMessageId,
-        )
-        .catch(() => null);
+function isTicketControlMessage(message, channel, data) {
+  if (message?.author?.id !== channel.client.user.id) return false;
+  if (messageHasButton(message, 'ticket_reopen') ||
+      messageHasButton(message, 'ticket_delete')) return false;
 
-    if (stored) {
-      return stored;
-    }
-  }
-
-  const pinned =
-    await channel.messages
-      .fetchPinned()
-      .catch(() => null);
-
-  if (pinned) {
-    const match =
-      pinned.find(
-        (message) =>
-          message.author?.id ===
-            channel.client.user.id &&
-          (
-            messageHasButton(
-              message,
-              'ticket_claim',
-            ) ||
-            messageHasButton(
-              message,
-              'ticket_assist',
-            ) ||
-            (
-              data?.typeKey ===
-                'report_staff' &&
-              messageHasButton(
-                message,
-                'ticket_close',
-              )
-            )
-          ),
-      );
-
-    if (match) {
-      return match;
-    }
-  }
-
-  const recent =
-    await channel.messages
-      .fetch({
-        limit: 50,
-      })
-      .catch(() => null);
-
-  return (
-    recent?.find(
-      (message) =>
-        message.author?.id ===
-          channel.client.user.id &&
-        (
-          messageHasButton(
-            message,
-            'ticket_claim',
-          ) ||
-          messageHasButton(
-            message,
-            'ticket_assist',
-          )
-        ),
-    ) ||
-    null
+  // Close deliberately removes every component. Legacy tickets and a fresh
+  // database can also lack controlMessageId, so identify the original welcome
+  // by its exact ticket footer rather than requiring buttons that no longer exist.
+  const welcomeFooter = data?.number != null && message.embeds?.some(
+    (embed) => String(embed.footer?.text || '').startsWith(
+      `Ticket #${data.number} • Created by `,
+    ),
   );
+  return Boolean(welcomeFooter ||
+    messageHasButton(message, 'ticket_claim') ||
+    messageHasButton(message, 'ticket_assist') ||
+    (data?.typeKey === 'report_staff' && messageHasButton(message, 'ticket_close')));
+}
+
+async function findTicketControlMessage(channel, data) {
+  if (data?.controlMessageId) {
+    const stored = await channel.messages.fetch(data.controlMessageId).catch(() => null);
+    if (stored?.author?.id === channel.client.user.id &&
+        !messageHasButton(stored, 'ticket_reopen') &&
+        !messageHasButton(stored, 'ticket_delete')) return stored;
+  }
+
+  const pinned = await channel.messages.fetchPinned().catch(() => null);
+  const pinnedMatch = pinned?.find(message => isTicketControlMessage(message, channel, data));
+  if (pinnedMatch) return pinnedMatch;
+
+  // Unpinned controls can be far older than the latest 50 messages.
+  let before;
+  while (true) {
+    const page = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+    const match = page.find(message => isTicketControlMessage(message, channel, data));
+    if (match) return match;
+    const nextBefore = page.last()?.id;
+    if (page.size < 100 || !nextBefore || nextBefore === before) return null;
+    before = nextBefore;
+  }
 }
 
 async function refreshClickedTicketControlMessage(
@@ -2278,12 +2239,8 @@ async function refreshTicketControlMessage(
   channel,
   data,
 ) {
-  if (
-    !data ||
-    data.typeKey ===
-      'report_staff'
-  ) {
-    return;
+  if (!data) {
+    return false;
   }
 
   const message =
@@ -2296,7 +2253,7 @@ async function refreshTicketControlMessage(
     console.warn(
       `[TICKET CONTROL] Could not find control message in ${channel.id}.`,
     );
-    return;
+    return false;
   }
 
   const remainingRows =
@@ -2317,9 +2274,16 @@ async function refreshTicketControlMessage(
         data.claimedById,
       ),
       ...remainingRows,
-      getTicketRenameButtonRow(),
+      ...(data.typeKey === 'report_staff' ? [] : [getTicketRenameButtonRow()]),
     ],
   });
+
+  if (data.controlMessageId !== message.id) {
+    await updateTicketTopic(channel, data, { controlMessageId: message.id },
+      'Recovered ticket welcome control message');
+    data.controlMessageId = message.id;
+  }
+  return true;
 }
 
 function getBottomPositionForCategory(category) {
@@ -4680,21 +4644,14 @@ async function reopenTicket(interaction) {
         error,
       );
     });
-
-    await refreshTicketControlMessage(
-      interaction.channel,
-      data,
-    ).catch((error) => {
-      console.error(
-        '[TICKET REOPEN CONTROL REFRESH ERROR]',
-        error,
-      );
-    });
   }
 
-  // Step 2: notify the creator. Do this before removing the staff controls so a
+  // Step 2: restore the open buttons and notify the creator. Do this before removing the staff controls so a
   // failed send never leaves the ticket with no way to retry reopening.
   try {
+    const controlsRestored = await refreshTicketControlMessage(interaction.channel, data);
+    if (!controlsRestored) throw new Error('Original ticket control message could not be restored');
+
     console.log('[TICKET REOPEN] Sending reopen notification...');
 
     const reopenedEmbed = new EmbedBuilder()
@@ -4715,7 +4672,7 @@ async function reopenTicket(interaction) {
 
     console.log('[TICKET REOPEN] Reopen notification sent.');
   } catch (error) {
-    console.error('[TICKET REOPEN NOTIFICATION ERROR]', error);
+    console.error('[TICKET REOPEN CONTROLS/NOTIFICATION ERROR]', error);
 
     // Best effort: put the creator back into the closed state because the reopen
     // did not complete. This prevents a half-open ticket.
@@ -4725,13 +4682,13 @@ async function reopenTicket(interaction) {
         ViewChannel: false,
         SendMessages: false,
       },
-      'Reopen rolled back after notification failure',
+      'Reopen rolled back after control or notification failure',
     ).catch((rollbackError) => {
       console.error('[TICKET REOPEN ROLLBACK ERROR]', rollbackError);
     });
 
     await interaction.editReply(
-      'I could not send the reopen notification, so the ticket was left closed and the staff controls are still available.',
+      'I could not restore the ticket buttons or send the reopen notification. The closed-ticket controls are still available so you can retry.',
     ).catch(() => {});
     return;
   }
