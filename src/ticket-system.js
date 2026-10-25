@@ -32,6 +32,7 @@ const { recordTicketClaim } = require('./staff-tracking-store');
 const { evaluateStaffGoalsForMember } = require('./staff-settings');
 const {
   STAFF_ROLE_IDS,
+  BOT_DEVELOPER_USER_ID,
   getHighestStaffRoleIndex,
   isStaffMember,
   isBotDeveloper,
@@ -149,7 +150,7 @@ const TICKET_TYPES = {
     slug: 'dev-test',
     emoji: '🧪',
     requiresInGameId: false,
-    restrictedToAdministrators: true,
+    restrictedToDeveloper: true,
     awardsClaimPoints: false,
   },
 };
@@ -524,8 +525,8 @@ function buildTicketTypeMenu(member) {
     )
       .filter(
         ([, type]) =>
-          !type.restrictedToAdministrators ||
-          canUseRestrictedTickets,
+          (!type.restrictedToDeveloper || isBotDeveloper(member)) &&
+          (!type.restrictedToAdministrators || canUseRestrictedTickets),
       )
       .map(
         ([value, type]) => ({
@@ -812,6 +813,27 @@ function buildInGameIdActionRow(creatorId, disabled = false) {
       .setEmoji('🆔')
       .setStyle(ButtonStyle.Primary)
       .setDisabled(disabled),
+  );
+}
+
+function buildDevTestPermissionOverwrites(guild, botId) {
+  const permissions = PermissionFlagsBits.ViewChannel |
+    PermissionFlagsBits.ReadMessageHistory | PermissionFlagsBits.SendMessages |
+    PermissionFlagsBits.AttachFiles | PermissionFlagsBits.EmbedLinks |
+    PermissionFlagsBits.AddReactions | PermissionFlagsBits.UseApplicationCommands;
+  return [
+    { id: guild.roles.everyone.id, type: 0, deny: PermissionFlagsBits.ViewChannel },
+    { id: BOT_DEVELOPER_USER_ID, type: 1, allow: permissions },
+    { id: botId, type: 1, allow: permissions | PermissionFlagsBits.ManageChannels |
+      PermissionFlagsBits.ManageMessages | PermissionFlagsBits.PinMessages },
+  ];
+}
+
+async function repairDevTestPrivacy(channel) {
+  // Replace the entire overwrite list: stale role/member allows must not survive.
+  await channel.permissionOverwrites.set(
+    buildDevTestPermissionOverwrites(channel.guild, channel.client.user.id),
+    'Dev test tickets are private to the bot developer',
   );
 }
 
@@ -1213,6 +1235,9 @@ async function setTicketStaffTyping(
   enabled,
   reason,
 ) {
+  if (getTicketData(channel)?.typeKey === 'dev_test' &&
+      String(staffId) !== BOT_DEVELOPER_USER_ID) return false;
+
   const id =
     String(
       staffId,
@@ -1381,6 +1406,11 @@ async function applyTicketStaffTypingState(
     data.typeKey ===
       'report_staff'
   ) {
+    return;
+  }
+
+  if (data.typeKey === 'dev_test') {
+    await repairDevTestPrivacy(channel);
     return;
   }
 
@@ -1577,6 +1607,15 @@ async function restoreOneTicketRuntimeState(
       recoveredAssistants:
         0,
     };
+  }
+
+  if (base.typeKey === 'dev_test') {
+    await repairDevTestPrivacy(channel);
+    if (!base.closedAt && !storedState?.closedAt &&
+        !channel.name.startsWith(CLOSED_TICKET_NAME_PREFIX)) {
+      await refreshTicketControlMessage(channel, { ...base, ...(storedState || {}) });
+    }
+    return { restored: true, repairedPermissions: 1, recoveredAssistants: 0 };
   }
 
   const live = {
@@ -3433,6 +3472,14 @@ async function createTicket(interaction, typeKey) {
           )
           .catch(() => null));
 
+  if (selectedType.restrictedToDeveloper && !isBotDeveloper(interaction.user)) {
+    await interaction.editReply({
+      content: '❌ Dev test tickets are only available to the bot developer.',
+      components: [], allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
   const creationDenial = await ticketCreationDenial(guild, creatorMember);
   if (creationDenial) {
     await interaction.editReply({ content: creationDenial, components: [], allowedMentions: { parse: [] } });
@@ -3580,7 +3627,9 @@ async function createTicket(interaction, typeKey) {
 
     try {
       permissionOverwrites =
-        isReportStaff
+        typeKey === 'dev_test'
+          ? buildDevTestPermissionOverwrites(guild, botMember.id)
+          : isReportStaff
           ? buildReportStaffPermissionOverwrites(
               guild,
               interaction.user.id,
@@ -3651,7 +3700,7 @@ async function createTicket(interaction, typeKey) {
     // This must be the first message in normal tickets so the staff alert is
     // delivered before the ticket welcome and controls. Report Staff remains
     // private and never pings the general ticket alert role.
-    if (!isReportStaff) {
+    if (!isReportStaff && typeKey !== 'dev_test') {
       await channel.send({
         content:
           `<@&${TICKET_ALERT_ROLE_ID}>`,
@@ -11964,6 +12013,7 @@ async function handleTicketMessageCreate(
     );
 
   if (!data) return false;
+  if (data.typeKey === 'dev_test') return false;
 
   if (!message.guild.members.cache.has(String(data.creatorId))) {
     try {
@@ -12362,6 +12412,16 @@ async function ignoreStaleTicketControlOutsideTicket(
 }
 
 async function handleTicketInteraction(interaction) {
+  if (interaction.customId?.startsWith('ticket_') &&
+      getTicketData(interaction.channel)?.typeKey === 'dev_test' &&
+      !isBotDeveloper(interaction.user)) {
+    await interaction.reply({
+      content: 'This dev test ticket is only available to the bot developer.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
   if (
     await ignoreStaleTicketControlOutsideTicket(
       interaction,

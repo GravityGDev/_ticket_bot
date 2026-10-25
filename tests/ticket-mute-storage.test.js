@@ -77,7 +77,7 @@ function typingFixture(member) {
   const calls = [];
   const context = {
     OverwriteType: { Member: 1 }, PermissionFlagsBits: { SendMessages: 2048n },
-    isTicketAdministrator: () => false, console: { warn() {}, error() {} },
+    getTicketData: () => null, isTicketAdministrator: () => false, console: { warn() {}, error() {} },
   };
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('async function setTicketStaffTyping('), source.indexOf('\nasync function ensureTicketSpeakerPermission(')) + '\nthis.run = setTicketStaffTyping;', context);
